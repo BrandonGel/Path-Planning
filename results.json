@@ -1,0 +1,9 @@
+{
+    "Algorithm": "a_star",
+    "Distance travelled by the robot": 88.4027500000011,
+    "Time taken (in sim time)": 66.4000000000005,
+    "Total angle rotates (in degrees)": 872.7032720374284,
+    "Maximum linear acceleration": 0.010000000000000009,
+    "Maximum angular acceleration": 1.6399109060016963,
+    "Mean curvature of the path (in m^-1)": 1.0155291089934975
+}

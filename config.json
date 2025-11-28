@@ -1,0 +1,14 @@
+{
+    "Configuration" : {
+        "algorithm" : "a_star",
+        "map_filepath" : "help3.png",
+        "processed" : "N" 
+    },
+
+    "Robot" : {
+        "robot_radius" : 1.0,
+        "maximum_linear_velocity" : 1.0,
+        "maximum_angular_velocity" : 1.57
+    }
+
+}
