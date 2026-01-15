@@ -1,0 +1,21 @@
+[project]
+name = "path-planning"
+version = "0.1.0"
+description = ""
+authors = [
+    {name = "Brandon Ho",email = "bho36@gatech.edu"}
+]
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "ipykernel (>=7.1.0,<8.0.0)",
+    "python-motion-planning (>=1.1.1,<2.0.0)"
+]
+
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["path_planning"]
