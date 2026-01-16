@@ -1,34 +1,24 @@
-import math
-import numpy as np
-from python_motion_planning.global_planner.sample_search.sample_search import SampleSearcher
-from scipy.spatial import KDTree
+import random
 from typing import List
-from python_motion_planning.utils import Env, Node
 
-class Node2:
-    """
-    Node class for dijkstra search
-    """
+import numpy as np
+from scipy.spatial import KDTree
+from python_motion_planning.common import  Node
+from python_motion_planning.path_planner import BasePathPlanner
+import heapq
 
-    def __init__(self, x, y, cost, parent_index):
-        self.x = x
-        self.y = y
-        self.cost = cost
-        self.parent_index = parent_index
-
-    def __str__(self):
-        return str(self.x) + "," + str(self.y) + "," +\
-               str(self.cost) + "," + str(self.parent_index)
     
-class PRM(SampleSearcher):
+class PRM(BasePathPlanner):
 
-    def __init__(self, start: tuple, goal: tuple, env: Env, num_sample = 3000, num_neighbors = 13.0, max_edge_len = 30.0) -> None:
-        super().__init__(start, goal, env)
+    def __init__(self,*args, num_sample = 3000, num_neighbors = 13.0, min_edge_len = 0.0, max_edge_len = 30.0,**kwargs) -> None:
+        super().__init__(*args, **kwargs)
 
         self.num_samples = num_sample
         self.num_neighbors = num_neighbors
+        self.min_edge_length = min_edge_len
         self.max_edge_length = max_edge_len
         self.sample_list = []
+        self.node_index_list = {}
         
 
     def __str__(self) -> str:
@@ -37,11 +27,8 @@ class PRM(SampleSearcher):
     def plan(self):
         self.sample_list = self.generateRandomNodes()
         self.road_map = self.generate_roadmap(samples=self.sample_list)
-        rx, ry,expand = self.dijkstra_planning(self.road_map, self.sample_list)
-        path = [(x,y) for (x,y) in zip(rx,ry)]
-        cost = self.calculatePathCost(path)
-
-        return cost, path, None
+        path, path_info = self.dijkstra_planning(self.road_map, self.sample_list)
+        return path, path_info
 
 
     def run(self):
@@ -55,10 +42,15 @@ class PRM(SampleSearcher):
         Returns:
             node (Node): a random node based on sampling
         """
+
+        point = []
+        # Generate random integer point within grid bounds
+        for d in range(self.dim):
+            d_min, d_max =self.map_.bounds[d][0] -0.5, self.map_.bounds[d][1] - 0.5
+            point.append(random.uniform(d_min, d_max))
+        point = tuple(point)
         
-        current = (np.random.uniform(self.delta, self.env.x_range - self.delta),
-                np.random.uniform(self.delta, self.env.y_range - self.delta))
-        return Node(current, None, 0, 0)
+        return Node(point, None, 0, 0)
     
     def generateRandomNodes(self) -> List[Node]:
         """
@@ -70,43 +62,28 @@ class PRM(SampleSearcher):
         nodes = []
         while len(nodes) != self.num_samples+1:
             node = self.generateRandomNode()
-            if not self.isInsideObs(node):
+            if self.map_.is_expandable(self.map_.point_float_to_int(node.current)):
                 nodes.append(node)
-        nodes.append(self.start)
-        nodes.append(self.goal)
+                self.node_index_list[node] = len(nodes) - 1
+        nodes.append(Node(self.start, None, 0, 0))
+        self.node_index_list[nodes[-1]] = len(nodes) - 1
+        nodes.append(Node(self.goal, None, 0, 0))
+        self.node_index_list[nodes[-1]] = len(nodes) - 1
         return nodes
-    
-    def calculatePathCost(self, path) -> float:
-        """
-        Calculate the total cost of the path.
-
-        Parameters:
-            path (List[Node]): List of nodes representing the path.
-
-        Returns:
-            float: Total cost of the path.
-        """
-        cost = 0.0
-        for i in range(1, len(path)):
-            cost += ((path[i][0] - path[i-1][0])**2 + (path[i][1] - path[i-1][1])**2)**0.5  # Assuming dist is a method to calculate distance between nodes
-        return cost
     
     def generate_roadmap(self, samples: List[Node]):
         road_map = []
-        sx, sy = [i.x for i in samples], [i.y for i in samples]
-        sample_kd_tree = KDTree(np.vstack((sx, sy)).T)
+        sample_kd_tree = KDTree(np.array([samp.current for samp in samples]))
 
-        for (i, ix, iy) in zip(range(len(samples)), sx, sy):
-            dists, indexes = sample_kd_tree.query([ix, iy], k=self.num_samples)
+        for i, node_s in zip(range(len(samples)), samples):
+            s_pos = node_s.current
+            dists, indexes = sample_kd_tree.query(s_pos, k=self.num_samples)
             edge_id = []
 
             for ii in range(1, len(indexes)):
-                nx = sx[indexes[ii]]
-                ny = sy[indexes[ii]]
-
-                node_ixiy = Node((ix,iy))
-                node_nxny = Node((nx,ny))
-                if not self.isCollision(node_ixiy, node_nxny) and ((ix - nx)**2 + (iy-ny)**2)**0.5 <= self.max_edge_length:
+                n_pos = samples[indexes[ii]].current
+                if not self.map_.in_collision(self.map_.point_float_to_int(s_pos), self.map_.point_float_to_int(n_pos)) \
+                    and self.get_cost(s_pos,n_pos) >= self.min_edge_length and self.get_cost(s_pos,n_pos) <= self.max_edge_length:
                     edge_id.append(indexes[ii])
 
                 if len(edge_id) >= self.num_neighbors:
@@ -117,74 +94,52 @@ class PRM(SampleSearcher):
         return road_map
 
     def dijkstra_planning(self, road_map, samples:List[Node]):
-        sx = self.start.x
-        sy = self.start.y
-        gx = self.goal.x
-        gy = self.goal.y
+        OPEN = []
+        # For Dijkstra, we only use g-value (no heuristic h-value)
+        start_node = Node(self.start, None, 0, 0)
+        heapq.heappush(OPEN, start_node)
+        CLOSED = dict()
+        
+        while OPEN:
+            node = heapq.heappop(OPEN)
 
-        sample_x = [i.x for i in samples]
-        sample_y = [i.y for i in samples]
+            # exists in CLOSED list
+            if node.current in CLOSED:
+                continue
 
-        start_node = Node2(sx, sy, 0.0, -1)
-        goal_node = Node2(gx, gy, 0.0, -1)
-
-        open_set, closed_set = dict(), dict()
-        open_set[len(road_map)-2] = start_node
-
-        path_found = True
-
-        while True:
-            if not open_set:
-                path_found = False
-                break
-
-            c_id = min(open_set, key=lambda o: open_set[o].cost)
-            current = open_set[c_id]
-
-            if c_id == (len(road_map) - 1):
-                goal_node.parent_index = current.parent_index
-                goal_node.cost = current.cost
-                break
-
-            # Remove the item from the open set
-            del open_set[c_id]
-            # Add it to the closed set
-            closed_set[c_id] = current
-            # expand search grid based on motion model
-            for i in range(len(road_map[c_id])):
-                n_id = road_map[c_id][i]
-                dx = sample_x[n_id] - current.x
-                dy = sample_y[n_id] - current.y
-                d = math.hypot(dx, dy)
-                node = Node2(sample_x[n_id], sample_y[n_id],
-                            current.cost + d, c_id)
-
-                if n_id in closed_set:
+            # goal found
+            if node.current == self.goal:
+                CLOSED[node.current] = node
+                path, length, cost = self.extract_path(CLOSED)
+                return path, {
+                    "success": True, 
+                    "start": self.start, 
+                    "goal": self.goal, 
+                    "length": length, 
+                    "cost": cost, 
+                    "expand": CLOSED
+                }
+            
+            for node_index in road_map[self.node_index_list[node]]: 
+                node_n = samples[node_index]
+                # exists in CLOSED list
+                if node_n.current in CLOSED:
                     continue
-                # Otherwise if it is already in the open set
-                if n_id in open_set:
-                    if open_set[n_id].cost > node.cost:
-                        open_set[n_id].cost = node.cost
-                        open_set[n_id].parent_index = c_id
-                else:
-                    open_set[n_id] = node
 
-        if path_found is False:
-            return [], [], []
+                # For Dijkstra, we only update g-value (no heuristic)
+                node_n.g = node.g + self.get_cost(node.current, node_n.current)
+                node_n.parent = node.current
 
-        # generate final course
-        rx, ry = [goal_node.x], [goal_node.y]
-        parent_index = goal_node.parent_index
-        while parent_index != -1:
-            n = closed_set[parent_index]
-            rx.append(n.x)
-            ry.append(n.y)
-            parent_index = n.parent_index
+                # goal found
+                if node_n.current == self.goal:
+                    heapq.heappush(OPEN, node_n)
+                    break
+                
+                # update OPEN list with node sorted by g-value
+                heapq.heappush(OPEN, node_n)
 
-        return rx, ry,closed_set
+            CLOSED[node.current] = node
 
+        self.failed_info[1]["expand"] = CLOSED
+        return self.failed_info
 
-    
-
-
-    

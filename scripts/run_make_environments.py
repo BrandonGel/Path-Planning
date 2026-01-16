@@ -1,40 +1,30 @@
-import python_motion_planning as pmp
-from path_planning.utils.util import convert_grid_to_yaml,convert_map_to_yaml
+from python_motion_planning.common import Grid, TYPES
+from path_planning.utils.util import convert_grid_to_yaml
+import random
+random.seed(0)
+import numpy as np
+np.random.seed(0)
 
-def make_grid_environment():
+def make_grid2d_map(filename: str = "path_planning/maps/2d/2d.yaml"):
     # Create environment with custom obstacles
-    env = pmp.Grid(51, 31)
-    obstacles = env.obstacles
-    for i in range(10, 21):
-        obstacles.add((i, 15))
-    for i in range(15):
-        obstacles.add((20, i))
-    for i in range(15, 30):
-        obstacles.add((30, i))
-    for i in range(16):
-        obstacles.add((40, i))
-    env.update(obstacles)
-    convert_grid_to_yaml(env,"path_planning/environment/grid/grid.yaml")
+    map_ = Grid(bounds=[[0, 51], [0, 31]])
+    map_.fill_boundary_with_obstacles()
+    map_.type_map[10:21, 15] = TYPES.OBSTACLE
+    map_.type_map[20, :15] = TYPES.OBSTACLE
+    map_.type_map[30, 15:] = TYPES.OBSTACLE
+    map_.type_map[40, :16] = TYPES.OBSTACLE
+    convert_grid_to_yaml(map_,filename)
 
-def make_map_environment():
+def make_grid3d_map(filename: str = "path_planning/maps/3d/3d.yaml"):
     # Create environment with custom obstacles
-    env = pmp.Map(51, 31)
-    obs_rect = [
-        [14, 12, 8, 2],
-        [18, 22, 8, 3],
-        [26, 7, 2, 12],
-        [32, 14, 10, 2]
-    ]
-    obs_circ = [
-        [7, 12, 3],
-        [46, 20, 2],
-        [15, 5, 2],
-        [37, 7, 3],
-        [37, 23, 3]
-    ]
-    env.update(obs_rect=obs_rect, obs_circ=obs_circ)
-    convert_map_to_yaml(env,"path_planning/environment/map/map.yaml")
+    map_ = Grid(bounds=[[0, 31], [0, 31], [0, 31]], resolution=1.0)
+    for i in range(75):     # 75 random obstacles
+        rd_p = tuple(np.random.randint(0, 30, size=3))
+        map_.type_map[rd_p[0], rd_p[1], :rd_p[2]] = TYPES.OBSTACLE
+    map_.inflate_obstacles(radius=3)
+    convert_grid_to_yaml(map_,filename)
+    
 
 if __name__ == "__main__":
-    make_grid_environment()
-    make_map_environment()
+    make_grid2d_map()
+    make_grid3d_map()
