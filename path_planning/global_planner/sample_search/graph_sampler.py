@@ -6,6 +6,7 @@ import numpy as np
 from scipy.spatial import KDTree, Delaunay
 from python_motion_planning.path_planner import BasePathPlanner
 from scipy.spatial.distance import cdist
+from itertools import product
 
 class GraphSampler(BasePathPlanner):
     def __init__(self,*args,num_sample,num_neighbors = 13.0, min_edge_len = 0.0, max_edge_len = 30.0,**kwargs):
@@ -29,7 +30,8 @@ class GraphSampler(BasePathPlanner):
         self.min_edge_length = min_edge_len
         self.max_edge_length = max_edge_len
         self.node_index_list = {}
-        self.road_map = []
+        self.start_nodes = {}
+        self.goal_nodes = {}
 
     def __str__(self) -> str:
         return "Graph Sampler"
@@ -52,8 +54,8 @@ class GraphSampler(BasePathPlanner):
             raise ValueError(f"Points must have dimension {dim}")
         
         # Convert to grid coordinates using map's point_float_to_int
-        p1_grid = np.array(self.map_.point_float_to_int(p1), dtype=int)
-        p2_grid = np.array(self.map_.point_float_to_int(p2), dtype=int)
+        p1_grid = np.array(self.map_.world_to_map(p1,discrete=True), dtype=int)
+        p2_grid = np.array(self.map_.world_to_map(p2,discrete=True), dtype=int)
         current_tile = p1_grid.copy()
         
         # Early exit: check start and end tiles first
@@ -124,7 +126,7 @@ class GraphSampler(BasePathPlanner):
         
         return False  # No collision found
 
-    def generateRandomNodes(self):
+    def generateRandomNodes(self, generate_grid_nodes = False):
         num_nodes = 0
         bounds = np.array(self.map_.bounds)
         nodes = []
@@ -134,20 +136,54 @@ class GraphSampler(BasePathPlanner):
             points = normalized_points * (bounds[:,1] - bounds[:,0]) + bounds[:,0]
             for point in points:
                 node = Node(tuple(point),None,0,0)
-                if self.map_.is_expandable(self.map_.point_float_to_int(node.current)):
+                if self.map_.is_expandable(self.map_.world_to_map(node.current,discrete=True)):
                     nodes.append(node)
                     self.node_index_list[node] = len(nodes) - 1
                     num_nodes += 1
                 if num_nodes == self.num_samples:
                     break
+
+        if generate_grid_nodes:
+            # Iterate through all grid points in the mesh
+            # Get grid shape (number of cells in each dimension)
+            if hasattr(self.map_, 'shape'):
+                grid_shape = self.map_.shape
+            else:
+                # Fallback: calculate shape from bounds and resolution
+                bounds = np.array(self.map_.bounds)
+                resolution = getattr(self.map_, 'resolution', 1.0)
+                grid_shape = tuple(int((bounds[d][1] - bounds[d][0]) / resolution) for d in range(self.map_.dim))
+            
+            # Generate all grid coordinate combinations using itertools.product
+            grid_ranges = [range(grid_shape[d]) for d in range(self.map_.dim)]
+            
+            # Iterate through all combinations of grid coordinates
+            for grid_coords in product(*grid_ranges):
+                # Convert to tuple for indexing
+                grid_coords_tuple = tuple(grid_coords)
+                
+                # Check if this grid cell is expandable (not in collision)
+                if self.map_.is_expandable(grid_coords_tuple):
+                    # Adjust the world coordinates to avoid precision and rounding issues
+                    world_coords = tuple(i - 1e-10 for i in self.map_.map_to_world(grid_coords_tuple))
+                    node = Node(world_coords, None, 0, 0)
+                    nodes.append(node)
+                    self.node_index_list[node] = len(nodes) - 1
+        
         for start in self.start:
             node = Node(tuple(start),None,0,0)
             nodes.append(node)
             self.node_index_list[node] = len(nodes) - 1
+            self.start_nodes[node] = len(nodes) - 1
         for goal in self.goal:
             node = Node(tuple(goal),None,0,0)
             nodes.append(node)
             self.node_index_list[node] = len(nodes) - 1
+            self.goal_nodes[node] = len(nodes) - 1
+        
+        # Update total node count after all nodes are added
+        self.num_total_nodes = len(nodes)
+        
         return nodes
 
     def generate_roadmap(self, samples: List[Node]):
@@ -162,8 +198,13 @@ class GraphSampler(BasePathPlanner):
             for ii in range(1, len(indexes)):
                 n_pos = samples[indexes[ii]].current
 
-                if not self.in_collision_dda(s_pos, n_pos)  \
-                    and self.get_cost(s_pos,n_pos) >= self.min_edge_length and self.get_cost(s_pos,n_pos) <= self.max_edge_length:
+                if self.get_cost(s_pos,n_pos) < self.min_edge_length:
+                    continue
+
+                if self.get_cost(s_pos,n_pos) > self.max_edge_length:
+                    break
+
+                if not self.in_collision_dda(s_pos, n_pos):
                     edge_id.append(indexes[ii])
 
                 if self.num_neighbors > 0 and len(edge_id) >= self.num_neighbors:
@@ -174,7 +215,7 @@ class GraphSampler(BasePathPlanner):
         return road_map
 
     def generate_planar_map(self, samples: List[Node]):
-        road_map = [[] for _ in range(len(samples))]
+        planar_map = [[] for _ in range(len(samples))]
         edge_list = {}
         points = np.array([samp.current for samp in samples])
         tri = Delaunay(points)
@@ -194,9 +235,9 @@ class GraphSampler(BasePathPlanner):
                 selected_edges.append(edge)
 
         for edge in selected_edges:
-            road_map[edge[0]].append(edge[1])
-            road_map[edge[1]].append(edge[0])
-        return road_map
+            planar_map[edge[0]].append(edge[1])
+            planar_map[edge[1]].append(edge[0])
+        return planar_map
 
     def plan(self):
         pass
