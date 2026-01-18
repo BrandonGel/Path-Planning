@@ -77,7 +77,7 @@ class PRM(BasePathPlanner):
 
         for i, node_s in zip(range(len(samples)), samples):
             s_pos = node_s.current
-            dists, indexes = sample_kd_tree.query(s_pos, k=self.num_samples)
+            dists, indexes = sample_kd_tree.query(s_pos, k=self.num_samples+2)
             edge_id = []
 
             for ii in range(1, len(indexes)):
