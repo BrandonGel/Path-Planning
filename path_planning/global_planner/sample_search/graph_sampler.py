@@ -17,6 +17,12 @@ class GraphSampler(BasePathPlanner):
         assert self.goal is not None, "Goal must not be None"
         assert isinstance(self.start, list), "Start must be a list"
         assert isinstance(self.goal, list), "Goal must be a list"
+        assert len(self.start) > 0, "Start list must not be empty"
+        assert len(self.goal) > 0, "Goal list must not be empty"
+        assert self.start[0] is not None, "First element of start must not be None"
+        assert self.goal[0] is not None, "First element of goal must not be None"
+        assert isinstance(self.start[0], tuple), "First element of start must be a tuple"
+        assert isinstance(self.goal[0], tuple), "First element of goal must be a tuple"
 
         self.num_samples = num_sample
         self.num_total_nodes = num_sample + len(self.start) + len(self.goal)
@@ -125,7 +131,7 @@ class GraphSampler(BasePathPlanner):
         bounds = np.array(self.map_.bounds)
         nodes = []
 
-        while num_nodes < self.num_samples:
+        while num_nodes < self.num_samples+1:
             normalized_points = np.random.random((self.num_samples,self.map_.dim))
             points = normalized_points * (bounds[:,1] - bounds[:,0]) + bounds[:,0]
             for point in points:
@@ -134,7 +140,7 @@ class GraphSampler(BasePathPlanner):
                     nodes.append(node)
                     self.node_index_list[node] = len(nodes) - 1
                     num_nodes += 1
-                if num_nodes >= self.num_samples:
+                if num_nodes == self.num_samples:
                     break
 
         if generate_grid_nodes:

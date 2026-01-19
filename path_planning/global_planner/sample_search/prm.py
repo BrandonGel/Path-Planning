@@ -10,10 +10,10 @@ import heapq
     
 class PRM(BasePathPlanner):
 
-    def __init__(self,*args, sample_num = 3000, num_neighbors = 13.0, min_edge_len = 0.0, max_edge_len = 30.0,**kwargs) -> None:
+    def __init__(self,*args, num_sample = 3000, num_neighbors = 13.0, min_edge_len = 0.0, max_edge_len = 30.0,**kwargs) -> None:
         super().__init__(*args, **kwargs)
 
-        self.sample_num = sample_num
+        self.num_samples = num_sample
         self.num_neighbors = num_neighbors
         self.min_edge_length = min_edge_len
         self.max_edge_length = max_edge_len
@@ -60,7 +60,7 @@ class PRM(BasePathPlanner):
             List[Node]: List of random nodes
         """
         nodes = []
-        while len(nodes) != self.sample_num+1:
+        while len(nodes) != self.num_samples+1:
             node = self.generateRandomNode()
             if self.map_.is_expandable(self.map_.point_float_to_int(node.current)):
                 nodes.append(node)
@@ -77,7 +77,7 @@ class PRM(BasePathPlanner):
 
         for i, node_s in zip(range(len(samples)), samples):
             s_pos = node_s.current
-            dists, indexes = sample_kd_tree.query(s_pos, k=self.sample_num+2)
+            dists, indexes = sample_kd_tree.query(s_pos, k=self.num_samples+2)
             edge_id = []
 
             for ii in range(1, len(indexes)):
