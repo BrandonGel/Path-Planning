@@ -17,7 +17,7 @@ Create custom visualization for 2D & 3D to show the roadmaps from the algorithms
 To recreate the conda environment [linux]
 ```
 conda env create -f environment.yml
-conda activate unity_python_env
+conda activate path_planning
 pip install poetry
 python -m pip install .
 ```
