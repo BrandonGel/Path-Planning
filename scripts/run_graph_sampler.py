@@ -1,14 +1,16 @@
+import random
+random.seed(0)
+
+import numpy as np
+np.random.seed(0)
+
 from path_planning.utils.util import read_grid_from_yaml
 from path_planning.global_planner.sample_search.graph_sampler import GraphSampler
 from path_planning.common.visualizer.visualizer_2d import Visualizer2D
 from path_planning.common.visualizer.visualizer_3d import Visualizer3D
 from python_motion_planning.common import TYPES
-import numpy as np
-import random
+import os
 import time
-
-random.seed(0)
-np.random.seed(0)
 
 def run_graph_sampler(map_,start,goal,generate_grid_nodes = True):
     for s in start:
@@ -36,6 +38,8 @@ def run_graph_sampler(map_,start,goal,generate_grid_nodes = True):
 
 
 if __name__ == "__main__":
+    os.makedirs('figs/graph_sampler',exist_ok=True)
+
     map_ =read_grid_from_yaml('path_planning/maps/2d/2d.yaml')
     map_.inflate_obstacles(radius=3)
     start = [(5.67,14.88),(44.67,14.88)]
