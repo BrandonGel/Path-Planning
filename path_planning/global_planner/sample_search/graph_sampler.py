@@ -5,37 +5,79 @@ from typing import List
 import numpy as np
 from scipy.spatial import KDTree, Delaunay
 from python_motion_planning.path_planner import BasePathPlanner
+from python_motion_planning.common.env.map.grid import Grid
 from scipy.spatial.distance import cdist
 from itertools import product
 
-class GraphSampler(BasePathPlanner):
-    def __init__(self,*args,num_sample,num_neighbors = 13.0, min_edge_len = 0.0, max_edge_len = 30.0,**kwargs):
+class GraphSampler(Grid):
+    def __init__(self,*args,start,goal,sample_num=0,num_neighbors = 13.0, min_edge_len = 0.0, max_edge_len = 30.0,**kwargs):
         super().__init__(*args, **kwargs)
 
         # Check if start and goal are lists, non-empty, and not None
-        assert self.start is not None, "Start must not be None"
-        assert self.goal is not None, "Goal must not be None"
-        assert isinstance(self.start, list), "Start must be a list"
-        assert isinstance(self.goal, list), "Goal must be a list"
-        assert len(self.start) > 0, "Start list must not be empty"
-        assert len(self.goal) > 0, "Goal list must not be empty"
-        assert self.start[0] is not None, "First element of start must not be None"
-        assert self.goal[0] is not None, "First element of goal must not be None"
-        assert isinstance(self.start[0], tuple), "First element of start must be a tuple"
-        assert isinstance(self.goal[0], tuple), "First element of goal must be a tuple"
-
-        self.num_samples = num_sample
-        self.num_total_nodes = num_sample + len(self.start) + len(self.goal)
+        assert start is not None, "Start must not be None"
+        assert goal is not None, "Goal must not be None"
+        assert isinstance(start, list), "Start must be a list"
+        assert isinstance(goal, list), "Goal must be a list"
+        self.start = start
+        self.goal = goal
+        self.sample_num = sample_num
+        self.num_total_nodes = sample_num + len(self.start) + len(self.goal)
         self.num_neighbors = num_neighbors
         self.min_edge_length = min_edge_len
         self.max_edge_length = max_edge_len
+        self.cost_matrix = None
         self.node_index_list = {}
         self.start_nodes = {}
         self.goal_nodes = {}
 
     def __str__(self) -> str:
         return "Graph Sampler"
+
+    def set_parameters(self, sample_num, num_neighbors, min_edge_len, max_edge_len):
+        self.sample_num = sample_num
+        self.num_neighbors = num_neighbors
+        self.min_edge_length = min_edge_len
+        self.max_edge_length = max_edge_len
+
+    def set_start(self, start):
+        self.start = start
+
+    def set_goal(self, goal):
+        self.goal = goal
     
+
+    def get_cost(self, p1_node: tuple, p2_node: tuple) -> float:
+        """
+        Get the cost between two nodes. (default: distance defined in the map)
+
+        Args:
+            p1: Start node.
+            p2: Goal node.
+        """
+        if self.cost_matrix is None:
+            
+            return self.get_distance(p1_node.current, p2_node.current)
+        else:
+            p1_index = self.node_index_list[p1_node]
+            p2_index = self.node_index_list[p2_node]
+            return self.cost_matrix[p1_index, p2_index]
+
+    def in_collision(self, p1: Tuple[float, ...]) -> bool:
+        """
+        Check if the point is in collision.
+        
+        Args:
+            p1: Point in continuous (world) coordinates
+        
+        Returns:
+            in_collision: True if the point is in collision, False otherwise
+        """
+        p1_grid = np.array(self.world_to_map(p1,discrete=True), dtype=int)
+        if not self.is_expandable(p1_grid) :
+            return True
+
+        return False
+        
     def in_collision_dda(self, p1: Tuple[float, ...], p2: Tuple[float, ...]) -> bool:
         """
         Check if the line of sight between two continuous (world) points is in collision
@@ -49,17 +91,17 @@ class GraphSampler(BasePathPlanner):
         Returns:
             in_collision: True if any tile along the line is in collision, False otherwise
         """
-        dim = self.map_.dim
+        dim = self.dim
         if len(p1) != dim or len(p2) != dim:
             raise ValueError(f"Points must have dimension {dim}")
         
         # Convert to grid coordinates using map's point_float_to_int
-        p1_grid = np.array(self.map_.world_to_map(p1,discrete=True), dtype=int)
-        p2_grid = np.array(self.map_.world_to_map(p2,discrete=True), dtype=int)
+        p1_grid = np.array(self.world_to_map(p1,discrete=True), dtype=int)
+        p2_grid = np.array(self.world_to_map(p2,discrete=True), dtype=int)
         current_tile = p1_grid.copy()
         
         # Early exit: check start and end tiles first
-        if not self.map_.is_expandable(tuple(p1_grid)) or not self.map_.is_expandable(tuple(p2_grid)):
+        if not self.is_expandable(tuple(p1_grid)) or not self.is_expandable(tuple(p2_grid)):
             return True
         
         # Early exit if start and end are in the same tile
@@ -121,41 +163,41 @@ class GraphSampler(BasePathPlanner):
             tile_tuple = tuple(current_tile)
             if tile_tuple not in seen:
                 seen.add(tile_tuple)
-                if not self.map_.is_expandable(tile_tuple):
+                if not self.is_expandable(tile_tuple):
                     return True  # Found collision, terminate early
         
         return False  # No collision found
 
     def generateRandomNodes(self, generate_grid_nodes = False):
         num_nodes = 0
-        bounds = np.array(self.map_.bounds)
+        bounds = np.array(self.bounds)
         nodes = []
 
-        while num_nodes < self.num_samples+1:
-            normalized_points = np.random.random((self.num_samples,self.map_.dim))
+        while num_nodes < self.sample_num:
+            normalized_points = np.random.random((self.sample_num,self.dim))
             points = normalized_points * (bounds[:,1] - bounds[:,0]) + bounds[:,0]
             for point in points:
                 node = Node(tuple(point),None,0,0)
-                if self.map_.is_expandable(self.map_.world_to_map(node.current,discrete=True)):
+                if self.is_expandable(self.world_to_map(node.current,discrete=True)):
                     nodes.append(node)
                     self.node_index_list[node] = len(nodes) - 1
                     num_nodes += 1
-                if num_nodes == self.num_samples:
+                if num_nodes == self.sample_num:
                     break
 
         if generate_grid_nodes:
             # Iterate through all grid points in the mesh
             # Get grid shape (number of cells in each dimension)
-            if hasattr(self.map_, 'shape'):
-                grid_shape = self.map_.shape
+            if hasattr(self, 'shape'):
+                grid_shape = self.shape
             else:
                 # Fallback: calculate shape from bounds and resolution
-                bounds = np.array(self.map_.bounds)
-                resolution = getattr(self.map_, 'resolution', 1.0)
-                grid_shape = tuple(int((bounds[d][1] - bounds[d][0]) / resolution) for d in range(self.map_.dim))
+                bounds = np.array(self.bounds)
+                resolution = getattr(self, 'resolution', 1.0)
+                grid_shape = tuple(int((bounds[d][1] - bounds[d][0]) / resolution) for d in range(self.dim))
             
             # Generate all grid coordinate combinations using itertools.product
-            grid_ranges = [range(grid_shape[d]) for d in range(self.map_.dim)]
+            grid_ranges = [range(grid_shape[d]) for d in range(self.dim)]
             
             # Iterate through all combinations of grid coordinates
             for grid_coords in product(*grid_ranges):
@@ -163,9 +205,9 @@ class GraphSampler(BasePathPlanner):
                 grid_coords_tuple = tuple(grid_coords)
                 
                 # Check if this grid cell is expandable (not in collision)
-                if self.map_.is_expandable(grid_coords_tuple):
+                if self.is_expandable(grid_coords_tuple):
                     # Adjust the world coordinates to avoid precision and rounding issues
-                    world_coords = tuple(i - 1e-10 for i in self.map_.map_to_world(grid_coords_tuple))
+                    world_coords = tuple(i - 1e-10 for i in self.map_to_world(grid_coords_tuple))
                     node = Node(world_coords, None, 0, 0)
                     nodes.append(node)
                     self.node_index_list[node] = len(nodes) - 1
@@ -183,7 +225,7 @@ class GraphSampler(BasePathPlanner):
         
         # Update total node count after all nodes are added
         self.num_total_nodes = len(nodes)
-        
+        self.cost_matrix = cdist(np.array([node.current for node in nodes]), np.array([node.current for node in nodes]), metric='euclidean')
         return nodes
 
     def generate_roadmap(self, samples: List[Node]):
@@ -196,12 +238,13 @@ class GraphSampler(BasePathPlanner):
             edge_id = []
 
             for ii in range(1, len(indexes)):
+                node_n = samples[indexes[ii]]
                 n_pos = samples[indexes[ii]].current
 
-                if self.get_cost(s_pos,n_pos) < self.min_edge_length:
+                if self.get_cost(node_s,node_n) < self.min_edge_length:
                     continue
 
-                if self.get_cost(s_pos,n_pos) > self.max_edge_length:
+                if self.get_cost(node_s,node_n) > self.max_edge_length:
                     break
 
                 if not self.in_collision_dda(s_pos, n_pos):
@@ -228,10 +271,12 @@ class GraphSampler(BasePathPlanner):
                 continue
             edge_list[edge] = 1
             edge_list[edge[::-1]] = 1
+            node_s = samples[edge[0]]
+            node_n = samples[edge[1]]
             s_pos = points[edge[0]]    
             n_pos = points[edge[1]]
             if not self.in_collision_dda(s_pos, n_pos) \
-                and  self.get_cost(s_pos,n_pos) >= self.min_edge_length and  self.get_cost(s_pos,n_pos) <= self.max_edge_length:
+                and  self.get_cost(node_s,node_n) >= self.min_edge_length and  self.get_cost(node_s,node_n) <= self.max_edge_length:
                 selected_edges.append(edge)
 
         for edge in selected_edges:

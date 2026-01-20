@@ -94,7 +94,7 @@ class Visualizer2D(BaseVisualizer2D):
                 # Multiple start positions
                 for start in map_.start:
                     if start is not None and len(start) >= 2:
-                        self.ax.scatter(start[0], start[1], c='red', s=20, alpha=1, zorder=self.zorder['expand_tree_node'], label='Start' if start == self.map_.start[0] else '')
+                        self.ax.scatter(start[0], start[1], c='red', s=20, alpha=1, zorder=self.zorder['expand_tree_node'], label='Start' if start == map_.start[0] else '')
             else:
                 # Single start position (not a list)
                 start = map_.start

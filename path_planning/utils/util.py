@@ -3,6 +3,7 @@ from typing import Any
 
 import python_motion_planning as pmp
 from python_motion_planning.common import Grid, TYPES
+from path_planning.global_planner.sample_search.graph_sampler import GraphSampler
 import numpy as np
 import yaml
 
@@ -88,6 +89,33 @@ def read_grid_from_yaml(filename: str):
     
     
     env = Grid(bounds=bounds, resolution=resolution)
+    if len(dimensions) == 2:
+        env.type_map[obstacle[:,0], obstacle[:,1]] = TYPES.OBSTACLE 
+    elif len(dimensions) == 3:
+        env.type_map[obstacle[:,0], obstacle[:,1], obstacle[:,2]] = TYPES.OBSTACLE 
+    else:
+        raise ValueError(f"Unsupported dimensions: {len(dimensions)}")
+    return env
+
+def read_graph_sampler_from_yaml(filename: str):
+    """
+    Read a YAML file and recreate a GraphSampler environment.
+    Args:
+        filename: The filename of the YAML file to read.
+    Returns:
+        env: A GraphSampler object with obstacles loaded from the YAML file.
+    """
+
+    with open(filename, 'r') as yaml_file:
+        yaml_data = yaml.safe_load(yaml_file)
+    
+    dimensions = yaml_data['dimensions']
+    bounds = yaml_data['bounds']
+    resolution = yaml_data['resolution']
+    obstacle = np.array(yaml_data['obstacle'])
+    
+    
+    env = GraphSampler(bounds=bounds, resolution=resolution,start=[],goal=[])
     if len(dimensions) == 2:
         env.type_map[obstacle[:,0], obstacle[:,1]] = TYPES.OBSTACLE 
     elif len(dimensions) == 3:
