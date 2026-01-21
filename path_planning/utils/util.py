@@ -3,7 +3,7 @@ from typing import Any
 
 import python_motion_planning as pmp
 from python_motion_planning.common import Grid, TYPES
-from path_planning.global_planner.sample_search.graph_sampler import GraphSampler
+from path_planning.common.env.map.graph_sampler import GraphSampler
 import numpy as np
 import yaml
 
@@ -123,3 +123,32 @@ def read_graph_sampler_from_yaml(filename: str):
     else:
         raise ValueError(f"Unsupported dimensions: {len(dimensions)}")
     return env
+
+def read_agents_from_yaml(filename: str):
+    """
+    Read a YAML file and recreate a list of agents.
+    Args:
+        filename: The filename of the YAML file to read.
+    Returns:
+        agents: A list of agents.
+    """
+    with open(filename, 'r') as yaml_file:
+        yaml_data = yaml.safe_load(yaml_file)
+    return yaml_data['agents']
+
+def to_builtin(obj):
+    if isinstance(obj, dict):
+        return {k: to_builtin(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [to_builtin(v) for v in obj]
+    if isinstance(obj, (np.integer,)):
+        return int(obj)
+    if isinstance(obj, (np.floating,)):
+        return float(obj)
+    return obj
+
+
+def write_to_yaml(obj, filename: str):
+    output_serializable = to_builtin(obj)
+    with open(filename, "w") as f:
+        yaml.safe_dump(output_serializable, f, sort_keys=False)
