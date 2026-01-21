@@ -2,18 +2,21 @@
 Example script to run RRG (Rapidly-exploring Random Graph) path planner.
 
 RRG builds a graph structure that can be used for multi-query path planning.
-After building the graph, you can use graph search algorithms (Dijkstra, A*) 
+After building the graph, you can use graph search algorithms (Dijkstra, A*)
 to find paths between any start/goal pairs in the graph.
 
 Usage:
     python scripts/run_rrg.py
 """
+
 # TODO: Implement RRG with grid map
 
 import random
+
 random.seed(0)
 
 import numpy as np
+
 np.random.seed(0)
 
 from path_planning.global_planner.sample_search.rrg import RRG
@@ -27,10 +30,10 @@ if __name__ == "__main__":
     print("=" * 60)
     print("RRG (Rapidly-exploring Random Graph) Example")
     print("=" * 60)
-    
+
     # Example 1: 2D map
     print("Running RRG on 2D map...")
-    map_2d = read_grid_from_yaml('path_planning/maps/2d/2d.yaml')
+    map_2d = read_grid_from_yaml("path_planning/maps/2d/2d.yaml")
     map_2d.inflate_obstacles(radius=3)
     start_2d = (5, 5)
     goal_2d = (45, 25)
@@ -39,35 +42,36 @@ if __name__ == "__main__":
 
     # RRG expects start and goal to be lists
     planner_2d = RRG(
-        map_=map_2d, 
+        map_=map_2d,
         start=[start_2d],  # List of start positions
-        goal=[goal_2d],    # List of goal positions
-        max_dist=5.0,      # Maximum connection distance
+        goal=[goal_2d],  # List of goal positions
+        max_dist=5.0,  # Maximum connection distance
         sample_num=5000,  # Number of samples to generate
         goal_sample_rate=0.1,  # Probability of sampling goal directly
-        discrete=False,     # Use continuous space
-        use_faiss=True     # Use FAISS for faster nearest neighbor search
+        discrete=False,  # Use continuous space
+        use_faiss=False,  # Use FAISS for faster nearest neighbor search
     )
-    
+
     result_2d = planner_2d.plan()
-    
+
     # RRG builds a graph structure (road_map) that can be used for path finding
     # The graph is stored in:
     #   - planner_2d.road_map: adjacency list representation
     #   - result_2d[1]["node_list"]: list of node positions
     #   - result_2d[1]["expand"]: dictionary of all nodes
-    # 
+    #
     # To find a path, you can use graph search algorithms (Dijkstra, A*) on the road_map
     print(f"RRG built graph with {len(planner_2d.road_map)} nodes")
     print(f"Graph structure stored in planner_2d.road_map")
     print(f"Node positions in result_2d[1]['node_list']")
     print(f"Use graph search (Dijkstra/A*) to find paths between nodes")
-    
+    print(result_2d)
+
     vis_2d = Visualizer2D()
     vis_2d.plot_grid_map(map_2d)
     if "expand" in result_2d[1]:
         vis_2d.plot_expand_tree(result_2d[1]["expand"])
-    vis_2d.savefig('rrg_2d.png')
+    vis_2d.savefig("rrg_2d.png")
     vis_2d.show()
 
     # # Example 2: 3D map
@@ -89,11 +93,11 @@ if __name__ == "__main__":
     #     discrete=False,
     #     use_faiss=True
     # )
-    
+
     # result_3d = planner_3d.plan()
-    
+
     # print(f"RRG built graph with {len(planner_3d.road_map)} nodes")
-    
+
     # vis_3d = Visualizer3D()
     # vis_3d.plot_grid_map(map_3d)
     # if "expand" in result_3d[1]:
@@ -103,11 +107,11 @@ if __name__ == "__main__":
 
     # Example 3: Multiple start/goal positions (multi-query)
     print("\nRunning RRG with multiple start/goal positions...")
-    map_multi = read_grid_from_yaml('path_planning/maps/2d/2d.yaml')
+    map_multi = read_grid_from_yaml("path_planning/maps/2d/2d.yaml")
     map_multi.inflate_obstacles(radius=3)
     starts_multi = [(5, 5), (10, 10)]  # Multiple start positions
     goals_multi = [(45, 25), (40, 30)]  # Multiple goal positions
-    
+
     for i, start in enumerate(starts_multi):
         map_multi.type_map[start] = TYPES.START
     for i, goal in enumerate(goals_multi):
@@ -121,19 +125,19 @@ if __name__ == "__main__":
         sample_num=5000,
         goal_sample_rate=0.1,
         discrete=False,
-        use_faiss=True
+        use_faiss=False,
     )
-    
+
     result_multi = planner_multi.plan()
-    
+
     print(f"RRG built graph with {len(planner_multi.road_map)} nodes")
     print("Graph can be used for multi-query path planning")
-    
+
     vis_multi = Visualizer2D()
     vis_multi.plot_grid_map(map_multi)
     if "expand" in result_multi[1]:
         vis_multi.plot_expand_tree(result_multi[1]["expand"])
-    vis_multi.savefig('rrg_multi.png')
+    vis_multi.savefig("rrg_multi.png")
     vis_multi.show()
 
     print("\nRRG examples completed!")
