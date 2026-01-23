@@ -18,7 +18,7 @@ def run_graph_sampler(graph_sampler,start,goal,generate_grid_nodes = True):
         graph_sampler.type_map[graph_sampler.world_to_map(g,discrete=True)] = TYPES.GOAL
     graph_sampler.set_start(start)
     graph_sampler.set_goal(goal)
-    graph_sampler.set_parameters(sample_num=1000, num_neighbors=13.0, min_edge_len=0.0, max_edge_len=5.0)
+    graph_sampler.set_parameters(sample_num=1000, num_neighbors=4.0, min_edge_len=0.0, max_edge_len=5.0)
     
     st = time.time()
     nodes = graph_sampler.generateRandomNodes(generate_grid_nodes = generate_grid_nodes)
@@ -42,8 +42,8 @@ if __name__ == "__main__":
 
     map_ =read_graph_sampler_from_yaml('path_planning/maps/2d/2d.yaml')
     map_.inflate_obstacles(radius=3)
-    start = [(5.67,14.88),(44.67,14.88)]
-    goal = [(43.67,19.12)]
+    start = [(5,15),(44,15)]
+    goal = [(44,19), (20,25)]
     print("Running graph sampler on 2D map...")
     map_,nodes, road_map,planar_map = run_graph_sampler(map_,start,goal,generate_grid_nodes = False)
     vis = Visualizer2D()
