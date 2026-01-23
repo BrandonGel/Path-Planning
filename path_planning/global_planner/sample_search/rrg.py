@@ -50,6 +50,7 @@ class RRG(BasePathPlanner):
         self.discrete = discrete
         self.use_faiss = use_faiss
         self.road_map = []  # Graph structure: list of adjacency lists
+        self.node_index_list = {}
 
     def __str__(self) -> str:
         return "RRG"
@@ -71,16 +72,21 @@ class RRG(BasePathPlanner):
         road_map = []  # Graph structure: list of adjacency lists
 
         # Add start node to the graph
-        start_node = Node(self.start, None, 0, 0)
+        start_node = Node(self.start[0], None, 0, 0)
+        # print("self.start:", self.start[0])
+        # print("Start node:", start_node)
         nodes[tuple(start_node.current)] = start_node
         node_list.append(start_node.current)
+        self.node_index_list[start_node] = len(nodes) - 1
         road_map.append([])  # Initialize empty adjacency list
 
         # Add goal node to graph if not already present
-        goal_node = Node(self.goal, None, 0, 0)
+        goal_node = Node(self.goal[0], None, 0, 0)
+        # print("Goal node:", goal_node)
         if tuple(goal_node.current) not in nodes:
             nodes[tuple(goal_node.current)] = goal_node
             node_list.append(goal_node.current)
+            self.node_index_list[goal_node] = len(nodes) - 1
             road_map.append([])
 
         # Initialize FAISS index for efficient nearest neighbor search
@@ -89,7 +95,7 @@ class RRG(BasePathPlanner):
         faiss_nodes = []
         for node_pos in node_list:
             # print("Node pos (right before added by FAISS):", node_pos)
-            self._faiss_add_node(nodes[tuple(node_pos)], faiss_index, faiss_nodes)
+            self._faiss_add_node(nodes[node_pos], faiss_index, faiss_nodes)
 
         # Main RRG sampling loop
         for _ in range(self.sample_num):
@@ -114,12 +120,12 @@ class RRG(BasePathPlanner):
             if node_new is None:
                 continue
 
-            # print("Node new:", node_new.current[0])
-            # print("Node near:", node_near.current[0])
+            # print("Node new:", node_new.current)
+            # print("Node near:", node_near.current)
             # Check if edge from nearest to new node is collision-free
             if self.map_.in_collision(
-                self.map_.point_float_to_int(node_new.current[0]),
-                self.map_.point_float_to_int(node_near.current[0]),
+                self.map_.point_float_to_int(node_new.current),
+                self.map_.point_float_to_int(node_near.current),
             ):
                 continue
 
@@ -128,8 +134,9 @@ class RRG(BasePathPlanner):
             # print("new_node.current:", node_new.current[0])
             # Add new node to graph
             node_new_idx = len(node_list)
-            nodes[node_new.current[0]] = node_new
+            nodes[node_new.current] = node_new
             node_list.append(node_new.current)
+            self.node_index_list[node_new] = len(nodes) - 1
             road_map.append([])  # Initialize empty adjacency list
 
             # What is faiss, what is it here for, what does it do?
@@ -146,11 +153,11 @@ class RRG(BasePathPlanner):
                 if nearby_pos == node_new.current:
                     continue
 
-                # print("Node new:", node_new.current[0])
+                # print("Node new:", node_new.current)
                 # print("Nearby pos:", nearby_pos)
                 # Check if edge is collision-free
                 if not self.map_.in_collision(
-                    self.map_.point_float_to_int(node_new.current[0]),
+                    self.map_.point_float_to_int(node_new.current),
                     self.map_.point_float_to_int(nearby_pos),
                 ):
                     # Add bidirectional edge in graph
@@ -171,9 +178,10 @@ class RRG(BasePathPlanner):
         # Use Dijkstra to find shortest path in the constructed graph and return
         path, path_info = self._dijkstra_planning(
             self.road_map,
+            nodes,
             node_list,
-            node_list.index(start_node.current),
-            node_list.index(goal_node.current),
+            start_node,
+            goal_node,
         )
         return path, path_info
 
@@ -236,10 +244,7 @@ class RRG(BasePathPlanner):
         for node in nodes.values():
             # print("Node current:", node.current[0])
             # print("Node random:", node_rand.current)
-            dist = math.sqrt(
-                (node.current[0][0] - node_rand.current[0]) ** 2
-                + (node.current[0][1] - node_rand.current[1]) ** 2
-            )
+            dist = self.get_cost(node.current, node_rand.current)
             # print("Distance:", dist)
             if dist < min_dist:
                 min_dist = dist
@@ -297,11 +302,11 @@ class RRG(BasePathPlanner):
             for idx, node_pos in enumerate(node_list):
                 if idx == node_new_idx or node_pos == node_new.current:
                     continue
-                # print("Node new:", node_new.current[0])
-                # print("Node pos:", node_pos[0])
-                dist = self.get_cost(node_new.current[0], node_pos[0])
+                # print("Node new:", node_new.current)
+                # print("Node pos:", node_pos)
+                dist = self.get_cost(node_new.current, node_pos)
                 if dist <= self.max_dist:
-                    nearby_nodes.append((node_pos[0], idx))
+                    nearby_nodes.append((node_pos, idx))
 
         return nearby_nodes
 
@@ -319,9 +324,7 @@ class RRG(BasePathPlanner):
         # Calculate differences for each dimension
         # print("Node random:", node_rand.current)
         # print("Node near:", node_near.current[0])
-        diffs = [
-            node_rand.current[i] - node_near.current[0][i] for i in range(self.dim)
-        ]
+        diffs = [node_rand.current[i] - node_near.current[i] for i in range(self.dim)]
 
         # Calculate Euclidean distance in n-dimensional space
         dist = math.sqrt(sum(diff**2 for diff in diffs))
@@ -334,24 +337,22 @@ class RRG(BasePathPlanner):
         # If within max distance, use the random node directly
         if dist <= self.max_dist:
             # print("Returned random node directly")
-            # print("Node_rand:", node_rand.current)
-            new_node_rand = Node([node_rand.current], None, 0, 0)
+            # print("Node_rand:", node_rand)
+            # new_node_rand = Node(node_rand.current, None, 0, 0)
             # print("New random node:", new_node_rand)
-            # return node_rand
-            return new_node_rand
+            return node_rand
+            # return new_node_rand
 
         # Otherwise scale to maximum distance
         scale = self.max_dist / dist
-        new_point = [
-            node_near.current[0][i] + scale * diffs[i] for i in range(self.dim)
-        ]
+        new_point = [node_near.current[i] + scale * diffs[i] for i in range(self.dim)]
         new_point = tuple(new_point)
 
         if self.discrete:
             new_point = self.map_.point_float_to_int(new_point)
 
         # print("New point:", new_point)
-        return Node([new_point], None, 0, 0)
+        return Node(new_point, None, 0, 0)
 
     def _faiss_add_node(self, node: Node, index, nodes):
         """
@@ -369,9 +370,10 @@ class RRG(BasePathPlanner):
     def _dijkstra_planning(
         self,
         road_map: List[List[int]],
-        node_list: List[Tuple[float, ...]],
-        start_idx: int,
-        goal_idx: int,
+        nodes: List[Node],
+        node_list: List[Tuple],
+        start_node: Node,
+        goal_node: Node,
     ) -> Optional[List[int]]:
         """
         Run Dijkstra on an RRG roadmap.
@@ -380,57 +382,56 @@ class RRG(BasePathPlanner):
             List of node indices representing the shortest path,
             or None if no path exists.
         """
-        n = len(node_list)
+        OPEN = []
+        heapq.heappush(OPEN, start_node)
+        CLOSED = dict()
+        # print("Road map:", road_map)
+        # print("Node index list:", self.node_index_list)
+        # print("Nodes:", nodes)
 
-        dist = [math.inf] * n
-        parent = [-1] * n
-        visited = [False] * n
+        while OPEN:
+            node = heapq.heappop(OPEN)
+            # print("Node:", node)
 
-        dist[start_idx] = 0.0
-        pq = [(0.0, start_idx)]  # (distance, node_index)
-
-        while pq:
-            curr_dist, u = heapq.heappop(pq)
-
-            if visited[u]:
+            # exists in CLOSED list
+            if node.current in CLOSED:
                 continue
-            visited[u] = True
 
-            # Early exit if we reached the goal
-            if u == goal_idx:
-                break
+            # goal found
+            if node.current == self.goal:
+                CLOSED[node.current] = node
+                path, length, cost = self.extract_path(CLOSED)
+                return path, {
+                    "success": True,
+                    "start": self.start,
+                    "goal": self.goal,
+                    "length": length,
+                    "cost": cost,
+                    "expand": CLOSED,
+                }
 
-            for v in road_map[u]:
-                # print(node_list[u])
-                # print(node_list[v])
-                # Edge cost = Euclidean distance
-                cost = math.dist(node_list[u][0], node_list[v][0])
-                alt = curr_dist + cost
+            for node_index in road_map[self.node_index_list[node]]:
+                print("Node_index:", node_index)
+                print("Node index in list:", node_list[node_index])
+                print("Node object:", nodes[node_list[node_index]])
+                node_n = nodes[node_list[node_index]]
+                # exists in CLOSED list
+                if node_n.current in CLOSED:
+                    continue
 
-                if alt < dist[v]:
-                    dist[v] = alt
-                    parent[v] = u
-                    heapq.heappush(pq, (alt, v))
+                # For Dijkstra, we only update g-value (no heuristic)
+                node_n.g = node.g + self.get_cost(node.current, node_n.current)
+                node_n.parent = node.current
 
-        # No path found
-        if parent[goal_idx] == -1 and start_idx != goal_idx:
-            return None
+                # goal found
+                if node_n.current == self.goal:
+                    heapq.heappush(OPEN, node_n)
+                    break
 
-        # Reconstruct path (goal → start)
-        path = []
-        curr = goal_idx
-        while curr != -1:
-            path.append(curr)
-            curr = parent[curr]
+                # update OPEN list with node sorted by g-value
+                heapq.heappush(OPEN, node_n)
 
-        path.reverse()
+            CLOSED[node.current] = node
 
-        length = dist[goal_idx]
-
-        return path, {
-            "success": True,
-            "start": self.start,
-            "goal": self.goal,
-            "length": length,
-            "cost": cost,
-        }
+        self.failed_info[1]["expand"] = CLOSED
+        return self.failed_info
