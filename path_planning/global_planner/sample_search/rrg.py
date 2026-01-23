@@ -71,6 +71,7 @@ class RRG(BasePathPlanner):
         node_list = []  # List to maintain order and index mapping
         road_map = []  # Graph structure: list of adjacency lists
 
+        # TODO: handle multiple start nodes
         # Add start node to the graph
         start_node = Node(self.start[0], None, 0, 0)
         # print("self.start:", self.start[0])
@@ -80,6 +81,7 @@ class RRG(BasePathPlanner):
         self.node_index_list[start_node] = len(nodes) - 1
         road_map.append([])  # Initialize empty adjacency list
 
+        # TODO: handle multiple goal nodes
         # Add goal node to graph if not already present
         goal_node = Node(self.goal[0], None, 0, 0)
         # print("Goal node:", goal_node)
@@ -172,6 +174,7 @@ class RRG(BasePathPlanner):
         self.failed_info[1]["road_map"] = road_map
         self.failed_info[1]["node_list"] = node_list
 
+        # TODO: handle dijkstra with multiple goal and start nodes and then return the path info accordingly
         # print("Start node:", node_list.index(start_node.current))
         # print("Goal Node:", node_list.index(goal_node.current))
         # print("Node list:", node_list)
@@ -194,6 +197,7 @@ class RRG(BasePathPlanner):
         """
         # Sample goal directly with specified probability
         if random.random() < self.goal_sample_rate:
+            # here we have to pick a random goal node and not just one
             goal_ind = random.choice(range(len(self.goal)))
             return Node(self.goal[goal_ind], None, 0, 0)
 
@@ -367,6 +371,7 @@ class RRG(BasePathPlanner):
         index.add(vec)
         nodes.append(node)
 
+    # TODO: handle multiple start and goal nodes
     def _dijkstra_planning(
         self,
         road_map: List[List[int]],
@@ -388,6 +393,8 @@ class RRG(BasePathPlanner):
         # print("Road map:", road_map)
         # print("Node index list:", self.node_index_list)
         # print("Nodes:", nodes)
+        print("Start node:", start_node)
+        print("Goal Node:", goal_node)
 
         while OPEN:
             node = heapq.heappop(OPEN)
@@ -398,9 +405,12 @@ class RRG(BasePathPlanner):
                 continue
 
             # goal found
-            if node.current == self.goal:
+            if node.current == goal_node.current:
                 CLOSED[node.current] = node
-                path, length, cost = self.extract_path(CLOSED)
+                path, length, cost = self.extract_path(
+                    CLOSED, start_node.current, goal_node.current
+                )
+
                 return path, {
                     "success": True,
                     "start": self.start,
@@ -411,9 +421,9 @@ class RRG(BasePathPlanner):
                 }
 
             for node_index in road_map[self.node_index_list[node]]:
-                print("Node_index:", node_index)
-                print("Node index in list:", node_list[node_index])
-                print("Node object:", nodes[node_list[node_index]])
+                # print("Node_index:", node_index)
+                # print("Node index in list:", node_list[node_index])
+                # print("Node object:", nodes[node_list[node_index]])
                 node_n = nodes[node_list[node_index]]
                 # exists in CLOSED list
                 if node_n.current in CLOSED:
