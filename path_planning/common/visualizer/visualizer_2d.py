@@ -148,6 +148,14 @@ class Visualizer2D(BaseVisualizer2D):
             agent_names[name].set_verticalalignment('center')
             artists.append(agent_names[name])
 
+        colors = ['tab:green', 'tab:orange']
+        agent_num = 0
+        for agent_name, agent in combined_schedule.items():
+            pos = np.array([[state['x'],state['y']] for state in agent])
+            self.ax.plot(pos[:,0], pos[:,1], color=colors[agent_num], zorder=self.zorder['traj'],linewidth=3)
+            agent_num += 1
+            agent_num %= len(colors)
+
         self.ax.set_axis_off()
 
         def init_func():
