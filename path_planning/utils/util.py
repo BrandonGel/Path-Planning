@@ -128,6 +128,20 @@ def read_graph_sampler_from_yaml(filename: str):
         raise ValueError(f"Unsupported dimensions: {len(dimensions)}")
     return env
 
+def read_map_from_yaml(filename: str):
+    """
+    Read a YAML file and recreate a GraphSampler environment.
+    Args:
+        filename: The filename of the YAML file to read.
+    Returns:
+        env: A GraphSampler object with obstacles loaded from the YAML file.
+    """
+
+    with open(filename, 'r') as yaml_file:
+        yaml_data = yaml.load(yaml_file, Loader=yaml.FullLoader)
+    map = yaml_data['map']
+    return map
+
 def read_agents_from_yaml(filename: str):
     """
     Read a YAML file and recreate a list of agents.
