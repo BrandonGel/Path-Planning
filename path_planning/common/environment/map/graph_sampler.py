@@ -52,14 +52,6 @@ class GraphSampler(Grid):
             start_pixel = [self.world_to_map(s) for s in start]
         
         self.start = start
-        for s in self.start:
-            node = Node(tuple(s),None,0,0)
-            if node in self.node_index_list:
-                continue
-            self.nodes.append(node)
-            self.node_index_list[node] = len(self.nodes) - 1
-            self.start_nodes_index[node] = len(self.nodes) - 1
-
         for s in start_pixel:
             self.type_map[tuple(s)] = TYPES.START
         
@@ -71,13 +63,6 @@ class GraphSampler(Grid):
         else:
             goal_pixel =  [self.world_to_map(g) for g in goal]
         self.goal = goal
-        for g in self.goal:
-            node = Node(tuple(g),None,0,0)
-            if node in self.node_index_list:
-                continue
-            self.nodes.append(node)
-            self.node_index_list[node] = len(self.nodes) - 1
-            self.goal_nodes_index[node] = len(self.nodes) - 1
         for g in goal_pixel:
             self.type_map[tuple(g)] = TYPES.GOAL
     
@@ -207,6 +192,12 @@ class GraphSampler(Grid):
         seen_tiles = [tuple(int(x) for x in tile) for tile in seen]
         return seen_tiles
 
+    def in_collision_point(self, point: Tuple[float, ...]) -> bool:
+        """
+        Check if the point is in collision.
+        """
+        return not self.is_expandable(self.world_to_map(point,discrete=True))
+
     def in_collision(self, p1: Tuple[float, ...], p2 : Tuple[float, ...] = None) -> bool:
         """
         Check if the line of sight between two continuous (world) points is in collision
@@ -223,30 +214,15 @@ class GraphSampler(Grid):
         
         # Check if start point has the correct dimension
         dim = self.dim
-        if len(p1) != dim:
-            raise ValueError(f"Start point must have dimension {dim}")
 
-        # Convert to grid coordinates using map's point_float_to_int for start point
-        p1_grid = np.array(self.world_to_map(p1,discrete=True), dtype=int)
-        # Early exit: check start tile is expandable
-        if not self.is_expandable(tuple(p1_grid)):
-            return True
-        if p2 is None:
-            return False
         
         # Check if end point has the correct dimension
-        if len(p2) != dim:
+        if  len(p1) != dim and len(p2) != dim:
             raise ValueError(f"End point must have dimension {dim}")
         
-        # Convert to grid coordinates using map's point_float_to_int for end point
+        # Convert to grid coordinates using map's point_float_to_int
+        p1_grid = np.array(self.world_to_map(p1,discrete=True), dtype=int)
         p2_grid = np.array(self.world_to_map(p2,discrete=True), dtype=int)
-        # Early exit: check end tile is expandable
-        if not self.is_expandable(tuple(p2_grid)):
-            return True
-        
-        # Early exit if start and end are in the same tile
-        if np.array_equal(p1_grid, p2_grid):
-            return False
         
         # Convert to numpy arrays for DDA calculations (world coordinates)
         p1_arr = np.array(p1, dtype=float)
@@ -356,11 +332,17 @@ class GraphSampler(Grid):
         
         for start in self.start:
             node = Node(tuple(start),None,0,0)
+            if node in self.node_index_list:
+                self.start_nodes_index[node] = self.node_index_list[node]
+                continue
             nodes.append(node)
             self.node_index_list[node] = len(nodes) - 1
             self.start_nodes_index[node] = len(nodes) - 1
         for goal in self.goal:
             node = Node(tuple(goal),None,0,0)
+            if node in self.node_index_list:
+                self.goal_nodes_index[node] = self.node_index_list[node]
+                continue
             nodes.append(node)
             self.node_index_list[node] = len(nodes) - 1
             self.goal_nodes_index[node] = len(nodes) - 1
@@ -397,6 +379,18 @@ class GraphSampler(Grid):
                     break
 
             road_map.append(edge_id)
+
+        for j, edge in enumerate(road_map):
+            edge_temp = []
+            diffs = [(0,1), (0,-1), (-1,0), (1,0)]
+            node_j = samples[j].current
+            for diff in diffs:
+                for i in edge:
+                    node = samples[i].current
+                    if node[0] - node_j[0] == diff[0] and node[1] - node_j[1] == diff[1]:
+                        edge_temp.append(i)
+            road_map[j] = edge_temp
+
         self.road_map = road_map
         return road_map
 
@@ -428,10 +422,6 @@ class GraphSampler(Grid):
         self.road_map = planar_map
         return planar_map
 
-    def set_neighbors(self, roadmap: List[List[int]]):
-        for i, edges in enumerate(roadmap):
-            for j in edges:
-                self.nodes[i].add_neighbor(self.nodes[j])
 
     def point_float_to_int(self, point: Tuple[float, ...]) -> Tuple[int, ...]:
         """
