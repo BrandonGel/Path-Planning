@@ -5,8 +5,9 @@ original author: Ashwin Bose (@atb033)
 description: This file implements the Conflict-based search algorithm for multi-agent path planning. Modified from the original implementation to work with the new common environment.
 """
 
-from path_planning.common.env.node import Node
-from multi_agent_path_planning.centralized.cbs.a_star import AStar
+from path_planning.common.environment.node import Node
+from path_planning.multi_agent_planner.centralized.cbs.a_star import AStar
+from python_motion_planning.path_planner.graph_search.a_star import AStar as AStar2
 from math import fabs
 from itertools import combinations
 from copy import deepcopy
@@ -92,6 +93,7 @@ class Environment(object):
         self.constraint_dict = {}
 
         self.a_star = AStar(self)
+        self.a_star2 = AStar2(graph_map,None,None)
 
     def get_neighbors(self, state):
         neighbors = []
