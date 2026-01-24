@@ -12,6 +12,7 @@ from path_planning.common.visualizer.visualizer_3d import Visualizer3D
 from path_planning.utils.util import write_to_yaml
 from path_planning.utils.util import read_graph_sampler_from_yaml, read_agents_from_yaml
 from path_planning.multi_agent_planner.centralized.cbs.cbs import Environment, CBS
+# from path_planning.multi_agent_planner.centralized.cbs.cbs2 import Environment, CBS
 from python_motion_planning.common import TYPES
 from natsort import os_sorted
 import os
@@ -41,7 +42,7 @@ if __name__ == "__main__":
     map_folders = os.listdir('benchmark/maps')
     sort_nicely(map_folders)
 
-    for map_folder in map_folders:
+    for map_folder in [map_folders[-1]]:
         print(f"Running CBS on {map_folder}...")
 
         # Get files in each folder in natural (Windows-like) order
@@ -49,11 +50,8 @@ if __name__ == "__main__":
         sort_nicely(files)
 
         for fname in files:
-            print(f"Running CBS on {fname}...")
             map_ =read_graph_sampler_from_yaml(f'benchmark/maps/{map_folder}/{fname}')
             agents = read_agents_from_yaml(f'benchmark/maps/{map_folder}/{fname}')
-
-            map_.inflate_obstacles(radius=0)
             map_.set_parameters(sample_num=0, num_neighbors=4.0, min_edge_len=0.0, max_edge_len=1.1)
 
             start = [agent['start'] for agent in agents]
@@ -73,20 +71,19 @@ if __name__ == "__main__":
                 for i, agent in enumerate(agents)
             }
 
-            env = Environment(map_, agents)
+            env = Environment(map_, agents, astar_max_iterations=-1)
 
             # Searching
             st = time.time()
-            cbs = CBS(env)
+            cbs = CBS(env,time_limit=60)
             solution = cbs.search()
-            print(f"Time taken to search: {time.time() - st} seconds")
             if not solution:
-                print(" Solution not found" )
+                print(f"CBS on {fname}: Solution NOT FOUND")
+            else:
+                print(f"CBS on {fname}: Solution found in {round(time.time() - st, 4)} seconds")
 
             # Write to output file
             output = dict()
             output["schedule"] = solution
             output["cost"] = env.compute_solution_cost(solution)
             write_to_yaml(output, f"benchmark/solutions/{map_folder}/{fname.replace('.yaml', '_output.yaml')}")
-
-            break

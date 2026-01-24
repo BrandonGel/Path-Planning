@@ -7,14 +7,17 @@ description: This file implements the Conflict-based search algorithm for multi-
 
 from path_planning.common.environment.node import Node
 from path_planning.multi_agent_planner.centralized.cbs.a_star import AStar
+import heapq
 import time
 from math import fabs
-from itertools import combinations
+from itertools import count,combinations
 from copy import deepcopy
 
 class Location(object):
     def __init__(self, point:tuple = None):
         self.point = tuple(point) if point is not None else None
+    def __hash__(self):
+        return hash(self.point)
     def __eq__(self, other):
         return self.point == other.point
     def __str__(self):
@@ -95,7 +98,7 @@ class Constraints(object):
             "EC: " + str([str(ec) for ec in self.edge_constraints])
 
 class Environment(object):
-    def __init__(self, graph_map, agents):
+    def __init__(self, graph_map, agents, astar_max_iterations=-1):
         self.graph_map = graph_map
         self.agents = agents
         self.agent_dict = {}
@@ -105,7 +108,7 @@ class Environment(object):
         self.constraints = Constraints()
         self.constraint_dict = {}
 
-        self.a_star = AStar(self)
+        self.a_star = AStar(self, astar_max_iterations)
 
     def get_neighbors(self, state):
         neighbors = []
@@ -253,63 +256,48 @@ class CBS(object):
                            and returns an empty solution.
         """
         self.env = environment
-        # Use a priority queue (heap) for deterministic expansion order
-        # instead of an unordered set whose iteration order can vary
-        # between runs and Python versions.
-        #
-        # Each heap entry is a tuple: (cost, HighLevelNode)
-        self.open_heap = []
-        self.open_set = set()   # for fast membership checks
+        self.open_list =  []  # for fast membership checks
         self.closed_set = set()
         self.time_limit = time_limit
         self.max_iterations = max_iterations
-        self.iterations = 0
+        self.counter = count()
 
-    def _push_open(self, node):
-        """Push a node into the open list (heap) in a deterministic way."""
-        import heapq
-        heapq.heappush(self.open_heap, (node.cost, node))
-        self.open_set.add(node)
-
-    def _pop_open(self):
-        """Pop the next node from the open list, skipping any stale entries."""
-        import heapq
-        while self.open_heap:
-            _, node = heapq.heappop(self.open_heap)
-            if node in self.open_set:
-                self.open_set.remove(node)
-                return node
-        return None
     def search(self):
         start = HighLevelNode()
-        # TODO: Initialize it in a better way
         start.constraint_dict = {}
         for agent in self.env.agent_dict.keys():
             start.constraint_dict[agent] = Constraints()
+
         start.solution = self.env.compute_solution()
         if not start.solution:
             return {}
+
         start.cost = self.env.compute_solution_cost(start.solution)
 
-        # Initialize open list with the start node
-        self._push_open(start)
+        # Add start node to heap
+        heapq.heappush(self.open_list, (start.cost, next(self.counter), start))
 
          
         st = time.time()
-        while self.open_heap:
-            P = self._pop_open()
-            if P is None:
-                break
-            self.closed_set |= {P}
-
-            # Enforce optional wall-clock time limit on the high-level search
+        iterations = 0
+        while self.open_list :
             if self.time_limit is not None and (time.time() - st) > self.time_limit:
                 print(f"Search terminated: time limit of {self.time_limit} seconds exceeded.")
                 return {}
 
-            if self.max_iterations is not None and self.iterations >= self.max_iterations:
+            if self.max_iterations is not None and iterations >= self.max_iterations:
                 print(f"Search terminated: max iterations of {self.max_iterations} reached.")
                 return {}
+
+            _, _, P = heapq.heappop(self.open_list)
+
+            
+            if P is None:
+                break
+            state_key = self._get_state_key(P)
+            if state_key in self.closed_set:
+                continue
+            self.closed_set.add(state_key)
 
             self.env.constraint_dict = P.constraint_dict
             conflict_dict = self.env.get_first_conflict(P.solution)
@@ -318,20 +306,41 @@ class CBS(object):
                 return self.generate_plan(P.solution)
             constraint_dict = self.env.create_constraints_from_conflict(conflict_dict)
             for agent in constraint_dict.keys():
-                new_node = deepcopy(P)
-                new_node.constraint_dict[agent].add_constraint(constraint_dict[agent])
+                new_node = HighLevelNode()
+                new_node.solution = P.solution.copy()
+
+                # Selective deep copy only for affected agent's constraints
+                new_node.constraint_dict = {}
+                for a in self.env.agent_dict.keys():
+                    if a == agent:
+                        # Deep copy only the modified agent's constraints
+                        new_constraints = Constraints()
+                        new_constraints.vertex_constraints = P.constraint_dict[a].vertex_constraints.copy()
+                        new_constraints.edge_constraints = P.constraint_dict[a].edge_constraints.copy()
+                        new_constraints.add_constraint(constraint_dict[agent])
+                        new_node.constraint_dict[a] = new_constraints
+                    else:
+                        # Share unchanged constraints
+                        new_node.constraint_dict[a] = P.constraint_dict[a]
 
                 self.env.constraint_dict = new_node.constraint_dict
                 new_node.solution = self.env.compute_solution()
                 if not new_node.solution:
                     continue
                 new_node.cost = self.env.compute_solution_cost(new_node.solution)
-                # TODO: ending condition
-                if new_node not in self.closed_set and new_node not in self.open_set:
-                    self._push_open(new_node)
-            self.iterations += 1
+                heapq.heappush(self.open_list, (new_node.cost, next(self.counter), new_node))
+            iterations += 1
         return {}
 
+
+    def _get_state_key(self, node):
+        """Generate a hashable state key for closed set checking."""
+        # Create a frozen representation of the solution
+        solution_tuple = tuple(
+            (agent, tuple((s.time, s.location) for s in path))
+            for agent, path in sorted(node.solution.items())
+        )
+        return solution_tuple
     def generate_plan(self, solution):
         plan = {}
         for agent, path in solution.items():
