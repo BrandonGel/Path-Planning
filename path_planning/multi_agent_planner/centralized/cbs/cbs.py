@@ -5,6 +5,7 @@ original author: Ashwin Bose (@atb033)
 description: This file implements the Conflict-based search algorithm for multi-agent path planning. Modified from the original implementation to work with the new common environment.
 """
 
+from typing import Any
 from path_planning.common.environment.node import Node
 from path_planning.multi_agent_planner.centralized.cbs.a_star import AStar
 import heapq
@@ -112,7 +113,7 @@ class Environment(object):
 
     def get_neighbors(self, state):
         neighbors = []
-        node = Node(tuple(state.location.point))
+        node = Node(tuple[Any, ...](state.location.point))
         nodes = self.graph_map.get_neighbors(node)
         # Wait action
         n = State(state.time + 1,  state.location)
@@ -210,12 +211,11 @@ class Environment(object):
         return state.is_equal_except_time(goal_state)
 
     def make_agent_dict(self):
-        for name in self.agents:
-            agent = self.agents[name]
+        for agent in self.agents:
             start_state = State(0, Location(agent['start']))
             goal_state = State(0, Location(agent['goal']))
             
-            self.agent_dict.update({name:{'start':start_state, 'goal':goal_state}})
+            self.agent_dict.update({agent['name']:{'start':start_state, 'goal':goal_state}})
 
     def compute_solution(self):
         solution = {}
@@ -247,7 +247,7 @@ class HighLevelNode(object):
         return self.cost < other.cost
 
 class CBS(object):
-    def __init__(self, environment, time_limit: float | None = None, max_iterations: int | None = None):
+    def __init__(self, environment, time_limit: float | None = None, max_iterations: int | None = None,verbose: bool = False):
         """
         :param environment: Environment instance
         :param time_limit: Optional wall-clock time limit (in seconds) for the
@@ -256,6 +256,7 @@ class CBS(object):
                            and returns an empty solution.
         """
         self.env = environment
+        self.verbose = verbose
         self.open_list =  []  # for fast membership checks
         self.closed_set = set()
         self.time_limit = time_limit
@@ -270,6 +271,8 @@ class CBS(object):
 
         start.solution = self.env.compute_solution()
         if not start.solution:
+            if self.verbose:
+                print("No initial solution found")
             return {}
 
         start.cost = self.env.compute_solution_cost(start.solution)
@@ -282,11 +285,13 @@ class CBS(object):
         iterations = 0
         while self.open_list :
             if self.time_limit is not None and (time.time() - st) > self.time_limit:
-                print(f"Search terminated: time limit of {self.time_limit} seconds exceeded.")
+                if self.verbose:
+                    print(f"Search terminated: time limit of {self.time_limit} seconds exceeded.")
                 return {}
 
             if self.max_iterations is not None and iterations >= self.max_iterations:
-                print(f"Search terminated: max iterations of {self.max_iterations} reached.")
+                if self.verbose:
+                    print(f"Search terminated: max iterations of {self.max_iterations} reached.")
                 return {}
 
             _, _, P = heapq.heappop(self.open_list)
@@ -302,7 +307,8 @@ class CBS(object):
             self.env.constraint_dict = P.constraint_dict
             conflict_dict = self.env.get_first_conflict(P.solution)
             if not conflict_dict:
-                print("solution found")
+                if self.verbose:
+                    print("solution found")
                 return self.generate_plan(P.solution)
             constraint_dict = self.env.create_constraints_from_conflict(conflict_dict)
             for agent in constraint_dict.keys():
