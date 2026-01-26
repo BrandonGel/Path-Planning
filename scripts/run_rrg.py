@@ -46,7 +46,7 @@ if __name__ == "__main__":
         start=[start_2d],  # List of start positions
         goal=[goal_2d],  # List of goal positions
         max_dist=5.0,  # Maximum connection distance
-        sample_num=1000,  # Number of samples to generate
+        sample_num=5000,  # Number of samples to generate
         goal_sample_rate=0.1,  # Probability of sampling goal directly
         discrete=False,  # Use continuous space
         use_faiss=False,  # Use FAISS for faster nearest neighbor search
@@ -63,15 +63,13 @@ if __name__ == "__main__":
     # To find a path, you can use graph search algorithms (Dijkstra, A*) on the road_map
     print(f"RRG built graph with {len(planner_2d.road_map)} nodes")
     print(f"Graph structure stored in planner_2d.road_map")
-    print(f"Node positions in result_2d[1]['node_list']")
     print(f"Use graph search (Dijkstra/A*) to find paths between nodes")
-    print(result_2d[1])
 
     vis_2d = Visualizer2D()
     vis_2d.plot_grid_map(map_2d)
     if "expand" in result_2d[1]:
         vis_2d.plot_expand_tree(result_2d[1]["expand"])
-    vis_2d.plot_path(result_2d[0])
+    vis_2d.plot_path(result_2d[0][0])
     vis_2d.savefig("rrg_2d.png")
     vis_2d.show()
 
@@ -107,38 +105,40 @@ if __name__ == "__main__":
     # vis_3d.show()
 
     # Example 3: Multiple start/goal positions (multi-query)
-    # print("\nRunning RRG with multiple start/goal positions...")
-    # map_multi = read_grid_from_yaml("path_planning/maps/2d/2d.yaml")
-    # map_multi.inflate_obstacles(radius=3)
-    # starts_multi = [(5, 5), (10, 10)]  # Multiple start positions
-    # goals_multi = [(45, 25), (40, 30)]  # Multiple goal positions
+    print("\nRunning RRG with multiple start/goal positions...")
+    map_multi = read_grid_from_yaml("path_planning/maps/2d/2d.yaml")
+    map_multi.inflate_obstacles(radius=3)
+    starts_multi = [(5, 5), (10, 10)]  # Multiple start positions
+    goals_multi = [(45, 25), (45, 5)]  # Multiple goal positions
 
-    # for i, start in enumerate(starts_multi):
-    #     map_multi.type_map[start] = TYPES.START
-    # for i, goal in enumerate(goals_multi):
-    #     map_multi.type_map[goal] = TYPES.GOAL
+    for i, start in enumerate(starts_multi):
+        map_multi.type_map[start] = TYPES.START
+    for i, goal in enumerate(goals_multi):
+        map_multi.type_map[goal] = TYPES.GOAL
 
-    # planner_multi = RRG(
-    #     map_=map_multi,
-    #     start=starts_multi,
-    #     goal=goals_multi,
-    #     max_dist=5.0,
-    #     sample_num=5000,
-    #     goal_sample_rate=0.1,
-    #     discrete=False,
-    #     use_faiss=False,
-    # )
+    planner_multi = RRG(
+        map_=map_multi,
+        start=starts_multi,
+        goal=goals_multi,
+        max_dist=5.0,
+        sample_num=5000,
+        goal_sample_rate=0.1,
+        discrete=False,
+        use_faiss=False,
+    )
 
-    # result_multi = planner_multi.plan()
+    result_multi = planner_multi.plan()
 
-    # print(f"RRG built graph with {len(planner_multi.road_map)} nodes")
-    # print("Graph can be used for multi-query path planning")
+    print(f"RRG built graph with {len(planner_multi.road_map)} nodes")
+    print("Graph can be used for multi-query path planning")
 
-    # vis_multi = Visualizer2D()
-    # vis_multi.plot_grid_map(map_multi)
-    # if "expand" in result_multi[1]:
-    #     vis_multi.plot_expand_tree(result_multi[1]["expand"])
-    # vis_multi.savefig("rrg_multi.png")
-    # vis_multi.show()
+    vis_multi = Visualizer2D()
+    vis_multi.plot_grid_map(map_multi)
+    if "expand" in result_multi[1]:
+        vis_multi.plot_expand_tree(result_multi[1]["expand"])
+    for path in result_multi[0]:
+        vis_multi.plot_path(path)
+    vis_multi.savefig("rrg_multi.png")
+    vis_multi.show()
 
-    # print("\nRRG examples completed!")
+    print("\nRRG examples completed!")

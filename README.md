@@ -42,6 +42,11 @@ Running our custom Probabilitis Road Map (PRM) algorithm on the sample maps
 python -m scripts.run_prm
 ```
 
+Running our custom Rapidly Exploring Random Graphs (RRG) algorithm on the sample maps
+```
+python -m scripts.run_rrg
+```
+
 Running our custom graph sampler to generate road map and planar map on the sample maps
 ```
 python scripts/run_graph_sampler.py
