@@ -56,12 +56,16 @@ class Visualizer2D(BaseVisualizer2D):
                 }
             ):
         super().__init__(figname, figsize, cmap_dict, zorder) 
+        self.figsize = figsize
         self.fig.subplots_adjust(left=0,right=1,bottom=0,top=1, wspace=None, hspace=None)
 
     def set_fig_size(self, width: float, height: float, aspect_ratio: float = 0.0):
         if aspect_ratio != 0.0:
             height = width/aspect_ratio
         self.fig.set_size_inches(width, height)
+
+    def close(self):
+        plt.close(self.fig)
 
     def plot_road_map(self,
                         map_: Grid,
@@ -72,7 +76,8 @@ class Visualizer2D(BaseVisualizer2D):
                         node_size: float = 1, 
                         linewidth: float = 1.0, 
                         node_alpha: float = 1.0,
-                        edge_alpha: float = 0.3,) -> None:
+                        edge_alpha: float = 0.3,
+                        map_frame: bool = True) -> None:
         """
         Plot the roadmap.
 
@@ -86,9 +91,15 @@ class Visualizer2D(BaseVisualizer2D):
             edge_alpha: Alpha of the edges.
         """
         # Plot all edges
-        x_coords = [node.current[0] for node in nodes]
-        y_coords = [node.current[1] for node in nodes]
+        if map_frame:
+            x_coords = [map_.map_to_world(node.current)[0] for node in nodes]
+            y_coords = [map_.map_to_world(node.current)[1] for node in nodes]
+        else:
+            x_coords = [node.current[0] for node in nodes]
+            y_coords = [node.current[1] for node in nodes]
         for i, edges in enumerate(road_map):
+            if len(edges) == 0:
+                continue
             x1, y1 = x_coords[i], y_coords[i]
             # if not (x1 in points[ind1][:,0] and y1 in points[ind1][:,1]) and not (x1 in points[ind2][:,0] and x1 in points[ind2][:,1]):
             #     continue
@@ -105,18 +116,31 @@ class Visualizer2D(BaseVisualizer2D):
             if isinstance(map_.start, list) and len(map_.start) > 0:
                 # Multiple start positions
                 for start in map_.start:
+                    start = map_.map_to_world(start)
                     if start is not None and len(start) >= 2:
                         self.ax.scatter(start[0], start[1], c='red', s=20, alpha=1, zorder=self.zorder['expand_tree_node'], label='Start' if start == map_.start[0] else '')
             else:
                 # Single start position (not a list)
-                start = map_.start
+                start = map_.map_to_world(map_.start)
                 if len(start) >= 2:
                     self.ax.scatter(start[0], start[1], c='red', s=20, alpha=1, zorder=self.zorder['expand_tree_node'], label='Start')
+
+        if hasattr(map_, 'goal') and map_.goal is not None:
+            if isinstance(map_.goal, list) and len(map_.goal) > 0:
+                for goal in map_.goal:
+                    goal = map_.map_to_world(goal)
+                    if goal is not None and len(goal) >= 2:
+                        self.ax.scatter(goal[0], goal[1], c='blue', s=20, alpha=1, zorder=self.zorder['expand_tree_node'], label='Goal')
+            else:
+                goal = map_.map_to_world(map_.goal)
+                if len(goal) >= 2:
+                    self.ax.scatter(goal[0], goal[1], c='blue', s=20, alpha=1, zorder=self.zorder['expand_tree_node'], label='Goal')
 
     def animate(self,file_name,map, schedule, road_map=None, skip_frames=1, intermediate_frames=3,speed=1):
 
         combined_schedule = {}
         combined_schedule.update(schedule["schedule"])
+        self.set_fig_size(self.figsize[0], self.figsize[1], map.shape[0]/map.shape[1])
 
         # Draw static map and paths
         Colors = ['orange', 'blue', 'green']
@@ -137,13 +161,13 @@ class Visualizer2D(BaseVisualizer2D):
         for name in schedule["schedule"]:
             start = schedule["schedule"][name][0]
             x,y = start["x"], start["y"]
-            agents[name] = Circle((x, y), 0.3, facecolor=Colors[0], edgecolor='black',zorder=100)
+            agents[name] = Circle((x, y), 0.3, facecolor=Colors[0], edgecolor='black',zorder=self.zorder['robot_circle'])
             agents[name].original_face_color = Colors[0]
             patches.append(agents[name])
 
             T = max(T, schedule["schedule"][name][-1]["t"])//skip_frames
             text_name = re.findall(r'\d+', name)[-1]
-            agent_names[name] = self.ax.text(x, y, text_name ,zorder=100)
+            agent_names[name] = self.ax.text(x, y, text_name ,zorder=self.zorder['robot_text'])
             agent_names[name].set_horizontalalignment('center')
             agent_names[name].set_verticalalignment('center')
             artists.append(agent_names[name])
@@ -218,4 +242,5 @@ class Visualizer2D(BaseVisualizer2D):
             "ffmpeg",
             fps=intermediate_frames * speed,
             dpi=200)
+        self.set_fig_size(self.figsize[0], self.figsize[1])
 
