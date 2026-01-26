@@ -63,13 +63,14 @@ if __name__ == "__main__":
 
             start = [s.current for s in map_.get_start_nodes()]
             goal = [g.current for g in map_.get_goal_nodes()]
-            agents ={
-                agent['name']: {
+            agents =[
+                {
+                    "name": agent['name'],
                     "start": start[i],
                     "goal": goal[i]
                 }
                 for i, agent in enumerate(agents)
-            }
+            ]
 
             env = Environment(map_, agents, astar_max_iterations=-1)
 
