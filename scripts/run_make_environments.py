@@ -17,9 +17,9 @@ def make_grid2d_map(filename: str = "path_planning/maps/2d/2d.yaml"):
     goal = [(44,19), (20,25)]
     agents = [
         { 
-            "goal": goal[ii],
+            "goal": list(goal[ii]),
             "name": "agent"+str(ii),
-            "start": start[ii],
+            "start": list(start[ii]),
         }
         for ii in range(len(start))
     ]
@@ -39,9 +39,9 @@ def make_grid3d_map(filename: str = "path_planning/maps/3d/3d.yaml"):
     goal = [(12,3,5), (25,10,5)]
     agents = [
         { 
-            "goal": goal[ii],
+            "goal": list(goal[ii]),
             "name": "agent"+str(ii),
-            "start": start[ii],
+            "start": list(start[ii]),
         }
         for ii in range(len(start))
     ]

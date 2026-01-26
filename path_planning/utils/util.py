@@ -101,7 +101,7 @@ def read_grid_from_yaml(filename: str):
         raise ValueError(f"Unsupported dimensions: {len(dimensions)}")
     return env
 
-def read_graph_sampler_from_yaml(filename: str):
+def read_graph_sampler_from_yaml(filename: str,use_discrete_space: bool = True):
     """
     Read a YAML file and recreate a GraphSampler environment.
     Args:
@@ -119,7 +119,7 @@ def read_graph_sampler_from_yaml(filename: str):
     obstacles = np.array(yaml_data['map']['obstacles']) if 'obstacles' in yaml_data['map'] else []
     
     
-    env = GraphSampler(bounds=bounds, resolution=resolution,start=[],goal=[])
+    env = GraphSampler(bounds=bounds, resolution=resolution,start=[],goal=[],use_discrete_space=use_discrete_space)
     if len(dimensions) == 2:
         env.type_map[obstacles[:,0], obstacles[:,1]] = TYPES.OBSTACLE 
     elif len(dimensions) == 3:

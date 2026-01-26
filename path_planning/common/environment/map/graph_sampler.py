@@ -11,7 +11,7 @@ from itertools import product
 from python_motion_planning.common import TYPES
 
 class GraphSampler(Grid):
-    def __init__(self,*args,start,goal,sample_num=0,num_neighbors = 13.0, min_edge_len = 0.0, max_edge_len = 30.0,**kwargs):
+    def __init__(self,*args,start,goal,sample_num=0,num_neighbors = 13.0, min_edge_len = 0.0, max_edge_len = 30.0,use_discrete_space=True,**kwargs):
         super().__init__(*args, **kwargs)
 
         # Check if start and goal are lists, non-empty, and not None
@@ -34,6 +34,7 @@ class GraphSampler(Grid):
         self.nodes = []
         self.track_with_link = False
         self.road_map = []
+        self.use_discrete_space = use_discrete_space
 
     def __str__(self) -> str:
         return "Graph Sampler"
@@ -44,24 +45,21 @@ class GraphSampler(Grid):
         self.min_edge_length = min_edge_len
         self.max_edge_length = max_edge_len
 
-    def set_start(self, start, discrete=True):
-        if discrete:
+    def set_start(self, start):
+        if self.use_discrete_space:
             start_pixel = start
-            start = [self.map_to_world(s) for s in start]
         else:
-            start_pixel = [self.world_to_map(s) for s in start]
-        
+            start_pixel = [self.world_to_map(s,discrete=True) for s in start]
         self.start = start
         for s in start_pixel:
             self.type_map[tuple(s)] = TYPES.START
         
 
-    def set_goal(self, goal, discrete=True):
-        if discrete:
+    def set_goal(self, goal):
+        if self.use_discrete_space:
             goal_pixel = goal
-            goal = [self.map_to_world(g) for g in goal]
         else:
-            goal_pixel =  [self.world_to_map(g) for g in goal]
+            goal_pixel =  [self.world_to_map(g,discrete=True) for g in goal]
         self.goal = goal
         for g in goal_pixel:
             self.type_map[tuple(g)] = TYPES.GOAL
@@ -251,6 +249,8 @@ class GraphSampler(Grid):
         
         tMax[non_zero_mask] = offset[non_zero_mask] / abs_delta[non_zero_mask]
         tDelta[non_zero_mask] = 1.0 / abs_delta[non_zero_mask]
+        if np.all(np.abs(tMax) < 1e-10):
+            tMax = abs_delta*1e-10
         
         # Calculate distance (Manhattan distance in grid space)
         dist = int(np.sum(np.abs(p2_grid - p1_grid)))
@@ -268,6 +268,11 @@ class GraphSampler(Grid):
             
             valid_tMax = np.where(valid_dims, tMax, np.inf)
             min_dim = np.argmin(valid_tMax)
+
+            tied_dims = np.where(np.abs(tMax - tMax[min_dim]) < 1e-10)[0]
+            if len(tied_dims) > 1:
+                diff = p2_grid - current_tile
+                min_dim = np.argmax(np.abs(diff))
             
             # Step in that dimension
             current_tile[min_dim] += step[min_dim]
@@ -282,6 +287,39 @@ class GraphSampler(Grid):
                 seen.add(tile_tuple)
                 if not self.is_expandable(tile_tuple):
                     return True  # Found collision, terminate early
+
+            # tied_dims = np.where(np.abs(tMax - tMax[min_dim]) < 1e-10)[0]
+
+            # # Step in ALL tied dimensions
+            # for min_dim in tied_dims:
+            #     # Step in that dimension
+            #     new_tile = current_tile.copy()
+            #     new_tile[min_dim] += step[min_dim]
+
+            #     # Update tMax
+            #     if tDelta[min_dim] != float('inf'):
+            #         tMax[min_dim] += tDelta[min_dim]
+                
+            #     # Check collision immediately (early termination)
+            #     tile_tuple = tuple(new_tile)
+            #     if tile_tuple not in seen:
+            #         seen.add(tile_tuple)
+            #         if not self.is_expandable(tile_tuple):
+            #             return True  # Found collision, terminate early
+
+            #  # Step in ALL tied dimensions
+            # for min_dim in tied_dims:
+            #     # Step in that dimension
+            #     current_tile[min_dim] += step[min_dim]
+                
+            # # Check collision immediately (early termination)
+            # tile_tuple = tuple(current_tile)
+            # if tile_tuple not in seen:
+            #     seen.add(tile_tuple)
+            #     if not self.is_expandable(tile_tuple):
+            #         return True  # Found collision, terminate early
+            if tile_tuple == tuple(p2_grid):
+                return False
         
         return False  # No collision found
 
@@ -293,9 +331,14 @@ class GraphSampler(Grid):
         while num_nodes < self.sample_num:
             normalized_points = np.random.random((self.sample_num,self.dim))
             points = normalized_points * (bounds[:,1] - bounds[:,0]) + bounds[:,0]
-            for point in points:
-                node = Node(tuple(point),None,0,0)
-                if self.is_expandable(self.world_to_map(node.current,discrete=True)):
+            pixels = [self.world_to_map(point,discrete=True) for point in points]
+            for ii in range(self.sample_num):
+                if self.use_discrete_space:
+                    current = tuple(self.world_to_map(points[ii])) # Convert to discrete space but not into int
+                else:
+                    current = tuple(points[ii])
+                node = Node(current,None,0,0)
+                if self.is_expandable(tuple(pixels[ii])):
                     nodes.append(node)
                     self.node_index_list[node] = len(nodes) - 1
                     num_nodes += 1
@@ -324,8 +367,11 @@ class GraphSampler(Grid):
                 # Check if this grid cell is expandable (not in collision)
                 if self.is_expandable(grid_coords_tuple):
                     # Adjust the world coordinates to avoid precision and rounding issues
-                    world_coords = tuple(i for i in self.map_to_world(grid_coords_tuple))
-                    node = Node(world_coords, None, 0, 0)
+                    if self.use_discrete_space:
+                        current = grid_coords_tuple
+                    else:
+                        current =tuple(i for i in self.map_to_world(grid_coords_tuple))
+                    node = Node(current, None, 0, 0)
                     nodes.append(node)
                     self.node_index_list[node] = len(nodes) - 1
                     self.grid_nodes_index[node] = len(nodes)-1
@@ -372,25 +418,13 @@ class GraphSampler(Grid):
                 if self.get_cost(node_s,node_n) > self.max_edge_length:
                     break
 
-                if not self.in_collision(s_pos, n_pos):
+                if not self.in_collision(s_pos, n_pos) and not self.in_collision(n_pos, s_pos):
                     edge_id.append(indexes[ii])
 
                 if self.num_neighbors > 0 and len(edge_id) >= self.num_neighbors:
                     break
 
             road_map.append(edge_id)
-
-        for j, edge in enumerate(road_map):
-            edge_temp = []
-            diffs = [(0,1), (0,-1), (-1,0), (1,0)]
-            node_j = samples[j].current
-            for diff in diffs:
-                for i in edge:
-                    node = samples[i].current
-                    if node[0] - node_j[0] == diff[0] and node[1] - node_j[1] == diff[1]:
-                        edge_temp.append(i)
-            road_map[j] = edge_temp
-
         self.road_map = road_map
         return road_map
 
@@ -412,7 +446,7 @@ class GraphSampler(Grid):
             node_n = samples[edge[1]]
             s_pos = points[edge[0]]    
             n_pos = points[edge[1]]
-            if not self.in_collision(s_pos, n_pos) \
+            if not self.in_collision(s_pos, n_pos) and not self.in_collision(n_pos, s_pos) \
                 and  self.get_cost(node_s,node_n) >= self.min_edge_length and  self.get_cost(node_s,node_n) <= self.max_edge_length:
                 selected_edges.append(edge)
 
