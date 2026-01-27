@@ -45,9 +45,9 @@ if __name__ == "__main__":
 
     vis = Visualizer3D()
     vis.plot_grid_map(map_)
-    vis.plot_path(path)
+    vis.plot_path(path)       
     vis.plot_expand_tree(path_info["expand"])
-
+    
     # For 3D visualization, PyVista requires show() before savefig()
     # Call show() first to initialize the renderer, then save
     vis.show()
