@@ -36,6 +36,7 @@ class RRG(BasePathPlanner):
     def __init__(
         self,
         *args,
+        min_dist: float = 0.0,
         max_dist: float = 5.0,
         sample_num: int = 100000,
         goal_sample_rate: float = 0.1,
@@ -44,6 +45,7 @@ class RRG(BasePathPlanner):
         **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
+        self.min_dist = min_dist
         self.max_dist = max_dist
         self.sample_num = sample_num
         self.goal_sample_rate = goal_sample_rate
@@ -255,13 +257,14 @@ class RRG(BasePathPlanner):
             # Use FAISS for radius search
             query = np.array(node_new.current, dtype=np.float32).reshape(1, -1)
             # Search for all nodes within max_dist^2 (L2 distance squared)
+            min_dist_sq = self.min_dist**2
             max_dist_sq = self.max_dist**2
             distances, indices = index.search(
                 query, min(index.ntotal, len(faiss_nodes))
             )
 
             for dist_sq, faiss_idx in zip(distances[0][1:], indices[0][1:]):
-                if dist_sq <= max_dist_sq and faiss_idx < len(faiss_nodes):
+                if min_dist_sq <=dist_sq <= max_dist_sq and faiss_idx < len(faiss_nodes):
                     nearby_node = faiss_nodes[faiss_idx]
                     nearby_nodes.append(nearby_node)
                 else:
@@ -275,7 +278,7 @@ class RRG(BasePathPlanner):
             for ii in range(1, len(indexes)):
                 node_pos = nodes[indexes[ii]].current
                 dist = self.get_cost(node_new_pos, node_pos)
-                if dist <= self.max_dist:
+                if self.min_dist <= dist <= self.max_dist:
                     nearby_nodes.append(nodes[indexes[ii]])
                 else:
                     break
