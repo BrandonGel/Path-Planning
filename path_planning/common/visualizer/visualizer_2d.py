@@ -6,6 +6,11 @@
 """
 from typing import List
 from python_motion_planning.common.env import TYPES,  Grid,  Node
+from matplotlib.patches import Circle
+import matplotlib.pyplot as plt
+from matplotlib import animation
+import re
+import numpy as np
 from python_motion_planning.common.visualizer.visualizer_2d import Visualizer2D as BaseVisualizer2D
 
 class Visualizer2D(BaseVisualizer2D):
@@ -51,9 +56,16 @@ class Visualizer2D(BaseVisualizer2D):
                 }
             ):
         super().__init__(figname, figsize, cmap_dict, zorder) 
+        self.fig.subplots_adjust(left=0,right=1,bottom=0,top=1, wspace=None, hspace=None)
+
+    def set_fig_size(self, width: float, height: float, aspect_ratio: float = 0.0):
+        if aspect_ratio != 0.0:
+            height = width/aspect_ratio
+        self.fig.set_size_inches(width, height)
 
     def plot_road_map(self,
-                        map_: Grid,nodes: List[Node],
+                        map_: Grid,
+                        nodes: List[Node],
                         road_map: List[List[int]],
                         node_color: str = "#8c564b", 
                         edge_color: str = "#e377c2", 
@@ -94,10 +106,116 @@ class Visualizer2D(BaseVisualizer2D):
                 # Multiple start positions
                 for start in map_.start:
                     if start is not None and len(start) >= 2:
-                        self.ax.scatter(start[0], start[1], c='red', s=20, alpha=1, zorder=self.zorder['expand_tree_node'], label='Start' if start == self.map_.start[0] else '')
+                        self.ax.scatter(start[0], start[1], c='red', s=20, alpha=1, zorder=self.zorder['expand_tree_node'], label='Start' if start == map_.start[0] else '')
             else:
                 # Single start position (not a list)
                 start = map_.start
                 if len(start) >= 2:
                     self.ax.scatter(start[0], start[1], c='red', s=20, alpha=1, zorder=self.zorder['expand_tree_node'], label='Start')
-        
+
+    def animate(self,file_name,map, schedule, road_map=None, skip_frames=1, intermediate_frames=3,speed=1):
+
+        combined_schedule = {}
+        combined_schedule.update(schedule["schedule"])
+
+        # Draw static map and paths
+        Colors = ['orange', 'blue', 'green']
+        self.ax.clear()
+        self.plot_grid_map(map)
+        if road_map is not None and map.nodes != []:
+            self.plot_road_map(map,map.nodes,road_map)
+
+        patches = []
+        artists = []
+        agents = dict()
+        agent_names = dict()
+
+        # create agents:
+        T = 0
+                
+        # draw goals first
+        for name in schedule["schedule"]:
+            start = schedule["schedule"][name][0]
+            x,y = start["x"], start["y"]
+            agents[name] = Circle((x, y), 0.3, facecolor=Colors[0], edgecolor='black',zorder=100)
+            agents[name].original_face_color = Colors[0]
+            patches.append(agents[name])
+
+            T = max(T, schedule["schedule"][name][-1]["t"])//skip_frames
+            text_name = re.findall(r'\d+', name)[-1]
+            agent_names[name] = self.ax.text(x, y, text_name ,zorder=100)
+            agent_names[name].set_horizontalalignment('center')
+            agent_names[name].set_verticalalignment('center')
+            artists.append(agent_names[name])
+
+        colors = ['tab:green', 'tab:orange']
+        agent_num = 0
+        for agent_name, agent in combined_schedule.items():
+            pos = np.array([[state['x'],state['y']] for state in agent])
+            self.ax.plot(pos[:,0], pos[:,1], color=colors[agent_num], zorder=self.zorder['traj'],linewidth=3)
+            agent_num += 1
+            agent_num %= len(colors)
+
+        self.ax.set_axis_off()
+
+        def init_func():
+            for p in patches:
+                self.ax.add_patch(p)
+            for a in artists:
+                self.ax.add_artist(a)
+            return patches + artists
+
+        def animate_func(i):
+            for agent_name, agent in combined_schedule.items():
+                pos = getState(i*skip_frames / intermediate_frames, agent)
+                p = (pos[0], pos[1])
+                agents[agent_name].center = p
+                agent_names[agent_name].set_position(p)
+
+            # reset all colors
+            for _,agent in agents.items():
+                agent.set_facecolor(agent.original_face_color)
+
+            # check drive-drive collisions
+            agents_array = [agent for _,agent in agents.items()]
+            for i in range(0, len(agents_array)):
+                for j in range(i+1, len(agents_array)):
+                    d1 = agents_array[i]
+                    d2 = agents_array[j]
+                    pos1 = np.array(d1.center)
+                    pos2 = np.array(d2.center)
+                    if np.linalg.norm(pos1 - pos2) < 0.7:
+                        d1.set_facecolor('red')
+                        d2.set_facecolor('red')
+                        print("COLLISION! (agent-agent) ({}, {})".format(i, j))
+
+            return patches + artists
+
+        def getState(t, d):
+            idx = 0
+            while idx < len(d) and d[idx]["t"] < t:
+                idx += 1
+            if idx == 0:
+                return np.array([float(d[0]["x"]), float(d[0]["y"])])
+            elif idx < len(d):
+                posLast = np.array([float(d[idx-1]["x"]), float(d[idx-1]["y"])])
+                posNext = np.array([float(d[idx]["x"]), float(d[idx]["y"])])
+            else:
+                return np.array([float(d[-1]["x"]), float(d[-1]["y"])])
+            dt = d[idx]["t"] - d[idx-1]["t"]
+            t = (t - d[idx-1]["t"]) / dt
+            pos = (posNext - posLast) * t + posLast
+            return pos
+                
+        anim = animation.FuncAnimation(self.fig, animate_func,
+                                init_func=init_func,
+                                frames=int(T+1) * intermediate_frames,
+                                interval=100,
+                                blit=True)
+
+        anim.save(
+            file_name,
+            "ffmpeg",
+            fps=intermediate_frames * speed,
+            dpi=200)
+
