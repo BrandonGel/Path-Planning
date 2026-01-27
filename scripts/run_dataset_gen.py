@@ -11,7 +11,7 @@ if __name__ == "__main__":
     parser.add_argument("-b","--bounds",type=list, nargs=2, default=[[0,32],[0,32]], help="bounds of the map")
     parser.add_argument("-n","--nb_agents",type=int, default=8, help="number of agents")
     parser.add_argument("-o","--nb_obstacles",type=float, default=0.1, help="number of obstacles or obstacle density")
-    parser.add_argument("-p","--nb_permutations",type=int, default=16, help="number of permutations")
+    parser.add_argument("-p","--nb_permutations",type=int, default=64, help="number of permutations")
     parser.add_argument("-r","--resolution",type=float, default=1.0, help="resolution of the map")
     parser.add_argument("-c","--num_cases",type=int, default=1, help="number of cases to generate")
     parser.add_argument("-y","--config",type=str, default='', help="config file to use")
@@ -30,5 +30,5 @@ if __name__ == "__main__":
             "nb_permutations": args.nb_permutations,
         }
     path = create_path_parameter_directory(base_path, config)
-    create_solutions(path, args.nb_cases, config)
+    create_solutions(path, args.num_cases, config)
 

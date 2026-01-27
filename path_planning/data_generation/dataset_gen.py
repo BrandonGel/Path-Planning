@@ -46,7 +46,9 @@ def gen_input(
     Returns:
         Dictionary with agent and map configuration, or None if generation fails
     """
-    dimensions = [int((bounds[i][1] - bounds[i][0]) / resolution) for i in range(len(bounds))]
+    
+    map_ = GraphSampler(bounds=bounds, resolution=resolution,start=[],goal=[])
+    dimensions = list(map_.shape)
     input_dict = {
         "map": {
             "dimensions": dimensions,

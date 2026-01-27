@@ -66,7 +66,7 @@ class Visualizer2D(BaseVisualizer2D):
 
     def close(self):
         plt.close(self.fig)
-
+        
     def plot_road_map(self,
                         map_: Grid,
                         nodes: List[Node],
@@ -244,3 +244,41 @@ class Visualizer2D(BaseVisualizer2D):
             dpi=200)
         self.set_fig_size(self.figsize[0], self.figsize[1])
 
+    def plot_density_map(self, density_map: np.ndarray, grid_map: Grid=None, equal: bool = False, alpha: float = 0.6) -> None:
+        '''
+        Plot density map as a heatmap that can be superimposed on other visualizations.
+
+        Args:
+            density_map: Density map.
+            grid_map: Grid map (optional, can be set separately).
+            equal: Whether to set axis equal.
+            alpha: Transparency level (0-1) for superimposing on other maps.
+        '''
+
+        if grid_map is not None:
+            if grid_map.dim != 2:
+                raise ValueError(f"Grid map dimension must be 2.")
+            self.grid_map = grid_map
+            self.dim = grid_map.dim
+
+        if len(density_map.shape) != 2:
+            raise ValueError(f"Density map dimension must be 2.")
+
+        assert self.grid_map is not None, "Grid map is not set"
+
+        # Create a masked array to hide zero values
+        masked_density = np.ma.masked_where(grid_map.type_map.data == TYPES.OBSTACLE, density_map)
+
+        self.ax.imshow(
+            np.transpose(masked_density), 
+            cmap="YlOrRd", 
+            origin='lower', 
+            interpolation='nearest', 
+            extent=[*self.grid_map.bounds[0], *self.grid_map.bounds[1]],
+            zorder=self.zorder['esdf'],  # Use esdf zorder to appear above grid_map but below paths
+            alpha=alpha,
+            )
+
+            
+        if equal: 
+            plt.axis("equal")
