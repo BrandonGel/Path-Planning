@@ -12,6 +12,7 @@ from matplotlib import animation
 import re
 import numpy as np
 from python_motion_planning.common.visualizer.visualizer_2d import Visualizer2D as BaseVisualizer2D
+import matplotlib.colors as mcolors
 
 class Visualizer2D(BaseVisualizer2D):
     """
@@ -37,6 +38,7 @@ class Visualizer2D(BaseVisualizer2D):
                     TYPES.CUSTOM: "#bbbbbb",
                 },
                 zorder: dict = {
+                    'density_map': 5,
                     'grid_map': 10,
                     'voxels': 10,
                     'esdf': 20,
@@ -56,8 +58,14 @@ class Visualizer2D(BaseVisualizer2D):
                 }
             ):
         super().__init__(figname, figsize, cmap_dict, zorder) 
+        base = plt.cm.YlOrRd
+        colors = base(range(256))
+        colors[0] = [1, 1, 1, 1]  # force white at the bottom
+        self.cmap_density= mcolors.LinearSegmentedColormap.from_list(
+            "white_ylorrd", colors
+        )
         self.figsize = figsize
-        self.fig.subplots_adjust(left=0,right=1,bottom=0,top=1, wspace=None, hspace=None)
+        self.fig.tight_layout()
 
     def set_fig_size(self, width: float, height: float, aspect_ratio: float = 0.0):
         if aspect_ratio != 0.0:
@@ -66,6 +74,52 @@ class Visualizer2D(BaseVisualizer2D):
 
     def close(self):
         plt.close(self.fig)
+        
+    def plot_grid_map(self, grid_map: Grid, equal: bool = False,
+                        show_esdf: bool = False, alpha_esdf: float = 0.5,masked_map = None) -> None:
+        '''
+        Plot grid map with static obstacles.
+
+        Args:
+            map: Grid map or its type map.
+            equal: Whether to set axis equal.
+            show_esdf: Whether to show esdf.
+            alpha_esdf: Alpha of esdf.
+        '''
+        if grid_map.dim != 2:
+            raise ValueError(f"Grid map dimension must be 2.")
+
+        self.grid_map = grid_map
+        self.dim = grid_map.dim
+        type_data = grid_map.type_map.data
+
+        if masked_map is not None:
+            type_data = np.ma.masked_where(masked_map == 1, type_data)
+
+        plt.imshow(
+            np.transpose(type_data), 
+            cmap=self.cmap, 
+            norm=self.norm, 
+            origin='lower', 
+            interpolation='nearest', 
+            extent=[*grid_map.bounds[0], *grid_map.bounds[1]],
+            zorder=self.zorder['grid_map'],
+            )
+
+        if show_esdf:   # draw esdf hotmap
+            plt.imshow(
+                np.transpose(grid_map.esdf),
+                cmap="jet",
+                origin="lower",
+                interpolation="nearest",
+                extent=[*grid_map.bounds[0], *grid_map.bounds[1]],
+                alpha=alpha_esdf,
+                zorder=self.zorder['esdf'],
+            )
+            plt.colorbar(label="ESDF distance")
+            
+        if equal: 
+            plt.axis("equal")
         
     def plot_road_map(self,
                         map_: Grid,
@@ -140,6 +194,7 @@ class Visualizer2D(BaseVisualizer2D):
 
         combined_schedule = {}
         combined_schedule.update(schedule["schedule"])
+        self.fig.subplots_adjust(left=0,right=1,bottom=0,top=1, wspace=None, hspace=None)
         self.set_fig_size(self.figsize[0], self.figsize[1], map.shape[0]/map.shape[1])
 
         # Draw static map and paths
@@ -244,7 +299,7 @@ class Visualizer2D(BaseVisualizer2D):
             dpi=200)
         self.set_fig_size(self.figsize[0], self.figsize[1])
 
-    def plot_density_map(self, density_map: np.ndarray, grid_map: Grid=None, equal: bool = False, alpha: float = 0.6) -> None:
+    def plot_density_map(self, density_map: np.ndarray, grid_map: Grid=None, equal: bool = False, alpha: float = 0.6,masked_map = None) -> None:
         '''
         Plot density map as a heatmap that can be superimposed on other visualizations.
 
@@ -267,18 +322,20 @@ class Visualizer2D(BaseVisualizer2D):
         assert self.grid_map is not None, "Grid map is not set"
 
         # Create a masked array to hide zero values
-        masked_density = np.ma.masked_where(grid_map.type_map.data == TYPES.OBSTACLE, density_map)
+        if masked_map is not None:
+            density_map = np.ma.masked_where(masked_map == 1, density_map)
 
-        self.ax.imshow(
-            np.transpose(masked_density), 
-            cmap="YlOrRd", 
+
+        im = self.ax.imshow(
+            np.transpose(density_map), 
+            cmap=self.cmap_density, 
             origin='lower', 
-            interpolation='nearest', 
+            interpolation='bilinear', 
             extent=[*self.grid_map.bounds[0], *self.grid_map.bounds[1]],
-            zorder=self.zorder['esdf'],  # Use esdf zorder to appear above grid_map but below paths
+            zorder=self.zorder['density_map'],  # Use esdf zorder to appear above grid_map but below paths
             alpha=alpha,
             )
-
+        self.fig.colorbar(im,ax=self.ax, orientation='vertical',label="Frequency")
             
         if equal: 
             plt.axis("equal")
