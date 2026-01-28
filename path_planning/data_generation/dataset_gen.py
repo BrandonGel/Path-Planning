@@ -15,6 +15,10 @@ from path_planning.multi_agent_planner.centralized.cbs.cbs import Environment, C
 from path_planning.common.environment.map.graph_sampler import GraphSampler
 from python_motion_planning.common import TYPES
 import math
+import time
+from tqdm import tqdm
+from multiprocessing import Pool, cpu_count
+import shutil
 
 def shuffle_agents_goals(inpt: Dict,agent_goal_index: List[int]) -> Dict:
     """
@@ -128,7 +132,111 @@ def gen_input(
     return input_dict
 
 
-def data_gen(input_dict: Dict, output_path: Path,use_discrete_space: bool = True) -> bool:
+def process_single_permutation(args: Tuple) -> Tuple[bool, int]:
+    """
+    Process a single permutation in parallel.
+    
+    Args:
+        args: Tuple of (inpt_dict, agent_goal_index, case_path, perm_id, seed)
+    
+    Returns:
+        Tuple of (success: bool, perm_id: int)
+    """
+    inpt, agent_goal_index, case_path, perm_id, seed, timeout, max_attempts = args
+    
+    # Set random seed for this worker process
+    np.random.seed(seed)
+    
+    # Shuffle agents/goals
+    agents = shuffle_agents_goals(inpt, agent_goal_index)
+    inpt_copy = inpt.copy()
+    inpt_copy["agents"] = agents
+    
+    # Generate solution
+    perm_path = case_path / f"perm_{perm_id}"
+    success = data_gen(inpt_copy, perm_path, timeout=timeout, max_attempts=max_attempts)
+    
+    if not success and perm_path.exists():
+        shutil.rmtree(perm_path)
+    
+    return success, perm_id
+
+
+def process_single_case(args: Tuple) -> Tuple[float, float, int]:
+    """
+    Process a single case in parallel (including all its permutations).
+    
+    Args:
+        args: Tuple of (case_id, path, config, seed)
+    
+    Returns:
+        Tuple of (successful_ratio, failed_ratio, case_id)
+    """
+    case_id, path, config, seed = args
+    
+    # Set random seed for this worker process
+    np.random.seed(seed)
+    
+    # Generate random instance
+    inpt = gen_input(
+        config["bounds"],
+        config["nb_obstacles"],
+        config["nb_agents"],
+        config["resolution"],
+    )
+    timeout = config["timeout"]
+    max_attempts = config["max_attempts"]
+    if inpt is None:
+        return 0.0, 1.0, case_id
+    
+    case_path = path / f"case_{case_id}"
+    
+    # Prepare permutation tasks
+    permutation_tasks = []
+    permutations = set()
+    agent_goal_index = np.arange(0, config["nb_agents"]*2, 1)
+    
+    # Check max permutations
+    max_permutations = math.factorial(2*config["nb_agents"])
+    nb_permutations = config["nb_permutations"]
+    if nb_permutations > max_permutations:
+        nb_permutations = max_permutations
+    
+    # Generate all unique permutations
+    for perm_id in range(nb_permutations):
+        attempts = 0
+        while tuple(agent_goal_index) in permutations:
+            agent_goal_index = np.random.permutation(agent_goal_index)
+            attempts += 1
+            if attempts > 1000:
+                break
+        
+        permutations.add(tuple(agent_goal_index))
+        perm_seed = np.random.randint(0, 2**31)
+        task = (inpt.copy(), agent_goal_index.copy(), case_path, perm_id, perm_seed, timeout, max_attempts)
+        permutation_tasks.append(task)
+        agent_goal_index = np.random.permutation(agent_goal_index)
+    
+    # Process permutations sequentially
+    # Note: Permutations are always processed sequentially within each case worker
+    # to avoid nested multiprocessing complexity and daemon process errors.
+    successful_permutations = 0
+    failed_permutations = 0
+    
+    for task in permutation_tasks:
+        success, _ = process_single_permutation(task)
+        if success:
+            successful_permutations += 1
+        else:
+            failed_permutations += 1
+    
+    successful_ratio = successful_permutations / nb_permutations
+    failed_ratio = failed_permutations / nb_permutations
+    
+    return successful_ratio, failed_ratio, case_id
+
+
+def data_gen(input_dict: Dict, output_path: Path, timeout: int = 60, max_attempts: int = 10000) -> bool:
     """
     Generate solution for given MAPF instance.
 
@@ -146,7 +254,7 @@ def data_gen(input_dict: Dict, output_path: Path,use_discrete_space: bool = True
     bounds = param["map"]["bounds"]
     resolution = param["map"]["resolution"]
     agents = param["agents"]
-    map_ = GraphSampler(bounds=bounds, resolution=resolution,start=[],goal=[],use_discrete_space=use_discrete_space)
+    map_ = GraphSampler(bounds=bounds, resolution=resolution,start=[],goal=[],use_discrete_space=True)
     map_.type_map[obstacles[:,0], obstacles[:,1]] = TYPES.OBSTACLE 
 
     map_.inflate_obstacles(radius=0)
@@ -171,9 +279,11 @@ def data_gen(input_dict: Dict, output_path: Path,use_discrete_space: bool = True
     ]
     env = Environment(map_, agents)
 
-    # Search for solution
-    cbs = CBS(env)
+    # Search for solution and measure runtime
+    cbs = CBS(env, time_limit=timeout, max_iterations=max_attempts)
+    start_time = time.time()
     solution = cbs.search()
+    runtime = time.time() - start_time
 
     if not solution:
         print(f"No solution found for case {output_path.name}")
@@ -182,7 +292,8 @@ def data_gen(input_dict: Dict, output_path: Path,use_discrete_space: bool = True
     # Write solution file
     output = {
         "schedule": solution,
-        "cost": env.compute_solution_cost(solution)
+        "cost": env.compute_solution_cost(solution),
+        "runtime": runtime
     }
 
     solution_file = output_path / "solution.yaml"
@@ -199,7 +310,7 @@ def data_gen(input_dict: Dict, output_path: Path,use_discrete_space: bool = True
 
 def create_solutions(path: Path, num_cases: int, config: Dict):
     """
-    Create multiple MAPF instances and their solutions.
+    Create multiple MAPF instances and their solutions with parallel processing.
 
     Args:
         path: Base path for dataset
@@ -208,69 +319,54 @@ def create_solutions(path: Path, num_cases: int, config: Dict):
     """
     path = Path(path)
     path.mkdir(parents=True, exist_ok=True)
-
+    
     # Count existing cases
     existing_cases = [d for d in path.iterdir() if d.is_dir() and d.name.startswith("case_")]
     cases_ready = len(existing_cases) if existing_cases else 0
-
+    
     print(f"Generating solutions (starting from case {cases_ready})")
-
+    
+    # Get number of workers for cases
+    num_workers = config.get("num_workers", cpu_count())
+    
+    # Prepare case tasks
+    case_tasks = []
+    for i in range(cases_ready, num_cases):
+        seed = np.random.randint(0, 2**31)
+        task = (i, path, config, seed)
+        case_tasks.append(task)
+    
+    # Process cases in parallel
     successful = 0
     failed = 0
-
-    for i in range(cases_ready, num_cases):
-        if i % 25 == 0:
-            print(f"Solution -- [{i}/{num_cases}] (Success: {successful}, Failed: {failed})")
-
-        # Generate random instance
-        inpt = gen_input(
-            config["bounds"],
-            config["nb_obstacles"],
-            config["nb_agents"],
-            config["resolution"],
-        )
-
-        if inpt is None:
-            failed += 1
-            continue
-
-        # Generate and save solution
-       
-        successful_permutations = 0
-        failed_permutations = 0
-        agent_goal_index = np.arange(0,config["nb_agents"]*2,1)
-        permutations = set[Any]()
-        if config["nb_permutations"] > math.factorial(2*config["nb_agents"]):
-            print(f"Warning: Requesting {config["nb_permutations"]} positions in {math.factorial(2*config["nb_agents"])} cells")
-            print(f"Setting nb_permutations to {math.factorial(2*config["nb_agents"])}")
-            config["nb_permutations"] = math.factorial(2*config["nb_agents"])
-        for _ in range(config["nb_permutations"]):
-            case_path = path / f"case_{i}"/f"perm_{successful_permutations}"  
-            while tuple[Any, ...](agent_goal_index) in permutations:
-                agent_goal_index = np.random.permutation(agent_goal_index)
-            agents = shuffle_agents_goals(inpt,agent_goal_index)
-            inpt["agents"] = agents
-
-            if data_gen(inpt, case_path):
-                successful_permutations += 1
-            else:
-                failed_permutations += 1
-                # Remove failed case directory
-                if case_path.exists():
-                    import shutil
-                    shutil.rmtree(case_path)
-
-            permutations.add(tuple(agent_goal_index))
-            agent_goal_index = np.random.permutation(agent_goal_index)
-
-            
+    
+    if num_workers > 1 and len(case_tasks) > 1:
+        with Pool(processes=num_workers) as pool:
+            results = []
+            for result in tqdm(
+                pool.imap_unordered(process_single_case, case_tasks),
+                total=len(case_tasks),
+                desc="Generating cases"
+            ):
+                results.append(result)
         
-        successful += successful_permutations/config["nb_permutations"]
-        failed += failed_permutations/config["nb_permutations"]
-
-        
-
-    print(f"Generation complete: {successful} successful, {failed} failed")
+        # Aggregate results
+        for successful_ratio, failed_ratio, case_id in results:
+            successful += successful_ratio
+            failed += failed_ratio
+    else:
+        # Sequential fallback
+        for task in tqdm(case_tasks, desc="Generating cases"):
+            successful_ratio, failed_ratio, case_id = process_single_case(task)
+            successful += successful_ratio
+            failed += failed_ratio
+    
+    # Print summary
+    cases_processed = num_cases - cases_ready
+    total_permutations = cases_processed * config["nb_permutations"]
+    print(f"Generation complete: {successful:.2f} successful cases, {failed:.2f} failed cases")
+    print(f"Total Successful permutations: {int(successful * total_permutations)}")
+    print(f"Total Failed permutations: {int(failed * total_permutations)}")
     print(f"Cases stored in {path}")
 
 def create_path_parameter_directory(base_path: Path, config: Dict):
