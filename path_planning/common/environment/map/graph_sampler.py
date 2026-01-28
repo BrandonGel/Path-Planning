@@ -32,6 +32,7 @@ class GraphSampler(Grid):
         self.goal_nodes_index = {}
         self.grid_nodes_index = {}
         self.nodes = []
+        self.obstacle_nodes = []
         self.track_with_link = False
         self.road_map = []
         self.use_discrete_space = use_discrete_space
@@ -85,6 +86,24 @@ class GraphSampler(Grid):
     def get_node_index(self, node: Node) -> int:
         return self.node_index_list[node]
     
+    def set_obstacle_map(self, obstacles: np.ndarray):
+        obstacles = np.array(obstacles)
+        if len(obstacles.shape) == 2:
+            self.type_map[obstacles[:,0], obstacles[:,1]] = TYPES.OBSTACLE 
+        elif len(obstacles.shape) == 3:
+            self.type_map[obstacles[:,0], obstacles[:,1], obstacles[:,2]] = TYPES.OBSTACLE 
+        else:
+            raise ValueError(f"Unsupported dimensions: {len(obstacles.shape)}")
+        for obstacle in obstacles:
+            node = Node(tuple(obstacle),None,0,0)
+            self.obstacle_nodes.append(node)
+
+    def get_obstacle_map(self) -> np.ndarray:
+        return self.type_map.data == TYPES.OBSTACLE
+
+    def get_obstacle_nodes(self) -> List[Node]:
+        return self.obstacle_nodes
+
     def get_cost(self, p1_node: tuple, p2_node: tuple) -> float:
         """
         Get the cost between two nodes. (default: distance defined in the map)
