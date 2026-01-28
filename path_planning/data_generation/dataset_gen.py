@@ -25,7 +25,7 @@ def shuffle_agents_goals(inpt: Dict,agent_goal_index: List[int]) -> Dict:
     Shuffle the goals of the agents.
     """
     agents = inpt["agents"]
-    start_goals = [agent["start"] for agent in agents] + [agent["goal"] for agent in agents]
+    start_goals = [agent["start"].copy() for agent in agents] + [agent["goal"].copy() for agent in agents]
     for i in range(len(agents)):
         agents[i]["start"] = start_goals[agent_goal_index[i]]
         agents[i]["goal"] = start_goals[agent_goal_index[i+len(agents)]]
@@ -116,7 +116,6 @@ def gen_input(
         occupied_positions.add(start_pos)
 
         # Get goal position (can overlap with other goals but not starts/obstacles)
-        goal_occupied = occupied_positions - {s for s in occupied_positions if s in obstacles}
         goal_pos = get_random_position(occupied_positions)
         if goal_pos is None:
             print(f"Failed to place agent {agent_id} goal position")
@@ -199,6 +198,8 @@ def process_single_case(args: Tuple) -> Tuple[float, float, int]:
     # Check max permutations
     max_permutations = math.factorial(2*config["nb_agents"])
     nb_permutations = config["nb_permutations"]
+    if nb_permutations <= 0:
+        assert False, "Number of permutations must be greater than 0"
     if nb_permutations > max_permutations:
         nb_permutations = max_permutations
     
@@ -255,7 +256,7 @@ def data_gen(input_dict: Dict, output_path: Path, timeout: int = 60, max_attempt
     resolution = param["map"]["resolution"]
     agents = param["agents"]
     map_ = GraphSampler(bounds=bounds, resolution=resolution,start=[],goal=[],use_discrete_space=True)
-    map_.type_map[obstacles[:,0], obstacles[:,1]] = TYPES.OBSTACLE 
+    map_.set_obstacle_map(obstacles)
 
     map_.inflate_obstacles(radius=0)
     map_.set_parameters(sample_num=0, num_neighbors=4.0, min_edge_len=0.0, max_edge_len=1.1)
