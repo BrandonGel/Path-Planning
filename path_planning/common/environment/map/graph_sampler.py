@@ -9,9 +9,10 @@ from python_motion_planning.common.env.map.grid import Grid
 from scipy.spatial.distance import cdist
 from itertools import product
 from python_motion_planning.common import TYPES
+from path_planning.utils.cgal_sweep import CGAL_Sweep
 
 class GraphSampler(Grid):
-    def __init__(self,*args,start,goal,sample_num=0,num_neighbors = 13.0, min_edge_len = 0.0, max_edge_len = 30.0,use_discrete_space=True,**kwargs):
+    def __init__(self,*args,start,goal,sample_num=0,num_neighbors = 13.0, min_edge_len = 0.0, max_edge_len = 30.0,use_discrete_space=True,use_constraint_sweep=True,record_sweep=True,use_exact_collision_check=True,**kwargs):
         super().__init__(*args, **kwargs)
 
         # Check if start and goal are lists, non-empty, and not None
@@ -36,6 +37,11 @@ class GraphSampler(Grid):
         self.track_with_link = False
         self.road_map = []
         self.use_discrete_space = use_discrete_space
+        self.edges = []
+        self.edge_indices = {}
+        self.use_constraint_sweep = use_constraint_sweep
+        self.constraint_sweep = CGAL_Sweep(record_sweep=record_sweep,use_exact_collision_check=use_exact_collision_check)
+        self.sample_kd_tree = None
 
     def __str__(self) -> str:
         return "Graph Sampler"
@@ -85,12 +91,24 @@ class GraphSampler(Grid):
     
     def get_node_index(self, node: Node) -> int:
         return self.node_index_list[node]
+
+    def calculate_edges(self,roadmap: List[List[int]]):
+        edges = set()
+        edge_indices = {}
+        for ii in range(len(roadmap)):
+            for jj in roadmap[ii]:
+                if (ii,jj) not in edges and (jj,ii) not in edges:
+                    edges.add((ii,jj))
+                    edge_indices[len(edges)-1] = (ii,jj)
+        return list(edges), edge_indices
     
     def set_obstacle_map(self, obstacles: np.ndarray):
         obstacles = np.array(obstacles)
-        if len(obstacles.shape) == 2:
+        if len(obstacles) == 0:
+            return
+        if len(obstacles[0]) == 2:
             self.type_map[obstacles[:,0], obstacles[:,1]] = TYPES.OBSTACLE 
-        elif len(obstacles.shape) == 3:
+        elif len(obstacles[0]) == 3:
             self.type_map[obstacles[:,0], obstacles[:,1], obstacles[:,2]] = TYPES.OBSTACLE 
         else:
             raise ValueError(f"Unsupported dimensions: {len(obstacles.shape)}")
@@ -422,9 +440,11 @@ class GraphSampler(Grid):
         road_map = []
         points = np.array([samp.current for samp in samples])
         sample_kd_tree = KDTree(points)
+        self.sample_kd_tree = sample_kd_tree
         for i, node_s in zip(range(len(samples)), samples):
             s_pos = node_s.current
             dists, indexes = sample_kd_tree.query(s_pos, k=self.num_total_nodes)
+            indexes = indexes.tolist()
             edge_id = []
 
             for ii in range(1, len(indexes)):
@@ -445,16 +465,18 @@ class GraphSampler(Grid):
 
             road_map.append(edge_id)
         self.road_map = road_map
+        self.edges, self.edge_indices = self.calculate_edges(road_map)
         return road_map
 
     def generate_planar_map(self, samples: List[Node]):
-        planar_map = [[] for _ in range(len(samples))]
+        planar_map = [[] for ii in range(len(samples))]
         edge_list = {}
         points = np.array([samp.current for samp in samples])
         tri = Delaunay(points)
+        self.sample_kd_tree = KDTree(points)
 
         # Get the edges of the Delaunay triangulation
-        edges = [tuple(edge) for edge in np.concatenate([tri.simplices[:,[0,1]],tri.simplices[:,[1,2]],tri.simplices[:,[2,0]]],axis=0)]
+        edges = [tuple(edge) for edge in np.concatenate([tri.simplices[:,[0,1]],tri.simplices[:,[1,2]],tri.simplices[:,[2,0]]],axis=0).tolist()]
         selected_edges = []
         for edge in edges:
             if edge in edge_list:
@@ -472,9 +494,40 @@ class GraphSampler(Grid):
         for edge in selected_edges:
             planar_map[edge[0]].append(edge[1])
             planar_map[edge[1]].append(edge[0])
+
         self.road_map = planar_map
+        self.edges, self.edge_indices = self.calculate_edges(planar_map)
         return planar_map
 
+    def set_constraint_sweep(self):
+        self.constraint_sweep.set_graph([node.current for node in self.nodes],self.edges)
+
+    def get_constraint_sweep(self, p1: tuple[float,float], p2: tuple[float,float], r: float):
+        if not self.use_constraint_sweep:
+            return False
+        overlapping_nodes, overlapping_edges, overlapping_start_nodes = self.constraint_sweep.overlapping_graph_elements_cgal(p1, p2, r)
+        nodes_locations = [self.nodes[node_idx].current for node_idx in overlapping_nodes]
+        edges_locations = [(self.nodes[edge_idx[0]].current, self.nodes[edge_idx[1]].current) for edge_idx in overlapping_edges]
+        start_nodes_locations = [self.nodes[node_idx].current for node_idx in overlapping_start_nodes]
+        return nodes_locations, edges_locations, start_nodes_locations
+
+    def get_grid_constraints_sweep_node(self, p1: Tuple[float, ...],r: float = 0.5) -> bool:
+        """
+        Check if the line of sight between two continuous (world) points is in collision.
+        """
+        dists, indexes = self.sample_kd_tree.query(p1, k=int((r*self.resolution)**2))
+        return [self.nodes[idx].current for idx in indexes]
+
+    def get_grid_constraints_sweep_edge(self, p1: Tuple[float, ...],p2: Tuple[float, ...],r: float = 0.5) -> bool:
+        """
+        Check if the line of sight between two continuous (world) points is in collision.
+        """
+        dists, indexes = self.sample_kd_tree.query(p1, k=int((r*self.resolution)**2))
+        nodes = np.array([self.nodes[idx].current for idx in indexes])
+        edge_displacement = np.array(p2)-np.array(p1)
+        nodes += edge_displacement
+        displaced_nodes = [tuple[Any, ...](n) for n in nodes.tolist()]
+        return displaced_nodes
 
     def point_float_to_int(self, point: Tuple[float, ...]) -> Tuple[int, ...]:
         """
