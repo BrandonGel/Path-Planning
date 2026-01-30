@@ -1,5 +1,7 @@
 from CGAL.CGAL_Kernel import Point_3, Segment_3, squared_distance, Point_2, Segment_2
 import numpy as np
+from scipy.spatial import KDTree
+from rtree import index
 
 class CGAL_Sweep:
     def __init__(self,record_sweep: bool = True,use_exact_collision_check: bool = True):
@@ -14,8 +16,13 @@ class CGAL_Sweep:
         self.edges = []
         self.edge_indices = {}
         self.overlapping_sweep = {}
+        self.vertex_kdtree = None
+        self.vertex_positions = None
+        self.edge_aabbs = []
+        self.vertex_adjacency = {}  # vertex_idx -> list of edge_indices connected to it
+        self.edge_rtree = None  # R-tree for spatial edge queries
 
-    def set_graph(self,vertices: list[tuple[float,float]], edges: list[tuple[int,int]]):
+    def set_graph(self,vertices: list[tuple[float,float]], edges: list[tuple[int,int]], default_radius: float = 1.0):
         self.reset()
         dim = vertices[0].__len__()
         if dim == 2:
@@ -29,35 +36,132 @@ class CGAL_Sweep:
             p_pt = self.Point_type(*vertex)
             self.vertices.append(p_pt)
 
+        # Build KDTree for vertex queries
+        self.vertex_positions = np.array([list(v) for v in vertices])
+        self.vertex_kdtree = KDTree(self.vertex_positions)
+
+        # Build adjacency list for fast edge lookups
+        self.vertex_adjacency = {i: [] for i in range(len(vertices))}
+
+        # Precompute edge bounding boxes for filtering
+        # Use default_radius to expand AABBs (will be refined per query)
         for edge in edges:
             src,tgt = edge
             a_pt = self.Point_type(*vertices[src])
             b_pt = self.Point_type(*vertices[tgt])
             self.edges.append(self.Segment_type(a_pt, b_pt))
-            self.edge_indices[len(self.edges)-1] = (src,tgt)
+            edge_idx = len(self.edges) - 1
+            self.edge_indices[edge_idx] = (src,tgt)
+            
+            # Build adjacency list
+            self.vertex_adjacency[src].append(edge_idx)
+            self.vertex_adjacency[tgt].append(edge_idx)
+            
+            # Store edge bounding box (will be expanded by query radius at query time)
+            v1 = np.array(vertices[src])
+            v2 = np.array(vertices[tgt])
+            bbox_min = np.minimum(v1, v2)
+            bbox_max = np.maximum(v1, v2)
+            self.edge_aabbs.append((bbox_min, bbox_max, edge_idx))
+        
+        # Build R-tree for efficient spatial edge queries
+        # R-tree stores bounding boxes and allows O(log E + k) queries instead of O(E)
+        p = index.Property()
+        p.dimension = dim
+        self.edge_rtree = index.Index(properties=p)
+        
+        for edge_idx, (bbox_min, bbox_max, _) in enumerate(self.edge_aabbs):
+            # R-tree expects (min_x, min_y, max_x, max_y) for 2D
+            # or (min_x, min_y, min_z, max_x, max_y, max_z) for 3D
+            if dim == 2:
+                bbox = (bbox_min[0], bbox_min[1], bbox_max[0], bbox_max[1])
+            else:  # 3D
+                bbox = (bbox_min[0], bbox_min[1], bbox_min[2], 
+                       bbox_max[0], bbox_max[1], bbox_max[2])
+            
+            # Insert edge with its bounding box into R-tree
+            self.edge_rtree.insert(edge_idx, bbox)
+
 
     def overlapping_graph_elements_cgal(self, u: tuple[float,float], v: tuple[float,float], r: float):
         if self.record_sweep and (u,v,r) in self.overlapping_sweep:
-            overlapping_vertices, overlapping_edges, overlapping_start_vertices = self.overlapping_sweep[u,v,r]
-            return overlapping_vertices, overlapping_edges, overlapping_start_vertices
+            overlapping_vertices, overlapping_edges = self.overlapping_sweep[u,v,r]
+            return overlapping_vertices, overlapping_edges
             
         u_pt = self.Point_type(*u)
         v_pt = self.Point_type(*v)
         traversal_seg = self.Segment_type(u_pt, v_pt)
-
-        # --- Vertex overlap ---
-        overlapping_vertices = set()
-        overlapping_start_vertices = set()
-        for ii, p_pt in enumerate(self.vertices):
-            if squared_distance(p_pt, traversal_seg)**0.5 < r:
-                overlapping_vertices.add(ii)
-                if 0.0 <= squared_distance(p_pt, u_pt)**0.5 < r:
-                    overlapping_start_vertices.add(ii)
-
-        # --- Edge overlap ---
-        overlapping_edges = set(self.edge_indices[ii]  for ii, edge in enumerate(self.edges) if squared_distance(traversal_seg, edge)**0.5 < r )
-
         
+        u_arr = np.array(u)
+        v_arr = np.array(v)
+
+        # Special case: point query (stationary agent)
+        if u == v:
+            # Use KDTree for fast vertex query
+            indices = self.vertex_kdtree.query_ball_point(u, r)
+            overlapping_vertices = set(indices)
+            
+            # Use R-tree to find ALL edges within radius (not just connected ones)
+            # Create query box: point expanded by radius
+            u_arr = np.array(u)
+            query_min = u_arr - r
+            query_max = u_arr + r
+            
+            dim = len(u)
+            if dim == 2:
+                query_bbox = (query_min[0], query_min[1], query_max[0], query_max[1])
+            else:  # 3D
+                query_bbox = (query_min[0], query_min[1], query_min[2],
+                            query_max[0], query_max[1], query_max[2])
+            
+            # Query R-tree for edges whose bounding boxes overlap with query point
+            candidate_edge_indices = list(self.edge_rtree.intersection(query_bbox))
+            
+            # Check exact distance for candidate edges
+            overlapping_edges = set()
+            for edge_idx in candidate_edge_indices:
+                if squared_distance(u_pt, self.edges[edge_idx])**0.5 < r:
+                    overlapping_edges.add(self.edge_indices[edge_idx])
+            
+            if self.record_sweep:
+                self.overlapping_sweep[u,v,r] = (overlapping_vertices, overlapping_edges)
+            return overlapping_vertices, overlapping_edges
+
+        # Regular segment query (moving agent)
+        # --- Vertex overlap using KDTree ---
+        seg_length = np.linalg.norm(v_arr - u_arr)
+        num_samples = max(3, int(np.ceil(seg_length / (r * 0.5))) + 1)
+        
+        # Sample along segment and query KDTree
+        overlapping_vertices = set()
+        for t in np.linspace(0, 1, num_samples):
+            sample_pt = u_arr + t * (v_arr - u_arr)
+            indices = self.vertex_kdtree.query_ball_point(sample_pt, r)
+            overlapping_vertices.update(indices)
+
+        # --- Edge overlap using R-tree spatial query (OPTIMIZED) ---
+        # Compute AABB for query segment (expanded by radius)
+        query_min = np.minimum(u_arr, v_arr) - r
+        query_max = np.maximum(u_arr, v_arr) + r
+        
+        # Query R-tree: only returns edges whose bounding boxes overlap with query box
+        # This is O(log E + k) instead of O(E) where k is number of overlapping edges
+        dim = len(u)
+        if dim == 2:
+            query_bbox = (query_min[0], query_min[1], query_max[0], query_max[1])
+        else:  # 3D
+            query_bbox = (query_min[0], query_min[1], query_min[2],
+                         query_max[0], query_max[1], query_max[2])
+        
+        # R-tree intersection query - only returns candidate edges!
+        candidate_edge_indices = list(self.edge_rtree.intersection(query_bbox))
+        
+        # Only run expensive CGAL check on candidates
+        overlapping_edges = set()
+        for edge_idx in candidate_edge_indices:
+            if squared_distance(traversal_seg, self.edges[edge_idx])**0.5 < r:
+                overlapping_edges.add(self.edge_indices[edge_idx])
+
         if self.use_exact_collision_check:
             crossing_edges = set()
             for edge in overlapping_edges:
@@ -78,7 +182,7 @@ class CGAL_Sweep:
                 a_to_b = b_pt-a_pt
 
                 # --- Edge 1 ---
-                # a -> b and u -> v 
+                # a -> b and u -> v Z
                 ro1 = a_pt-u_pt
                 vel1 = a_to_b-u_to_v
                 tmin1 = np.clip(-np.dot(ro1,vel1)/(np.dot(vel1,vel1)+1e-10),0.0,1.0)
@@ -103,5 +207,5 @@ class CGAL_Sweep:
             overlapping_edges = overlapping_edges - remove_edges
 
         if self.record_sweep:
-            self.overlapping_sweep[u,v,r] = (overlapping_vertices, overlapping_edges, overlapping_start_vertices)
-        return overlapping_vertices, overlapping_edges, overlapping_start_vertices
+            self.overlapping_sweep[u,v,r] = (overlapping_vertices, overlapping_edges)
+        return overlapping_vertices, overlapping_edges

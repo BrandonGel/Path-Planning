@@ -112,6 +112,7 @@ class Environment(object):
         self.a_star = AStar(self, astar_max_iterations)
         self.radius = radius
         self.use_constraint_sweep = use_constraint_sweep
+        self._constraint_sweep_cache = {}  # (p1, p2, r) -> (nodes, edges, start_nodes)
 
     def get_neighbors(self, state):
         neighbors = []
@@ -147,29 +148,24 @@ class Environment(object):
                     result.agent_2 = agent_2
                     return result
 
-                # Vertex conflict check (use distances based on radius and vertex)
-                if not self.use_constraint_sweep and self.radius > 0:
+                if self.radius == 0:
+                    continue
+
+                if self.use_constraint_sweep :
+                    # Vertex conflict check (use constraint sweep)
+                    state1_nodes_locations, state1_edges_locations = self._get_constraint_sweep_cached(state_1.location.point,state_1.location.point,self.radius)
+                    state2_nodes_locations, state2_edges_locations = self._get_constraint_sweep_cached(state_2.location.point,state_2.location.point,self.radius)
+                else:
+                    # Vertex conflict check (use distances based on radius and vertex)
                     state1_nodes_locations = self.graph_map.get_grid_constraints_sweep_node(state_1.location.point,self.radius)
                     state2_nodes_locations = self.graph_map.get_grid_constraints_sweep_node(state_2.location.point,self.radius)
-                    if state_1.location.point in state2_nodes_locations or state_2.location.point in state1_nodes_locations:
-                        result.time = t
-                        result.type = Conflict.VERTEX
-                        result.location_1 = state_1.location
-                        result.agent_1 = agent_1
-                        result.agent_2 = agent_2
-                        return result
-
-                # Vertex conflict check (use constraint sweep)
-                if self.use_constraint_sweep and self.radius > 0:
-                    state1_nodes_locations, state1_edges_locations, state1_start_nodes_locations = self.graph_map.get_constraint_sweep(state_1.location.point,state_1.location.point,self.radius)
-                    state2_nodes_locations, state2_edges_locations, state2_start_nodes_locations = self.graph_map.get_constraint_sweep(state_2.location.point,state_2.location.point,self.radius)
-                    if state_1.location.point in state2_nodes_locations or state_2.location.point in state1_nodes_locations:
-                        result.time = t
-                        result.type = Conflict.VERTEX
-                        result.location_1 = state_1.location
-                        result.agent_1 = agent_1
-                        result.agent_2 = agent_2
-                        return result
+                if state_1.location.point in state2_nodes_locations or state_2.location.point in state1_nodes_locations:
+                    result.time = t
+                    result.type = Conflict.VERTEX
+                    result.location_1 = state_1.location
+                    result.agent_1 = agent_1
+                    result.agent_2 = agent_2
+                    return result
 
             for agent_1, agent_2 in combinations(solution.keys(), 2):
                 state_1a = self.get_state(agent_1, solution, t)
@@ -188,10 +184,23 @@ class Environment(object):
                     result.location_2 = state_1b.location
                     return result
 
-                # Edge conflict check (use distances based on radius and vertices)
-                state1b_nodes_locations = self.graph_map.get_grid_constraints_sweep_node(state_1b.location.point,self.radius)
-                state2b_nodes_locations = self.graph_map.get_grid_constraints_sweep_node(state_2b.location.point,self.radius)
-                if set(state1b_nodes_locations) & set(state2b_nodes_locations) != set():
+                if self.radius == 0:
+                    continue
+
+                # Edge conflict check (use constraint sweep)
+                if self.use_constraint_sweep :
+                    state1_nodes_locations, state1_edges_locations = self._get_constraint_sweep_cached(state_1a.location.point,state_1b.location.point,self.radius)
+                    state2_nodes_locations, state2_edges_locations = self._get_constraint_sweep_cached(state_2a.location.point,state_2b.location.point,self.radius)
+                    edge_1 = (state_1a.location.point,state_1b.location.point)
+                    edge_2 = (state_2a.location.point,state_2b.location.point)
+                    edge_conflict = edge_1 in state2_edges_locations or edge_2 in state1_edges_locations
+                else:
+                    # Edge conflict check (use distances based on radius and vertices)
+                    state1b_nodes_locations = self.graph_map.get_grid_constraints_sweep_node(state_1b.location.point,self.radius)
+                    state2b_nodes_locations = self.graph_map.get_grid_constraints_sweep_node(state_2b.location.point,self.radius)
+                    edge_conflict = set(state1b_nodes_locations) & set(state2b_nodes_locations) != set()
+
+                if edge_conflict:
                     result.time = t
                     result.type = Conflict.EDGE
                     result.agent_1 = agent_1
@@ -199,21 +208,6 @@ class Environment(object):
                     result.location_1 = state_1a.location
                     result.location_2 = state_1b.location
                     return result
-
-                # Edge conflict check (use constraint sweep)
-                if self.use_constraint_sweep and self.radius > 0:
-                    state1_nodes_locations, state1_edges_locations, state1_start_nodes_locations = self.graph_map.get_constraint_sweep(state_1a.location.point,state_1b.location.point,self.radius)
-                    state2_nodes_locations, state2_edges_locations, state2_start_nodes_locations = self.graph_map.get_constraint_sweep(state_2a.location.point,state_2b.location.point,self.radius)
-                    edge_1 = (state_1a.location.point,state_1b.location.point)
-                    edge_2 = (state_2a.location.point,state_2b.location.point)
-                    if edge_1 in state2_edges_locations or edge_2 in state1_edges_locations:
-                        result.time = t
-                        result.type = Conflict.EDGE
-                        result.agent_1 = agent_1
-                        result.agent_2 = agent_2
-                        result.location_1 = state_1a.location
-                        result.location_2 = state_1b.location
-                        return result
         return False
 
     def create_constraints_from_conflict(self, conflict):
@@ -274,7 +268,16 @@ class Environment(object):
             
             self.agent_dict.update({agent['name']:{'start':start_state, 'goal':goal_state}})
 
+    def _get_constraint_sweep_cached(self, p1, p2, r):
+        """Cached wrapper for get_constraint_sweep to avoid duplicate queries."""
+        key = (p1, p2, r)
+        if key not in self._constraint_sweep_cache:
+            self._constraint_sweep_cache[key] = self.graph_map.get_constraint_sweep(p1, p2, r)
+        return self._constraint_sweep_cache[key]
+
     def compute_solution(self):
+        # Clear cache for fresh solution attempt
+        self._constraint_sweep_cache.clear()
         solution = {}
         for agent in self.agent_dict.keys():
             self.constraints = self.constraint_dict.setdefault(agent, Constraints())

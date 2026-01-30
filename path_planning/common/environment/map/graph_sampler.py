@@ -505,25 +505,24 @@ class GraphSampler(Grid):
     def get_constraint_sweep(self, p1: tuple[float,float], p2: tuple[float,float], r: float):
         if not self.use_constraint_sweep:
             return False
-        overlapping_nodes, overlapping_edges, overlapping_start_nodes = self.constraint_sweep.overlapping_graph_elements_cgal(p1, p2, r)
+        overlapping_nodes, overlapping_edges = self.constraint_sweep.overlapping_graph_elements_cgal(p1, p2, r)
         nodes_locations = [self.nodes[node_idx].current for node_idx in overlapping_nodes]
         edges_locations = [(self.nodes[edge_idx[0]].current, self.nodes[edge_idx[1]].current) for edge_idx in overlapping_edges]
-        start_nodes_locations = [self.nodes[node_idx].current for node_idx in overlapping_start_nodes]
-        return nodes_locations, edges_locations, start_nodes_locations
+        return nodes_locations, edges_locations
 
     def get_grid_constraints_sweep_node(self, p1: Tuple[float, ...],r: float = 0.5) -> bool:
         """
         Check if the line of sight between two continuous (world) points is in collision.
         """
-        dists, indexes = self.sample_kd_tree.query(p1, k=int((r*self.resolution)**2))
-        return [self.nodes[idx].current for idx in indexes]
+        dists, indexes = self.sample_kd_tree.query(p1, k=1+int((r*self.resolution)**2))
+        return [self.nodes[idx].current for idx in indexes.reshape(-1).tolist()]
 
     def get_grid_constraints_sweep_edge(self, p1: Tuple[float, ...],p2: Tuple[float, ...],r: float = 0.5) -> bool:
         """
         Check if the line of sight between two continuous (world) points is in collision.
         """
-        dists, indexes = self.sample_kd_tree.query(p1, k=int((r*self.resolution)**2))
-        nodes = np.array([self.nodes[idx].current for idx in indexes])
+        dists, indexes = self.sample_kd_tree.query(p1, k=1+int((r*self.resolution)**2))
+        nodes = np.array([self.nodes[idx].current for idx in indexes.reshape(-1)])
         edge_displacement = np.array(p2)-np.array(p1)
         nodes += edge_displacement
         displaced_nodes = [tuple[Any, ...](n) for n in nodes.tolist()]
