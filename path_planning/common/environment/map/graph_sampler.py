@@ -502,31 +502,36 @@ class GraphSampler(Grid):
     def set_constraint_sweep(self):
         self.constraint_sweep.set_graph([node.current for node in self.nodes],self.edges)
 
-    def get_constraint_sweep(self, p1: tuple[float,float], p2: tuple[float,float], r: float):
+    def get_constraint_sweep(self, p1: tuple[float,float], p2: tuple[float,float],v: float = 0.0, r: float = 0.5):
         if not self.use_constraint_sweep:
             return False
-        overlapping_nodes, overlapping_edges = self.constraint_sweep.overlapping_graph_elements_cgal(p1, p2, r)
-        nodes_locations = [self.nodes[node_idx].current for node_idx in overlapping_nodes]
-        edges_locations = [(self.nodes[edge_idx[0]].current, self.nodes[edge_idx[1]].current) for edge_idx in overlapping_edges]
-        return nodes_locations, edges_locations
+        overlapping_edges = self.constraint_sweep.overlapping_graph_elements_cgal(p1, p2,v, r)
+        edges_locations = set((self.nodes[edge_idx[0]].current, self.nodes[edge_idx[1]].current) for edge_idx in overlapping_edges)
+        return edges_locations
 
-    def get_grid_constraints_sweep_node(self, p1: Tuple[float, ...],r: float = 0.5) -> bool:
-        """
-        Check if the line of sight between two continuous (world) points is in collision.
-        """
-        dists, indexes = self.sample_kd_tree.query(p1, k=1+int((r*self.resolution)**2))
-        return [self.nodes[idx].current for idx in indexes.reshape(-1).tolist()]
-
-    def get_grid_constraints_sweep_edge(self, p1: Tuple[float, ...],p2: Tuple[float, ...],r: float = 0.5) -> bool:
-        """
-        Check if the line of sight between two continuous (world) points is in collision.
-        """
-        dists, indexes = self.sample_kd_tree.query(p1, k=1+int((r*self.resolution)**2))
-        nodes = np.array([self.nodes[idx].current for idx in indexes.reshape(-1)])
-        edge_displacement = np.array(p2)-np.array(p1)
-        nodes += edge_displacement
-        displaced_nodes = [tuple[Any, ...](n) for n in nodes.tolist()]
-        return displaced_nodes
+    def get_constraint_segment(self, p1a: Tuple[float, ...],p1b: Tuple[float, ...],p2a: Tuple[float, ...],p2b: Tuple[float, ...],v: float = 0.0,r: float = 0.5) -> bool:
+        p1a = np.array(p1a)
+        p2a = np.array(p2a)
+        p1b = np.array(p1b)
+        p2b = np.array(p2b)
+        if v == 0.0:
+            v1 = p1b-p1a
+            v2 = p2b-p2a
+            t_dur = 1.0
+        else:
+            t_dur1 = np.linalg.norm(p1b-p1a)/v
+            t_dur2 = np.linalg.norm(p2b-p2a)/v
+            t_dur = min(t_dur1, t_dur2)
+            v1 = (p1b-p1a)/t_dur1
+            v2 = (p2b-p2a)/t_dur2
+        r = 2*r
+        r_vec = p2a-p1a
+        vel = v2-v1
+        tmin = np.clip(-np.dot(vel,r_vec)/(np.dot(r_vec,r_vec)+1e-10),0.0,t_dur)
+        r_min_vec = r_vec + vel*tmin
+        if np.linalg.norm(r_min_vec) < r:
+            return True
+        return False
 
     def point_float_to_int(self, point: Tuple[float, ...]) -> Tuple[int, ...]:
         """

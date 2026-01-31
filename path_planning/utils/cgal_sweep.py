@@ -83,10 +83,12 @@ class CGAL_Sweep:
             self.edge_rtree.insert(edge_idx, bbox)
 
 
-    def overlapping_graph_elements_cgal(self, u: tuple[float,float], v: tuple[float,float], r: float):
-        if self.record_sweep and (u,v,r) in self.overlapping_sweep:
-            overlapping_vertices, overlapping_edges = self.overlapping_sweep[u,v,r]
-            return overlapping_vertices, overlapping_edges
+    def overlapping_graph_elements_cgal(self, u: tuple[float,float], v: tuple[float,float],velocity: float = 0.0, r: float = 0.5):
+        if self.record_sweep and (u,v,velocity,r) in self.overlapping_sweep:
+            # overlapping_vertices, overlapping_edges = self.overlapping_sweep[u,v,velocity,r]
+            # return overlapping_vertices, overlapping_edges
+            overlapping_edges = self.overlapping_sweep[u,v,velocity,r]
+            return overlapping_edges
             
         u_pt = self.Point_type(*u)
         v_pt = self.Point_type(*v)
@@ -95,11 +97,15 @@ class CGAL_Sweep:
         u_arr = np.array(u)
         v_arr = np.array(v)
 
+        overlapping_vertices = set()
+        overlapping_edges = set()
+
         # Special case: point query (stationary agent)
         if u == v:
-            # Use KDTree for fast vertex query
-            indices = self.vertex_kdtree.query_ball_point(u, r)
-            overlapping_vertices = set(indices)
+            # # Use KDTree for fast vertex query
+            # indices = self.vertex_kdtree.query_ball_point(u, r-1e-10)
+            # overlapping_vertices = set(indices)
+            
             
             # Use R-tree to find ALL edges within radius (not just connected ones)
             # Create query box: point expanded by radius
@@ -124,8 +130,10 @@ class CGAL_Sweep:
                     overlapping_edges.add(self.edge_indices[edge_idx])
             
             if self.record_sweep:
-                self.overlapping_sweep[u,v,r] = (overlapping_vertices, overlapping_edges)
-            return overlapping_vertices, overlapping_edges
+                # self.overlapping_sweep[u,v,velocity,r] = (overlapping_vertices, overlapping_edges)
+                self.overlapping_sweep[u,v,velocity,r] = overlapping_edges
+            # return overlapping_vertices, overlapping_edges
+            return overlapping_edges
 
         # Regular segment query (moving agent)
         # --- Vertex overlap using KDTree ---
@@ -136,7 +144,7 @@ class CGAL_Sweep:
         overlapping_vertices = set()
         for t in np.linspace(0, 1, num_samples):
             sample_pt = u_arr + t * (v_arr - u_arr)
-            indices = self.vertex_kdtree.query_ball_point(sample_pt, r)
+            indices = self.vertex_kdtree.query_ball_point(sample_pt, r-1e-10)
             overlapping_vertices.update(indices)
 
         # --- Edge overlap using R-tree spatial query (OPTIMIZED) ---
@@ -161,6 +169,7 @@ class CGAL_Sweep:
         for edge_idx in candidate_edge_indices:
             if squared_distance(traversal_seg, self.edges[edge_idx])**0.5 < r:
                 overlapping_edges.add(self.edge_indices[edge_idx])
+                overlapping_edges.add(self.edge_indices[edge_idx][::-1])
 
         if self.use_exact_collision_check:
             crossing_edges = set()
@@ -172,7 +181,7 @@ class CGAL_Sweep:
                     crossing_edges.add(edge)
 
             remove_edges = set()
-            remove_vertices = set()
+            
             for edge in crossing_edges:
                 src,tgt = edge
                 a_pt = self.vertices[src]
@@ -181,31 +190,24 @@ class CGAL_Sweep:
                 u_to_v = v_pt-u_pt
                 a_to_b = b_pt-a_pt
 
-                # --- Edge 1 ---
+                 # --- Edge 1 ---
                 # a -> b and u -> v Z
                 ro1 = a_pt-u_pt
-                vel1 = a_to_b-u_to_v
-                tmin1 = np.clip(-np.dot(ro1,vel1)/(np.dot(vel1,vel1)+1e-10),0.0,1.0)
-                vec1 = ro1 + vel1*tmin1
-                if vec1.squared_length()**0.5 > r:
+                if velocity == 0.0:
+                    vel = a_to_b-u_to_v
+                    tdur = 1.0
+                else:
+                    vel = velocity*(a_to_b-u_to_v)/np.linalg.norm(a_to_b-u_to_v)
+                    tdur = np.linalg.norm(a_to_b-u_to_v)/velocity
+                tmin = np.clip(-np.dot(ro1,vel)/(np.dot(vel,vel)+1e-10),0.0,tdur)
+                vec = ro1 + vel*tmin
+                if np.linalg.norm(vec) > r:
                     remove_edges.add(edge)
-                    if tgt in overlapping_vertices:
-                        remove_vertices.add(tgt)
 
-                # --- Edge 2 ---
-                # b -> a and u -> v 
-                ro2 = b_pt-u_pt
-                vel2 = -a_to_b-u_to_v
-                tmin2 = np.clip(-np.dot(ro2,vel2)/(np.dot(vel2,vel2)+1e-10),0.0,1.0)
-                vec2 = ro2 + vel2*tmin2
-                if vec2.squared_length()**0.5 > r:
-                    remove_edges.add(edge)
-                    if src in overlapping_vertices:
-                        remove_vertices.add(src)
-
-            overlapping_vertices = overlapping_vertices - remove_vertices
+            # overlapping_vertices = overlapping_vertices - remove_vertices
             overlapping_edges = overlapping_edges - remove_edges
-
         if self.record_sweep:
-            self.overlapping_sweep[u,v,r] = (overlapping_vertices, overlapping_edges)
-        return overlapping_vertices, overlapping_edges
+            # self.overlapping_sweep[u,v,velocity,r] = (overlapping_vertices, overlapping_edges)
+            self.overlapping_sweep[u,v,velocity,r] = overlapping_edges
+        # return overlapping_vertices, overlapping_edges
+        return overlapping_edges
