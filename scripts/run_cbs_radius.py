@@ -51,7 +51,7 @@ if __name__ == "__main__":
         print(" Solution not found" )
 
     # Searching
-    env = Environment(map_, agents,radius=2*agent_radius, use_constraint_sweep=False)
+    env = Environment(map_, agents,radius=agent_radius, use_constraint_sweep=False)
     cbs = CBS(env)
     st = time.time()
     solution = cbs.search()
@@ -60,7 +60,7 @@ if __name__ == "__main__":
         print(" Solution not found" )
 
     # Searching
-    env = Environment(map_, agents,radius=2*agent_radius, use_constraint_sweep=True)
+    env = Environment(map_, agents,radius=agent_radius, use_constraint_sweep=True)
     cbs = CBS(env)
     st = time.time()
     solution = cbs.search()
