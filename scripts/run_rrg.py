@@ -26,6 +26,8 @@ from python_motion_planning.path_planner import *
 from python_motion_planning.controller import *
 
 if __name__ == "__main__":
+    os.makedirs("figs/rrg", exist_ok=True)
+
     # Simple Example: 2D map (uncomment to run)
     print("=" * 60)
     print("RRG (Rapidly-exploring Random Graph) Example")
@@ -45,14 +47,14 @@ if __name__ == "__main__":
         map_=map_2d,
         start=[start_2d],  # List of start positions
         goal=[goal_2d],  # List of goal positions
-        max_dist=5.0,  # Maximum connection distance
+        max_dist=1.5,  # Maximum connection distance
         sample_num=5000,  # Number of samples to generate
         goal_sample_rate=0.1,  # Probability of sampling goal directly
         discrete=False,  # Use continuous space
         use_faiss=False,  # Use FAISS for faster nearest neighbor search
     )
 
-    result_2d = planner_2d.plan()
+    path2d, path2d_info = planner_2d.plan()
 
     # RRG builds a graph structure (road_map) that can be used for path finding
     # The graph is stored in:
@@ -67,42 +69,42 @@ if __name__ == "__main__":
 
     vis_2d = Visualizer2D()
     vis_2d.plot_grid_map(map_2d)
-    if "expand" in result_2d[1]:
-        vis_2d.plot_expand_tree(result_2d[1]["expand"])
-    vis_2d.plot_path(result_2d[0][0])
-    vis_2d.savefig("rrg_2d.png")
+    if "expand" in path2d_info:
+        vis_2d.plot_expand_tree(path2d_info["expand"])
+    vis_2d.plot_path(path2d[0])
+    vis_2d.savefig("figs/rrg/rrg_2d.png")
     vis_2d.show()
 
-    # # Example 2: 3D map
-    # print("\nRunning RRG on 3D map...")
-    # map_3d = read_grid_from_yaml('path_planning/maps/3d/3d.yaml')
-    # map_3d.inflate_obstacles(radius=3)
-    # start_3d = (25, 5, 5)
-    # goal_3d = (5, 25, 25)
-    # map_3d.type_map[start_3d] = TYPES.START
-    # map_3d.type_map[goal_3d] = TYPES.GOAL
+    # Example 2: 3D map
+    print("\nRunning RRG on 3D map...")
+    map_3d = read_grid_from_yaml('path_planning/maps/3d/3d.yaml')
+    map_3d.inflate_obstacles(radius=3)
+    start_3d = (25, 5, 5)
+    goal_3d = (5, 25, 25)
+    map_3d.type_map[start_3d] = TYPES.START
+    map_3d.type_map[goal_3d] = TYPES.GOAL
 
-    # planner_3d = RRG(
-    #     map_=map_3d,
-    #     start=[start_3d],
-    #     goal=[goal_3d],
-    #     max_dist=5.0,
-    #     sample_num=10000,
-    #     goal_sample_rate=0.1,
-    #     discrete=False,
-    #     use_faiss=True
-    # )
+    planner_3d = RRG(
+        map_=map_3d,
+        start=[start_3d],
+        goal=[goal_3d],
+        max_dist=5.0,
+        sample_num=10000,
+        goal_sample_rate=0.1,
+        discrete=False,
+        use_faiss=True
+    )
 
-    # result_3d = planner_3d.plan()
+    path3d, path3d_info = planner_3d.plan()
 
-    # print(f"RRG built graph with {len(planner_3d.road_map)} nodes")
+    print(f"RRG built graph with {len(planner_3d.road_map)} nodes")
 
-    # vis_3d = Visualizer3D()
-    # vis_3d.plot_grid_map(map_3d)
-    # if "expand" in result_3d[1]:
-    #     vis_3d.plot_expand_tree(result_3d[1]["expand"])
-    # vis_3d.savefig('rrg_3d.png')
-    # vis_3d.show()
+    vis_3d = Visualizer3D()
+    vis_3d.plot_grid_map(map_3d)
+    vis_3d.plot_path(path3d[0])
+    vis_3d.show()
+    vis_3d.savefig('figs/rrg/rrg_3d.png')
+    
 
     # Example 3: Multiple start/goal positions (multi-query)
     print("\nRunning RRG with multiple start/goal positions...")
@@ -120,25 +122,25 @@ if __name__ == "__main__":
         map_=map_multi,
         start=starts_multi,
         goal=goals_multi,
-        max_dist=5.0,
+        max_dist=1.5,
         sample_num=5000,
         goal_sample_rate=0.1,
         discrete=False,
         use_faiss=False,
     )
 
-    result_multi = planner_multi.plan()
+    path_multi, path_multi_info = planner_multi.plan()
 
     print(f"RRG built graph with {len(planner_multi.road_map)} nodes")
     print("Graph can be used for multi-query path planning")
 
     vis_multi = Visualizer2D()
     vis_multi.plot_grid_map(map_multi)
-    if "expand" in result_multi[1]:
-        vis_multi.plot_expand_tree(result_multi[1]["expand"])
-    for path in result_multi[0]:
+    if "expand" in path_multi_info:
+        vis_multi.plot_expand_tree(path_multi_info["expand"])
+    for path in path_multi:
         vis_multi.plot_path(path)
-    vis_multi.savefig("rrg_multi.png")
+    vis_multi.savefig("figs/rrg/rrg_multi.png")
     vis_multi.show()
 
     print("\nRRG examples completed!")
