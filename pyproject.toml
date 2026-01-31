@@ -6,7 +6,7 @@ authors = [
     {name = "Brandon Ho",email = "bho36@gatech.edu"}
 ]
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.11"
 dependencies = [
     "ipykernel (>=7.1.0,<8.0.0)",
     "python-motion-planning (==2.0.dev2)",

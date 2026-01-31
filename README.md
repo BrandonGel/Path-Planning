@@ -34,15 +34,20 @@ python -m pip install .
 ## Script
 Generating sample map in 2D and 3D grid space
 ```
-python script/run_make_environment.py
+python -m scripts.run_make_environments
 ```
 
 Running our custom Probabilitis Road Map (PRM) algorithm on the sample maps
 ```
-python script/run_prm.py
+python -m scripts.run_prm
+```
+
+Running our custom Rapidly Exploring Random Graphs (RRG) algorithm on the sample maps
+```
+python -m scripts.run_rrg
 ```
 
 Running our custom graph sampler to generate road map and planar map on the sample maps
 ```
-python script/run_graph_sampler.py
+python scripts/run_graph_sampler.py
 ```
