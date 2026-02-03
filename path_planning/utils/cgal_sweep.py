@@ -109,7 +109,6 @@ class CGAL_Sweep:
             
             # Use R-tree to find ALL edges within radius (not just connected ones)
             # Create query box: point expanded by radius
-            u_arr = np.array(u)
             query_min = u_arr - r
             query_max = u_arr + r
             
@@ -128,6 +127,7 @@ class CGAL_Sweep:
             for edge_idx in candidate_edge_indices:
                 if squared_distance(u_pt, self.edges[edge_idx])**0.5 < r:
                     overlapping_edges.add(self.edge_indices[edge_idx])
+                    overlapping_edges.add(self.edge_indices[edge_idx][::-1])
             
             if self.record_sweep:
                 # self.overlapping_sweep[u,v,velocity,r] = (overlapping_vertices, overlapping_edges)
@@ -141,7 +141,6 @@ class CGAL_Sweep:
         num_samples = max(3, int(np.ceil(seg_length / (r * 0.5))) + 1)
         
         # Sample along segment and query KDTree
-        overlapping_vertices = set()
         for t in np.linspace(0, 1, num_samples):
             sample_pt = u_arr + t * (v_arr - u_arr)
             indices = self.vertex_kdtree.query_ball_point(sample_pt, r-1e-10)
@@ -165,7 +164,6 @@ class CGAL_Sweep:
         candidate_edge_indices = list(self.edge_rtree.intersection(query_bbox))
         
         # Only run expensive CGAL check on candidates
-        overlapping_edges = set()
         for edge_idx in candidate_edge_indices:
             if squared_distance(traversal_seg, self.edges[edge_idx])**0.5 < r:
                 overlapping_edges.add(self.edge_indices[edge_idx])

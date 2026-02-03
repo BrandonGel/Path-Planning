@@ -1,7 +1,4 @@
-
-from typing import Union, List, Tuple, Dict, Any, Iterable
-
-from typing import List
+from typing import List, Tuple
 import numpy as np
 from scipy.spatial import KDTree, Delaunay
 from path_planning.common.environment.node import Node
@@ -503,7 +500,7 @@ class GraphSampler(Grid):
 
     def get_constraint_sweep(self, p1: tuple[float,float], p2: tuple[float,float],v: float = 0.0, r: float = 0.5):
         if not self.use_constraint_sweep:
-            return False
+            return set()
         overlapping_edges = self.constraint_sweep.overlapping_graph_elements_cgal(p1, p2,v, r)
         edges_locations = set((self.nodes[edge_idx[0]].current, self.nodes[edge_idx[1]].current) for edge_idx in overlapping_edges)
         return edges_locations
@@ -526,7 +523,7 @@ class GraphSampler(Grid):
         r = 2*r
         r_vec = p2a-p1a
         vel = v2-v1
-        tmin = np.clip(-np.dot(vel,r_vec)/(np.dot(r_vec,r_vec)+1e-10),0.0,t_dur)
+        tmin = np.clip(-np.dot(vel,r_vec)/(np.dot(vel,vel)+1e-10),0.0,t_dur)
         r_min_vec = r_vec + vel*tmin
         if np.linalg.norm(r_min_vec) < r:
             return True
