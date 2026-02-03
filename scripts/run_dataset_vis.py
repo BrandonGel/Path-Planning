@@ -76,8 +76,9 @@ if __name__ == "__main__":
     print(f"\nVisualizing {len(cases_to_viz)} cases... ")
     # Visualize selected cases
     for case_path in cases_to_viz:
-        perm_dirs =sorted([d for d in Path(case_path).iterdir() if d.is_dir() and d.name.startswith("perm_")],
-                    key=lambda x: int(x.name.split("_")[1]))
+        root = case_path / "ground_truth" if (case_path / "ground_truth").exists() else case_path
+        perm_dirs = sorted([d for d in root.iterdir() if d.is_dir() and d.name.startswith("perm_")],
+                           key=lambda x: int(x.name.split("_")[1]))
         if perm_mode == "all":
             permutations_to_viz = perm_dirs
         elif perm_mode == "first_n":
