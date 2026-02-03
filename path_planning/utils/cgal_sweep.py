@@ -24,6 +24,8 @@ class CGAL_Sweep:
 
     def set_graph(self,vertices: list[tuple[float,float]], edges: list[tuple[int,int]], default_radius: float = 1.0):
         self.reset()
+        assert len(vertices) > 0, "Vertices cannot be empty"
+        assert len(edges) > 0, "Edges cannot be empty"
         dim = vertices[0].__len__()
         if dim == 2:
             self.Point_type = Point_2
@@ -40,9 +42,6 @@ class CGAL_Sweep:
         self.vertex_positions = np.array([list(v) for v in vertices])
         self.vertex_kdtree = KDTree(self.vertex_positions)
 
-        # Build adjacency list for fast edge lookups
-        self.vertex_adjacency = {i: [] for i in range(len(vertices))}
-
         # Precompute edge bounding boxes for filtering
         # Use default_radius to expand AABBs (will be refined per query)
         for edge in edges:
@@ -52,11 +51,7 @@ class CGAL_Sweep:
             self.edges.append(self.Segment_type(a_pt, b_pt))
             edge_idx = len(self.edges) - 1
             self.edge_indices[edge_idx] = (src,tgt)
-            
-            # Build adjacency list
-            self.vertex_adjacency[src].append(edge_idx)
-            self.vertex_adjacency[tgt].append(edge_idx)
-            
+
             # Store edge bounding box (will be expanded by query radius at query time)
             v1 = np.array(vertices[src])
             v2 = np.array(vertices[tgt])
