@@ -5,7 +5,6 @@ from path_planning.utils.util import read_agents_from_yaml, read_graph_sampler_f
 import time
 import numpy as np
 from path_planning.common.visualizer.visualizer_2d import Visualizer2D
-import numpy as np
 from copy import deepcopy
 
 if __name__ == "__main__":

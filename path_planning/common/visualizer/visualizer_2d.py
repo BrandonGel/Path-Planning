@@ -234,7 +234,7 @@ class Visualizer2D(BaseVisualizer2D):
         for name in schedule["schedule"]:
             start = schedule["schedule"][name][0]
             x,y = start["x"], start["y"]
-            agents[name] = Circle((x, y), radius, facecolor=Colors[0], edgecolor='black',zorder=self.zorder['robot_circle'])
+            agents[name] = Circle((x, y), max(radius, np.sqrt(2)/4), facecolor=Colors[0], edgecolor='black',zorder=self.zorder['robot_circle'])
             agents[name].original_face_color = Colors[0]
             patches.append(agents[name])
 

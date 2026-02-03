@@ -1,7 +1,4 @@
-
-from typing import Union, List, Tuple, Dict, Any, Iterable
-
-from typing import List
+from typing import List, Tuple
 import numpy as np
 from scipy.spatial import KDTree, Delaunay
 from path_planning.common.environment.node import Node
@@ -520,7 +517,7 @@ class GraphSampler(Grid):
 
     def get_constraint_sweep(self, p1: tuple[float,float], p2: tuple[float,float],v: float = 0.0, r: float = 0.5):
         if not self.use_constraint_sweep:
-            return False
+            return set()
         overlapping_edges = self.constraint_sweep.overlapping_graph_elements_cgal(p1, p2,v, r)
         edges_locations = set((self.nodes[edge_idx[0]].current, self.nodes[edge_idx[1]].current) for edge_idx in overlapping_edges)
         return edges_locations
@@ -535,15 +532,17 @@ class GraphSampler(Grid):
             v2 = p2b-p2a
             t_dur = 1.0
         else:
-            t_dur1 = np.linalg.norm(p1b-p1a)/v
-            t_dur2 = np.linalg.norm(p2b-p2a)/v
+            dist1 = np.linalg.norm(p1b-p1a)
+            dist2 = np.linalg.norm(p2b-p2a)
+            t_dur1 = dist1/v
+            t_dur2 = dist2/v
             t_dur = min(t_dur1, t_dur2)
-            v1 = (p1b-p1a)/t_dur1
-            v2 = (p2b-p2a)/t_dur2
+            v1 = (p1b-p1a)/t_dur1 if dist1 > 0.0 else np.zeros(self.dim)
+            v2 = (p2b-p2a)/t_dur2 if dist2 > 0.0 else np.zeros(self.dim)
         r = 2*r
         r_vec = p2a-p1a
         vel = v2-v1
-        tmin = np.clip(-np.dot(vel,r_vec)/(np.dot(r_vec,r_vec)+1e-10),0.0,t_dur)
+        tmin = np.clip(-np.dot(vel,r_vec)/(np.dot(vel,vel)+1e-10),0.0,t_dur)
         r_min_vec = r_vec + vel*tmin
         if np.linalg.norm(r_min_vec) < r:
             return True
