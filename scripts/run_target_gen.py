@@ -12,7 +12,7 @@ if __name__ == "__main__":
     """Main entry point for dataset generation."""
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("-s","--path",type=str, default='benchmark/train', help="input file containing map and obstacles")
+    parser.add_argument("-s","--path",type=str, nargs='+', default=['benchmark/train'], help="input file containing map and obstacles")
     parser.add_argument("-ds","--use_discrete_space",type=bool, default=False, help="use discrete space")
     parser.add_argument("-ns","--num_samples",type=int, default=1000, help="number of samples")
     parser.add_argument("-nn","--num_neighbors",type=float, default=4.0, help="number of neighbors")
@@ -25,58 +25,23 @@ if __name__ == "__main__":
     parser.add_argument("-w","--num_workers",type=int, default=None, help="number of parallel workers for cases (default: auto-detect CPU cores)")
     args = parser.parse_args()
     
-
-    folder_path = Path(args.path)
+    
+    folder_path = [Path(p) for p in args.path]
     num_workers = args.num_workers if args.num_workers is not None else cpu_count()
-    # config = {
-    #         "use_discrete_space": args.use_discrete_space,
-    #         "num_samples": args.num_samples,
-    #         "num_neighbors": args.num_neighbors,
-    #         "min_edge_len": args.min_edge_len,
-    #         "max_edge_len": args.max_edge_len,
-    #         "num_graph_samples": args.num_graph_samples,
-    #         "road_map_type": args.road_map_type,
-    #         "target_space": args.target_space,
-    #         "generate_new_graph": args.generate_new_graph,
-    #         "num_workers": num_workers,
-    #     }
-    # generate_graph_samples(folder_path, config)
-
-    planar_config = {
-    'use_discrete_space':False,
-    'num_samples':1000,
-    'num_neighbors':4.0,
-    'min_edge_len':1.e-10,
-    'max_edge_len':5+1e-10,
-    'num_graph_samples':100,
-    'road_map_type':'planar',
-    'target_space':'binary',
-    'generate_new_graph':True
-    }
-    prm_config = {
-        'use_discrete_space':False,
-        'num_samples':1000,
-        'num_neighbors':12.0,
-        'min_edge_len':1e-10,
-        'max_edge_len':5+1e-10,
-        'num_graph_samples':100,
-        'road_map_type':'prm',
-        'target_space':'binary',
-        'generate_new_graph':True
-    }
-
-    file_paths = [
-        Path('/home/bho36/Documents/code/Path-Planning/benchmark/train/map32.0x32.0_resolution1.0/agents4_obst0.1'),
-        Path('/home/bho36/Documents/code/Path-Planning/benchmark/train/map32.0x32.0_resolution1.0/agents8_obst0.1'),
-        Path('/home/bho36/Documents/code/Path-Planning/benchmark/train/map16.0x16.0_resolution1.0/agents4_obst0.1'),
-    ]
-    for file_path in file_paths:
+    config = {
+            "use_discrete_space": args.use_discrete_space,
+            "num_samples": args.num_samples,
+            "num_neighbors": args.num_neighbors,
+            "min_edge_len": args.min_edge_len,
+            "max_edge_len": args.max_edge_len,
+            "num_graph_samples": args.num_graph_samples,
+            "road_map_type": args.road_map_type,
+            "target_space": args.target_space,
+            "generate_new_graph": args.generate_new_graph,
+            "num_workers": num_workers,
+        }
+    for file_path in folder_path:
         try:
-            generate_graph_samples(file_path,planar_config)
+            generate_graph_samples(file_path,config)
         except Exception as e:
             print(f"Error generating graph samples for {file_path}: {e}")
-        try:
-            generate_graph_samples(file_path,prm_config)
-        except Exception as e:
-            print(f"Error generating graph samples for {file_path}: {e}")
-

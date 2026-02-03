@@ -57,6 +57,9 @@ class GraphDataset(InMemoryDataset):
 
         self.data_files = data_files
 
+        if len(data_files) == 0:
+            raise ValueError("No data files provided")
+
         # Get number of workers
         if num_workers is None:
             num_workers = cpu_count()
