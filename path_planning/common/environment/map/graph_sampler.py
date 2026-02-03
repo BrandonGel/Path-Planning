@@ -7,6 +7,7 @@ from scipy.spatial.distance import cdist
 from itertools import product
 from python_motion_planning.common import TYPES
 from path_planning.utils.cgal_sweep import CGAL_Sweep
+import networkx as nx
 
 class GraphSampler(Grid):
     def __init__(self,*args,start,goal,sample_num=0,num_neighbors = 13.0, min_edge_len = 0.0, max_edge_len = 30.0,use_discrete_space=True,use_constraint_sweep=True,record_sweep=True,use_exact_collision_check=True,**kwargs):
@@ -563,6 +564,38 @@ class GraphSampler(Grid):
             point_int.append(max(0, min(self.shape[d] - 1, int(round(point[d]+1e-10)))))
         point_int = tuple(point_int)
         return point_int
+
+    def read_from_nx(self,G:nx.Graph):
+        self.clear_data()
+
+        node_start_idx = len(G.nodes) - len(self.start) - len(self.goal)
+        node_goal_idx = len(G.nodes) - len(self.goal)
+        nodes= []
+        for ii in G.nodes:
+            nodes.append(Node(current=G.nodes[ii]['ndata'][:-1]))
+            self.node_index_list[nodes[ii]] = len(nodes) - 1
+
+            if ii >= node_start_idx and ii < node_goal_idx:
+                self.start_nodes_index[nodes[ii]] = len(nodes) - 1
+            elif ii >= node_goal_idx:
+                self.goal_nodes_index[nodes[ii]] = len(nodes) - 1
+
+        for start in self.start:
+            start_node = Node(tuple(start),None,0,0)
+            start_idx = self.node_index_list[start_node]
+            other_costs = [self.get_distance(start_node.current, nodes[i].current) for i in range(len(nodes))]
+            self.start_to_all_edges_dict[start_idx] = list(zip(range(len(nodes)), other_costs))
+        for goal in self.goal:
+            goal_node = Node(tuple(goal),None,0,0)
+            goal_idx = self.node_index_list[goal_node]
+            other_costs = [self.get_distance(goal_node.current, nodes[i].current) for i in range(len(nodes))]
+            self.start_to_all_edges_dict[goal_idx] = list(zip(range(len(nodes)), other_costs))
+
+        # Update total node count after all nodes are added
+        self.num_total_nodes = len(nodes)
+        self.cost_matrix = cdist(np.array([node.current for node in nodes]), np.array([node.current for node in nodes]), metric='euclidean')
+        self.nodes = nodes
+        return nodes    
 
     def clear_data(self):
         self.start_to_all_edges_dict = {}
