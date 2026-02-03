@@ -10,25 +10,33 @@ from scipy.interpolate import RegularGridInterpolator
 import pickle
 from multiprocessing import Pool, cpu_count
 
-def generate_target_space(target_space_type:str, map:GraphSampler,density_map:np.ndarray,config:dict):
+def generate_target_space(target_space_type:str, map:GraphSampler,density_map:np.ndarray,ignore_generate: bool = False):
+    y = []
+    name = 'binary'
     if target_space_type == 'binary':
-        discrete_pos = [map.world_to_map(node.current,discrete=True) for node in map.nodes]
-        y = np.clip([density_map[s] for s in discrete_pos],0,1)
-        return y,'binary'
-    elif target_space_type == 'frequency':
-        discrete_pos = [map.world_to_map(node.current,discrete=True) for node in map.nodes]
-        y = np.array([density_map[s] for s in discrete_pos]) 
-        return y,'frequency'
+        if not ignore_generate:
+            discrete_pos = [map.world_to_map(node.current,discrete=True) for node in map.nodes]
+            y = np.clip([density_map[s] for s in discrete_pos],0,1)
+        name ='binary'
     elif target_space_type == 'bilinear':
-        discrete_pos = [map.world_to_map(node.current,discrete=True) for node in map.nodes]
-        mesh_space = tuple((np.arange(0,map.shape[i],1) for i in range(map.dim)))
-        interp_func = RegularGridInterpolator(mesh_space, density_map, method="linear")
-        y = np.array([interp_func(discrete_pos[i]) for i in range(len(discrete_pos))])
-        return y,'bilinear'
+        if not ignore_generate:
+            discrete_pos = [map.world_to_map(node.current,discrete=True) for node in map.nodes]
+            mesh_space = tuple((np.arange(0,map.shape[i],1) for i in range(map.dim)))
+            interp_func = RegularGridInterpolator(mesh_space, density_map/np.sum(density_map), method="linear")
+            y = np.array([interp_func(discrete_pos[i]) for i in range(len(discrete_pos))])
+        name ='bilinear'
+    elif target_space_type == 'distribution':
+        if not ignore_generate:
+            discrete_pos = [map.world_to_map(node.current,discrete=True) for node in map.nodes]
+            y = np.array([density_map[s] for s in discrete_pos])
+            y = y / np.sum(y)
+        name ='distribution'
     else:
-        discrete_pos = [map.world_to_map(node.current,discrete=True) for node in map.nodes]
-        y = np.clip([density_map[s] for s in discrete_pos],0,1)
-        return y,'binary'
+        if not ignore_generate:
+            discrete_pos = [map.world_to_map(node.current,discrete=True) for node in map.nodes]
+            y = np.clip([density_map[s] for s in discrete_pos],0,1)
+        name ='binary'
+    return y,name
 
 def generate_roadmap(road_map_type: str, map: GraphSampler, nodes: List[Node], ignore_generate: bool = False):
     if road_map_type == 'prm':
@@ -93,14 +101,14 @@ def process_single_case_graphs(args: Tuple[Path, dict]) -> Tuple[bool, Path]:
             road_map_type_name = generate_roadmap(road_map_type, None, [], True)
             graph_sample_path = case_dir / "samples" / f"{road_map_type_name}" / f"graph_{ii}"
             graph_sample_path.mkdir(parents=True, exist_ok=True)
-            graph_file = graph_sample_path / f"graph_{ii}.pickle"
+            # Check if npz graph already exists
+            graph_file = graph_sample_path / f"graph.npz"
             use_exisiting_graph = graph_file.exists() and not generate_new_graph
             if use_exisiting_graph:
-                with open(graph_file, "rb") as file:
-                    G = pickle.load(file)
-                nodes = []
-                for n in G.nodes:
-                    nodes.append(Node(current=G.nodes[n]["ndata"][:-1]))
+                # Load from npz format
+                data_dict = np.load(graph_file)
+                node_features = data_dict['node_features']
+                nodes = [Node(current=node_features[i][:-1]) for i in range(len(node_features))]
             else:
                 # Generates Nodes & Edges
                 nodes = map_.generateRandomNodes(generate_grid_nodes=use_discrete_space)
@@ -120,40 +128,39 @@ def process_single_case_graphs(args: Tuple[Path, dict]) -> Tuple[bool, Path]:
                 ndata[start_goal_idx, -1] = 1
 
                 # Generate Edges ('node', 'to', 'node')
-                edges = []
-                for edge in map_.edges:
-                    if edge[0] in start_goal_idx or edge[1] in start_goal_idx:
-                        continue
-                    edges.append(edge)
+                edges = np.array(map_.edges)
                 edata = np.array(edge_weights)
 
                 # Generate Start & Goal Edges ('node', 'approx', 'node')
-                start_goal_edata = []
+                start_goal_edges_list = []
+                start_goal_weights_list = []
                 for start_idx, start_edge in start_goal_edges_dict.items():
                     for goal_idx, edge_weight in start_edge:
-                        start_goal_edata.append(
-                            (start_idx, goal_idx, {"distance": edge_weight})
-                        )
+                        start_goal_edges_list.append((start_idx, goal_idx))
+                        start_goal_weights_list.append(edge_weight)
 
-                G = nx.MultiDiGraph()
-                G.add_nodes_from((i, {"ndata": ndata[i]}) for i in range(len(nodes)))
-                G.add_weighted_edges_from(
-                    [
-                        (int(edge[0]), int(edge[1]), {"cost": edata[i]})
-                        for i, edge in enumerate(edges)
-                    ]
-                )
-                G.add_weighted_edges_from(start_goal_edata)
-
-                graph_sample_path = (
-                    case_dir / "samples" / f"{road_map_type_name}" / f"graph_{ii}"
-                )
+                # Ensure directory exists
                 graph_sample_path.mkdir(parents=True, exist_ok=True)
-                with open(graph_sample_path / f"graph_{ii}.pickle", "wb") as f:
-                    pickle.dump(G, f)
+                
+                # Convert to numpy arrays and save as compressed npz (much smaller than pickle)
+                node_to_node_edges_arr = edges.astype(np.int32)
+                node_to_node_weights_arr = edata.astype(np.float32)
+                
+                start_goal_edges_arr = np.array(start_goal_edges_list, dtype=np.int32)
+                start_goal_weights_arr = np.array(start_goal_weights_list, dtype=np.float32)
+                
+                # Save as compressed npz (10x smaller than pickle)
+                np.savez_compressed(
+                    graph_sample_path / f"graph.npz",
+                    node_features=ndata.astype(np.float32),
+                    edge_index=node_to_node_edges_arr,
+                    edge_attr=node_to_node_weights_arr,
+                    approx_edge_index=start_goal_edges_arr,
+                    approx_edge_attr=start_goal_weights_arr
+                )
 
             # Generate Target Space ('y')
-            y, y_type_name = generate_target_space(target_space, map_, density_map, config)
+            y, y_type_name = generate_target_space(target_space, map_, density_map)
             np.save(graph_sample_path / f"target_{y_type_name}.npy", y)
 
             map_.clear_data()
