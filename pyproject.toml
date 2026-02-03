@@ -6,7 +6,7 @@ authors = [
     {name = "Brandon Ho",email = "bho36@gatech.edu"}
 ]
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.12,<3.14.1"
 dependencies = [
     "ipykernel (>=7.1.0,<8.0.0)",
     "python-motion-planning (==2.0.dev2)",
@@ -16,6 +16,11 @@ dependencies = [
     "tqdm (>=4.67.1,<5.0.0)",
     "cgal (>=6.0.1.post202410241521,<7.0.0)",
     "rtree (>=1.4.1,<2.0.0)",
+    "torch (>=2.10.0,<3.0.0)",
+    "torchvision (>=0.25.0,<0.26.0)",
+    "networkx (>=3.6.1,<4.0.0)",
+    "torch-geometric (>=2.7.0,<3.0.0)",
+    "scikit-learn (>=1.8.0,<2.0.0)",
 ]
 
 
