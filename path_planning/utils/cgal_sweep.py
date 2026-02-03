@@ -85,8 +85,6 @@ class CGAL_Sweep:
 
     def overlapping_graph_elements_cgal(self, u: tuple[float,float], v: tuple[float,float],velocity: float = 0.0, r: float = 0.5):
         if self.record_sweep and (u,v,velocity,r) in self.overlapping_sweep:
-            # overlapping_vertices, overlapping_edges = self.overlapping_sweep[u,v,velocity,r]
-            # return overlapping_vertices, overlapping_edges
             overlapping_edges = self.overlapping_sweep[u,v,velocity,r]
             return overlapping_edges
             
@@ -101,12 +99,7 @@ class CGAL_Sweep:
         overlapping_edges = set()
 
         # Special case: point query (stationary agent)
-        if u == v:
-            # # Use KDTree for fast vertex query
-            # indices = self.vertex_kdtree.query_ball_point(u, r-1e-10)
-            # overlapping_vertices = set(indices)
-            
-            
+        if u == v:    
             # Use R-tree to find ALL edges within radius (not just connected ones)
             # Create query box: point expanded by radius
             query_min = u_arr - r
@@ -130,9 +123,7 @@ class CGAL_Sweep:
                     overlapping_edges.add(self.edge_indices[edge_idx][::-1])
             
             if self.record_sweep:
-                # self.overlapping_sweep[u,v,velocity,r] = (overlapping_vertices, overlapping_edges)
                 self.overlapping_sweep[u,v,velocity,r] = overlapping_edges
-            # return overlapping_vertices, overlapping_edges
             return overlapping_edges
 
         # Regular segment query (moving agent)
@@ -195,17 +186,15 @@ class CGAL_Sweep:
                     vel = a_to_b-u_to_v
                     tdur = 1.0
                 else:
-                    vel = velocity*(a_to_b-u_to_v)/np.linalg.norm(a_to_b-u_to_v)
+                    dist = np.linalg.norm(a_to_b-u_to_v)
+                    vel = velocity*(a_to_b-u_to_v)/dist if dist > 0.0 else np.zeros(dim)
                     tdur = np.linalg.norm(a_to_b-u_to_v)/velocity
                 tmin = np.clip(-np.dot(ro1,vel)/(np.dot(vel,vel)+1e-10),0.0,tdur)
                 vec = ro1 + vel*tmin
                 if np.linalg.norm(vec) > r:
                     remove_edges.add(edge)
 
-            # overlapping_vertices = overlapping_vertices - remove_vertices
             overlapping_edges = overlapping_edges - remove_edges
         if self.record_sweep:
-            # self.overlapping_sweep[u,v,velocity,r] = (overlapping_vertices, overlapping_edges)
             self.overlapping_sweep[u,v,velocity,r] = overlapping_edges
-        # return overlapping_vertices, overlapping_edges
         return overlapping_edges

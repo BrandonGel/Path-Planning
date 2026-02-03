@@ -515,11 +515,13 @@ class GraphSampler(Grid):
             v2 = p2b-p2a
             t_dur = 1.0
         else:
-            t_dur1 = np.linalg.norm(p1b-p1a)/v
-            t_dur2 = np.linalg.norm(p2b-p2a)/v
+            dist1 = np.linalg.norm(p1b-p1a)
+            dist2 = np.linalg.norm(p2b-p2a)
+            t_dur1 = dist1/v
+            t_dur2 = dist2/v
             t_dur = min(t_dur1, t_dur2)
-            v1 = (p1b-p1a)/t_dur1
-            v2 = (p2b-p2a)/t_dur2
+            v1 = (p1b-p1a)/t_dur1 if dist1 > 0.0 else np.zeros(self.dim)
+            v2 = (p2b-p2a)/t_dur2 if dist2 > 0.0 else np.zeros(self.dim)
         r = 2*r
         r_vec = p2a-p1a
         vel = v2-v1
