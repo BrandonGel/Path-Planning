@@ -55,16 +55,18 @@ def process_single_case_trajectories(args: Tuple) -> Tuple[bool, Path]:
         Tuple of (success: bool, case_dir: Path)
     """
     case_dir, visualize_density_map = args
-    
+
+    gt_dir = case_dir / "ground_truth" if (case_dir / "ground_truth").exists() else case_dir
+
     try:
-        permutations = sorted([d for d in case_dir.iterdir() if d.is_dir() and d.name.startswith("perm_")])
+        permutations = sorted([d for d in gt_dir.iterdir() if d.is_dir() and d.name.startswith("perm_")])
         
         if not permutations:
             return False, case_dir
 
         agents = read_agents_from_yaml(permutations[0] / 'input.yaml')
         start_goal_locations = get_start_goal_locations(agents)
-        np.save(case_dir / 'start_goal_locations.npy', start_goal_locations)
+        np.save(gt_dir / 'start_goal_locations.npy', start_goal_locations)
         
         map_ = read_graph_sampler_from_yaml(permutations[0] / 'input.yaml')
         density_map = np.zeros(map_.shape)
@@ -83,16 +85,15 @@ def process_single_case_trajectories(args: Tuple) -> Tuple[bool, Path]:
             density_map += perm_trajectory_map.sum(axis=(0,1))
 
         obstacle_map = map_.get_obstacle_map().astype(int)
-        np.save(case_dir / 'obstacle_map.npy', obstacle_map)
-
-        np.save(case_dir / 'density_map.npy', density_map)
+        np.save(gt_dir / 'obstacle_map.npy', obstacle_map)
+        np.save(gt_dir / 'density_map.npy', density_map)
         
         if visualize_density_map:
             visualizer = Visualizer2D()
             masked_map = ~map_.get_obstacle_map()
             visualizer.plot_grid_map(map_, masked_map=masked_map)
             visualizer.plot_density_map(density_map/len(permutations))
-            visualizer.savefig(case_dir / 'density_map.png')
+            visualizer.savefig(gt_dir / 'density_map.png')
             visualizer.close()
         
         return True, case_dir

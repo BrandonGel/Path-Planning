@@ -188,8 +188,12 @@ def process_single_case(args: Tuple) -> Tuple[float, float, int]:
     if inpt is None:
         return 0.0, 1.0, case_id
     
-    case_path = path / f"case_{case_id}"
+    with open(path / f"case_{case_id}" / "input.yaml", "w") as f:
+        yaml.safe_dump(inpt, f)
     
+    case_path = path / f"case_{case_id}" / "ground_truth"
+    case_path.mkdir(parents=True, exist_ok=True)
+
     # Prepare permutation tasks
     permutation_tasks = []
     permutations = set()
