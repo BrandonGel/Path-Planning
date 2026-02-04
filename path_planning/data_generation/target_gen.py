@@ -10,7 +10,7 @@ from scipy.interpolate import RegularGridInterpolator
 import pickle
 from multiprocessing import Pool, cpu_count
 
-def generate_target_space(target_space_type:str, map:GraphSampler,density_map:np.ndarray,ignore_generate: bool = False):
+def generate_target_space(target_space_type:str, map:GraphSampler,density_map:np.ndarray,ignore_generate: bool = False,config:dict = None):
     y = []
     name = 'binary'
     if target_space_type == 'binary':
@@ -31,6 +31,59 @@ def generate_target_space(target_space_type:str, map:GraphSampler,density_map:np
             y = np.array([density_map[s] for s in discrete_pos])
             y = y / np.sum(y)
         name ='distribution'
+    elif 'fuzzy' in target_space_type:
+        if not ignore_generate:
+            num_hops = int(config["num_hops"]) if config is not None and "num_hops" in config else 1
+            if num_hops < 1:
+                num_hops = 1
+            discrete_pos = [map.world_to_map(node.current, discrete=True) for node in map.nodes]            
+            y_density = np.array([density_map[s] for s in discrete_pos]) 
+            if target_space_type == 'fuzzy_binary':
+                y_density = np.clip(y_density,0,1)
+            elif target_space_type == 'fuzzy_distribution':
+                y_density = y_density / np.sum(density_map)
+            y = y_density.copy()
+            
+            # PRE-COMPUTE: Build graph structure once (OPTIMIZATION)
+            num_nodes = len(map.nodes)
+            y_node_index = {map.node_index_list[node]: ii for ii, node in enumerate(map.nodes)}
+            
+            # Pre-build neighbor arrays for efficient access
+            max_neighbors = max(len(map.road_map[map.node_index_list[node]]) 
+                              for node in map.nodes) if num_nodes > 0 else 0
+            if max_neighbors > 0:
+                neighbor_indices = np.full((num_nodes, max_neighbors), -1, dtype=np.int32)
+                neighbor_costs = np.zeros((num_nodes, max_neighbors), dtype=np.float32)
+                neighbor_counts = np.zeros(num_nodes, dtype=np.int32)
+                
+                for i, node in enumerate(map.nodes):
+                    node_idx = map.node_index_list[node]
+                    neighbors = list(map.road_map[node_idx])
+                    neighbor_counts[i] = len(neighbors)
+                    
+                    for j, neighbor_idx in enumerate(neighbors):
+                        neighbor_indices[i, j] = y_node_index[neighbor_idx]
+                        neighbor_costs[i, j] = map.cost_matrix[(node_idx, neighbor_idx)]
+                
+                # PROPAGATION LOOP (now much faster)
+                for _ in range(num_hops):
+                    y_inverse_cost = np.zeros(num_nodes)
+                    
+                    for i in range(num_nodes):
+                        if neighbor_counts[i] > 0:
+                            # Get valid neighbors
+                            valid_neighbors = neighbor_indices[i, :neighbor_counts[i]]
+                            neighbor_values = y[valid_neighbors]/(neighbor_costs[i,:neighbor_counts[i]] + 1)
+                            
+                            # Find best neighbor
+                            y_inverse_cost[i] = np.max(neighbor_values)
+                    
+                    # Vectorized update
+                    y = np.clip(np.maximum(y_density, y_inverse_cost), 0, 1)
+        if target_space_type == 'fuzzy_binary':
+            name = 'fuzzy_binary'
+        elif target_space_type == 'fuzzy_distribution':
+            name = 'fuzzy_distribution'
     else:
         if not ignore_generate:
             discrete_pos = [map.world_to_map(node.current,discrete=True) for node in map.nodes]
@@ -60,115 +113,126 @@ def process_single_case_graphs(args: Tuple[Path, dict]) -> Tuple[bool, Path]:
     """
     case_dir, config = args
 
-    try:
-        use_discrete_space = config["use_discrete_space"] if "use_discrete_space" in config else False
-        num_samples = config["num_samples"] if "num_samples" in config else 1000
-        num_neighbors = config["num_neighbors"] if "num_neighbors" in config else 4.0
-        min_edge_len = config["min_edge_len"] if "min_edge_len" in config else 0.0
-        max_edge_len = config["max_edge_len"] if "max_edge_len" in config else 1 + 1e-10
-        num_graph_samples = config["num_graph_samples"] if "num_graph_samples" in config else 10
-        road_map_type = config["road_map_type"] if "road_map_type" in config else "planar"
-        target_space = config["target_space"] if "target_space" in config else "binary"
-        generate_new_graph = config["generate_new_graph"] if "generate_new_graph" in config else True
 
-        map_ = read_graph_sampler_from_yaml(
-            case_dir / "input.yaml", use_discrete_space=use_discrete_space
+    use_discrete_space = config["use_discrete_space"] if "use_discrete_space" in config else False
+    num_samples = config["num_samples"] if "num_samples" in config else 1000
+    num_neighbors = config["num_neighbors"] if "num_neighbors" in config else 4.0
+    min_edge_len = config["min_edge_len"] if "min_edge_len" in config else 0.0
+    max_edge_len = config["max_edge_len"] if "max_edge_len" in config else 1 + 1e-10
+    num_graph_samples = config["num_graph_samples"] if "num_graph_samples" in config else 10
+    road_map_type = config["road_map_type"] if "road_map_type" in config else "planar"
+    target_space = config["target_space"] if "target_space" in config else "binary"
+    generate_new_graph = config["generate_new_graph"] if "generate_new_graph" in config else True
+    is_start_goal_discrete = config["is_start_goal_discrete"] if "is_start_goal_discrete" in config else True
+
+    map_ = read_graph_sampler_from_yaml(
+        case_dir / "input.yaml", use_discrete_space=use_discrete_space
+    )
+    agents = read_agents_from_yaml(case_dir / "input.yaml")
+    density_map = np.load(case_dir / "ground_truth" / "density_map.npy")
+
+    # Starts and Goals are assumed to be in grid space
+    if use_discrete_space:
+        map_.set_parameters(
+            sample_num=0,
+            num_neighbors=num_neighbors,
+            min_edge_len=min_edge_len,
+            max_edge_len=max_edge_len,
         )
-        agents = read_agents_from_yaml(case_dir / "input.yaml")
-        density_map = np.load(case_dir / "ground_truth" / "density_map.npy")
-        if use_discrete_space:
-            map_.set_parameters(
-                sample_num=0,
-                num_neighbors=num_neighbors,
-                min_edge_len=min_edge_len,
-                max_edge_len=max_edge_len,
-            )
-        else:
-            map_.set_parameters(
-                sample_num=num_samples,
-                num_neighbors=num_neighbors,
-                min_edge_len=min_edge_len,
-                max_edge_len=max_edge_len,
-            )
+        
+    else:
+        map_.set_parameters(
+            sample_num=num_samples,
+            num_neighbors=num_neighbors,
+            min_edge_len=min_edge_len,
+            max_edge_len=max_edge_len,
+        )
 
+    if is_start_goal_discrete:
         start = [agent["start"] for agent in agents]
         goal = [agent["goal"] for agent in agents]
-        map_.set_start(start)
-        map_.set_goal(goal)
+    else:
+        start = [map_.map_to_world(agent["start"],discrete=True) for agent in agents]
+        goal = [map_.map_to_world(agent["goal"],discrete=True) for agent in agents]
+    map_.set_start(start)
+    map_.set_goal(goal)
 
-        for ii in range(num_graph_samples):
-            # Check if graph file exists
-            road_map_type_name = generate_roadmap(road_map_type, None, [], True)
-            graph_sample_path = case_dir / "samples" / f"{road_map_type_name}" / f"graph_{ii}"
+    for ii in range(num_graph_samples):
+        # Check if graph file exists
+        road_map_type_name = generate_roadmap(road_map_type, None, [], True)
+        graph_sample_path = case_dir / "samples" / f"{road_map_type_name}" / f"graph_{ii}"
+        graph_sample_path.mkdir(parents=True, exist_ok=True)
+        # Check if npz graph already exists
+        graph_file = graph_sample_path / f"graph.npz"
+        use_exisiting_graph = graph_file.exists() and not generate_new_graph
+        if use_exisiting_graph:
+            # Load from npz format
+            data_dict = np.load(graph_file)
+            position = data_dict['node_features'][:,:-1]
+            edge_index = data_dict['edge_index']
+            edge_attr = data_dict['edge_attr']
+            use_roadmap = False
+            if 'fuzzy' in target_space:
+                use_roadmap = True
+            map_.read_from_numpy(position, edge_index, edge_attr, use_roadmap)
+        else:
+            # Generates Nodes & Edges
+            nodes = map_.generateRandomNodes(generate_grid_nodes=use_discrete_space)
+            generate_roadmap(road_map_type, map_, nodes)
+
+            # Get Edges & Edge Weights
+            edge_weights = map_.edge_weights
+            start_goal_edges_dict = map_.start_to_all_edges_dict | map_.goal_to_all_edges_dict
+            start_goal_nodes = map_.get_start_nodes() + map_.get_goal_nodes()
+
+            # Generate Node Data ('node')
+            pos = np.array([node.current for node in nodes])
+            # Concatenate Position & zero class vector
+            ndata = np.concatenate((pos, np.zeros((pos.shape[0], 1))), axis=1)
+            start_goal_idx = [map_.get_node_index(node) for node in start_goal_nodes]
+            # Specify Start & Goal Nodes to have the one class value
+            ndata[start_goal_idx, -1] = 1
+
+            # Generate Edges ('node', 'to', 'node')
+            edges = np.array(map_.edges)
+            edata = np.array(edge_weights)
+
+            # Generate Start & Goal Edges ('node', 'approx', 'node')
+            start_goal_edges_list = []
+            start_goal_weights_list = []
+            for u_idx, u_to_v_edge in start_goal_edges_dict.items():
+                for v_idx, edge_weight in u_to_v_edge:
+                    start_goal_edges_list.append((u_idx, v_idx))
+                    start_goal_weights_list.append(edge_weight)
+
+            # Ensure directory exists
             graph_sample_path.mkdir(parents=True, exist_ok=True)
-            # Check if npz graph already exists
-            graph_file = graph_sample_path / f"graph.npz"
-            use_exisiting_graph = graph_file.exists() and not generate_new_graph
-            if use_exisiting_graph:
-                # Load from npz format
-                data_dict = np.load(graph_file)
-                node_features = data_dict['node_features']
-                nodes = [Node(current=node_features[i][:-1]) for i in range(len(node_features))]
-            else:
-                # Generates Nodes & Edges
-                nodes = map_.generateRandomNodes(generate_grid_nodes=use_discrete_space)
-                generate_roadmap(road_map_type, map_, nodes)
+            
+            # Convert to numpy arrays and save as compressed npz (much smaller than pickle)
+            node_to_node_edges_arr = edges.astype(np.int32)
+            node_to_node_weights_arr = edata.astype(np.float32)
+            
+            start_goal_edges_arr = np.array(start_goal_edges_list, dtype=np.int32)
+            start_goal_weights_arr = np.array(start_goal_weights_list, dtype=np.float32)
+            
+            # Save as compressed npz (10x smaller than pickle)
+            np.savez_compressed(
+                graph_sample_path / f"graph.npz",
+                node_features=ndata.astype(np.float32),
+                edge_index=node_to_node_edges_arr,
+                edge_attr=node_to_node_weights_arr,
+                approx_edge_index=start_goal_edges_arr,
+                approx_edge_attr=start_goal_weights_arr
+            )
 
-                # Get Edges & Edge Weights
-                edge_weights = map_.edge_weights
-                start_goal_edges_dict = map_.start_to_all_edges_dict
-                start_goal_nodes = map_.get_start_nodes() + map_.get_goal_nodes()
+        # Generate Target Space ('y')
+        y, y_type_name = generate_target_space(target_space, map_, density_map,config=config)
+        np.save(graph_sample_path / f"target_{y_type_name}.npy", y)
 
-                # Generate Node Data ('node')
-                pos = np.array([node.current for node in nodes])
-                # Concatenate Position & zero class vector
-                ndata = np.concatenate((pos, np.zeros((pos.shape[0], 1))), axis=1)
-                start_goal_idx = [map_.get_node_index(node) for node in start_goal_nodes]
-                # Specify Start & Goal Nodes to have the one class value
-                ndata[start_goal_idx, -1] = 1
+        map_.clear_data()
 
-                # Generate Edges ('node', 'to', 'node')
-                edges = np.array(map_.edges)
-                edata = np.array(edge_weights)
+    return True, case_dir
 
-                # Generate Start & Goal Edges ('node', 'approx', 'node')
-                start_goal_edges_list = []
-                start_goal_weights_list = []
-                for start_idx, start_edge in start_goal_edges_dict.items():
-                    for goal_idx, edge_weight in start_edge:
-                        start_goal_edges_list.append((start_idx, goal_idx))
-                        start_goal_weights_list.append(edge_weight)
-
-                # Ensure directory exists
-                graph_sample_path.mkdir(parents=True, exist_ok=True)
-                
-                # Convert to numpy arrays and save as compressed npz (much smaller than pickle)
-                node_to_node_edges_arr = edges.astype(np.int32)
-                node_to_node_weights_arr = edata.astype(np.float32)
-                
-                start_goal_edges_arr = np.array(start_goal_edges_list, dtype=np.int32)
-                start_goal_weights_arr = np.array(start_goal_weights_list, dtype=np.float32)
-                
-                # Save as compressed npz (10x smaller than pickle)
-                np.savez_compressed(
-                    graph_sample_path / f"graph.npz",
-                    node_features=ndata.astype(np.float32),
-                    edge_index=node_to_node_edges_arr,
-                    edge_attr=node_to_node_weights_arr,
-                    approx_edge_index=start_goal_edges_arr,
-                    approx_edge_attr=start_goal_weights_arr
-                )
-
-            # Generate Target Space ('y')
-            y, y_type_name = generate_target_space(target_space, map_, density_map)
-            np.save(graph_sample_path / f"target_{y_type_name}.npy", y)
-
-            map_.clear_data()
-
-        return True, case_dir
-    except Exception as e:
-        print(f"Error processing {case_dir}: {e}")
-        return False, case_dir
 
 
 def generate_graph_samples(path: Path, config: dict, num_workers: int | None = None) -> None:

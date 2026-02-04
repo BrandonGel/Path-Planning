@@ -18,8 +18,8 @@ class GraphSampler(Grid):
         assert goal is not None, "Goal must not be None"
         assert isinstance(start, list), "Start must be a list"
         assert isinstance(goal, list), "Goal must be a list"
-        self.start = start
-        self.goal = goal
+        self.start = [tuple(float(pt) for pt in  s) for s in start]
+        self.goal = [tuple(float(pt) for pt in g) for g in goal]
         self.sample_num = sample_num
         self.num_total_nodes = sample_num + len(self.start) + len(self.goal)
         self.num_neighbors = num_neighbors
@@ -58,7 +58,7 @@ class GraphSampler(Grid):
             start_pixel = start
         else:
             start_pixel = [self.world_to_map(s,discrete=True) for s in start]
-        self.start = start
+        self.start = [tuple(float(pt) for pt in  s) for s in start]
         for s in start_pixel:
             self.type_map[tuple(s)] = TYPES.START
         
@@ -68,7 +68,7 @@ class GraphSampler(Grid):
             goal_pixel = goal
         else:
             goal_pixel =  [self.world_to_map(g,discrete=True) for g in goal]
-        self.goal = goal
+        self.goal = [tuple(float(pt) for pt in g) for g in goal]
         for g in goal_pixel:
             self.type_map[tuple(g)] = TYPES.GOAL
     
@@ -406,9 +406,9 @@ class GraphSampler(Grid):
                 if self.is_expandable(grid_coords_tuple):
                     # Adjust the world coordinates to avoid precision and rounding issues
                     if self.use_discrete_space:
-                        current = grid_coords_tuple
+                        current = tuple(float(i) for i in grid_coords_tuple)
                     else:
-                        current =tuple(i for i in self.map_to_world(grid_coords_tuple))
+                        current =tuple(float(i) for i in self.map_to_world(grid_coords_tuple))
                     node = Node(current, None, 0, 0)
                     nodes.append(node)
                     self.node_index_list[node] = len(nodes) - 1
@@ -441,7 +441,7 @@ class GraphSampler(Grid):
             goal_node = Node(tuple(goal),None,0,0)
             goal_idx = self.node_index_list[goal_node]
             other_costs = [self.get_distance(goal_node.current, nodes[i].current) for i in range(len(nodes))]
-            self.start_to_all_edges_dict[goal_idx] = list(zip(range(len(nodes)), other_costs))
+            self.goal_to_all_edges_dict[goal_idx] = list(zip(range(len(nodes)), other_costs))
 
         # Update total node count after all nodes are added
         self.num_total_nodes = len(nodes)
@@ -565,37 +565,47 @@ class GraphSampler(Grid):
         point_int = tuple(point_int)
         return point_int
 
-    def read_from_nx(self,G:nx.Graph):
+    def read_from_numpy(self,position:np.ndarray,edge_index:np.ndarray,edge_attr:np.ndarray, use_roadmap:bool = True):
         self.clear_data()
-
-        node_start_idx = len(G.nodes) - len(self.start) - len(self.goal)
-        node_goal_idx = len(G.nodes) - len(self.goal)
+        position = position.tolist()
+        node_start_idx = len(position) - len(self.start) - len(self.goal)
+        node_goal_idx = len(position) - len(self.goal)
         nodes= []
-        for ii in G.nodes:
-            nodes.append(Node(current=G.nodes[ii]['ndata'][:-1]))
+        for ii in range(len(position)):
+            nodes.append(Node(current=tuple(position[ii])))
             self.node_index_list[nodes[ii]] = len(nodes) - 1
 
             if ii >= node_start_idx and ii < node_goal_idx:
                 self.start_nodes_index[nodes[ii]] = len(nodes) - 1
             elif ii >= node_goal_idx:
                 self.goal_nodes_index[nodes[ii]] = len(nodes) - 1
+        
+        if use_roadmap: 
+            edge_index = edge_index.tolist()
+            edge_attr = edge_attr.tolist()
+            self.edges = [tuple(e) for e in edge_index]
+            self.edge_indices = {i: (e[0], e[1]) for i, e in enumerate(self.edges)}
+            self.edge_weights = edge_attr
+            self.road_map= [[] for ii in range(len(position))]
+            for i, j in self.edges:
+                self.road_map[i].append(j)
 
-        for start in self.start:
-            start_node = Node(tuple(start),None,0,0)
-            start_idx = self.node_index_list[start_node]
-            other_costs = [self.get_distance(start_node.current, nodes[i].current) for i in range(len(nodes))]
-            self.start_to_all_edges_dict[start_idx] = list(zip(range(len(nodes)), other_costs))
-        for goal in self.goal:
-            goal_node = Node(tuple(goal),None,0,0)
-            goal_idx = self.node_index_list[goal_node]
-            other_costs = [self.get_distance(goal_node.current, nodes[i].current) for i in range(len(nodes))]
-            self.start_to_all_edges_dict[goal_idx] = list(zip(range(len(nodes)), other_costs))
+            for start in self.start:
+                start_node = Node(tuple(start),None,0,0)
+                start_idx = self.node_index_list[start_node]
+                other_costs = [self.get_distance(start_node.current, nodes[i].current) for i in range(len(nodes))]
+                self.start_to_all_edges_dict[start_idx] = list(zip(range(len(nodes)), other_costs))
+            for goal in self.goal:
+                goal_node = Node(tuple(goal),None,0,0)
+                goal_idx = self.node_index_list[goal_node]
+                other_costs = [self.get_distance(goal_node.current, nodes[i].current) for i in range(len(nodes))]
+                self.goal_to_all_edges_dict[goal_idx] = list(zip(range(len(nodes)), other_costs))
 
         # Update total node count after all nodes are added
         self.num_total_nodes = len(nodes)
         self.cost_matrix = cdist(np.array([node.current for node in nodes]), np.array([node.current for node in nodes]), metric='euclidean')
         self.nodes = nodes
-        return nodes    
+
 
     def clear_data(self):
         self.start_to_all_edges_dict = {}
