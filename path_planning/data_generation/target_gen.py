@@ -148,12 +148,15 @@ def process_single_case_graphs(args: Tuple[Path, dict]) -> Tuple[bool, Path]:
             max_edge_len=max_edge_len,
         )
 
-    if is_start_goal_discrete:
+    if is_start_goal_discrete and not use_discrete_space:
+        start = [map_.map_to_world(agent["start"]) for agent in agents]
+        goal = [map_.map_to_world(agent["goal"]) for agent in agents]
+    elif not is_start_goal_discrete and use_discrete_space:
+        start = [map_.world_to_map(agent["start"],discrete=True) for agent in agents]
+        goal = [map_.world_to_map(agent["goal"],discrete=True) for agent in agents]
+    else:
         start = [agent["start"] for agent in agents]
         goal = [agent["goal"] for agent in agents]
-    else:
-        start = [map_.map_to_world(agent["start"],discrete=True) for agent in agents]
-        goal = [map_.map_to_world(agent["goal"],discrete=True) for agent in agents]
     map_.set_start(start)
     map_.set_goal(goal)
 

@@ -22,6 +22,7 @@ if __name__ == "__main__":
     parser.add_argument("-rmt","--road_map_type",type=str, default='planar', help="road map type")
     parser.add_argument("-ts","--target_space",type=str, default='binary', help="target space")
     parser.add_argument("-gn","--generate_new_graph",type=bool, default=True, help="generate new graph")
+    parser.add_argument("-isg","--is_start_goal_discrete",type=bool, default=True, help="use discrete space for start and goal")
     parser.add_argument("-w","--num_workers",type=int, default=None, help="number of parallel workers for cases (default: auto-detect CPU cores)")
     args = parser.parse_args()
     
@@ -38,6 +39,7 @@ if __name__ == "__main__":
             "road_map_type": args.road_map_type,
             "target_space": args.target_space,
             "generate_new_graph": args.generate_new_graph,
+            "is_start_goal_discrete": args.is_start_goal_discrete,
             "num_workers": num_workers,
         }
     for file_path in folder_path:
