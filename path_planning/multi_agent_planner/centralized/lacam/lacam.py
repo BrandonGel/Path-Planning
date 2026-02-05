@@ -213,13 +213,16 @@ class LaCAM:
         # categorize result
         if N_goal is not None and len(OPEN) == 0:
             self.info(1, f"reach optimal solution, cost={N_goal.g}")
+            self.cost = N_goal.g
         elif N_goal is not None:
             self.info(1, f"suboptimal solution, cost={N_goal.g}")
+            self.cost = N_goal.g
         elif len(OPEN) == 0:
             self.info(1, "detected unsolvable instance")
+            self.cost = float('inf')
         else:
             self.info(1, "failure due to timeout")
-        self.cost = N_goal.g
+            self.cost = float('inf')
         return self.backtrack(N_goal)
 
     @staticmethod
