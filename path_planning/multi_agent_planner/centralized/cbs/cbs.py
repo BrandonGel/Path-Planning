@@ -99,7 +99,7 @@ class Constraints(object):
             "EC: " + str([str(ec) for ec in self.edge_constraints])
 
 class Environment(object):
-    def __init__(self, graph_map, agents, astar_max_iterations=-1, radius = 1.0, velocity = 0.0, use_constraint_sweep=True):
+    def __init__(self, graph_map, agents, astar_max_iterations=-1, radius = 0.0, velocity = 0.0, use_constraint_sweep=True):
         self.graph_map = graph_map
         self.agents = agents
         self.agent_dict = {}

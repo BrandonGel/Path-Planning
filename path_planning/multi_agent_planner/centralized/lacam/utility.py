@@ -153,11 +153,11 @@ def set_starts_goals_config(starts_list: list = None, goals_list:list = None) ->
     """
     starts,goals = Config(),Config()
     if starts_list is not None:
-        for start in starts_list:
-            starts.append(tuple(start))  # align with grid
+        for start in np.array(starts_list).astype(int):
+            starts.append(tuple(start.tolist()))  # align with grid
     if goals_list is not None:
-        for goal in goals_list:
-            goals.append(tuple(goal))
+        for goal in np.array(goals_list).astype(int):
+            goals.append(tuple(goal.tolist()))
     return starts, goals
 
 def is_valid_coord(graph_map: GraphSampler, coord: Coord) -> bool:
