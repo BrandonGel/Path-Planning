@@ -12,6 +12,9 @@ import yaml
 import numpy as np
 from typing import Any, Dict, List, Tuple, Optional
 from path_planning.multi_agent_planner.centralized.cbs.cbs import Environment, CBS
+from path_planning.multi_agent_planner.centralized.lacam.lacam import LaCAM
+from path_planning.multi_agent_planner.centralized.lacam.lacam_random import LaCAM as LaCAM_random
+from path_planning.multi_agent_planner.centralized.lacam.utility import set_starts_goals_config, validate_mapf_solution
 from path_planning.common.environment.map.graph_sampler import GraphSampler
 from python_motion_planning.common import TYPES
 import math
@@ -36,6 +39,7 @@ def gen_input(
     nb_obstacles: int,
     nb_agents: int,
     resolution: float = 1.0,
+    mapf_solver: str = "cbs",
     max_attempts: int = 10000
     ) -> Optional[Dict]:
     """
@@ -60,7 +64,8 @@ def gen_input(
             'resolution': resolution,
             "obstacles": []
         },
-        "agents": []
+        "agents": [],
+        "mapf_solver": mapf_solver
     }
 
     total_cells = dimensions[0] * dimensions[1]
@@ -182,12 +187,15 @@ def process_single_case(args: Tuple) -> Tuple[float, float, int]:
         config["nb_obstacles"],
         config["nb_agents"],
         config["resolution"],
+        config["mapf_solver"],
     )
     timeout = config["timeout"]
     max_attempts = config["max_attempts"]
     if inpt is None:
         return 0.0, 1.0, case_id
     
+    input_path = path / f"case_{case_id}"
+    input_path.mkdir(parents=True, exist_ok=True)
     with open(path / f"case_{case_id}" / "input.yaml", "w") as f:
         yaml.safe_dump(inpt, f)
     
@@ -269,26 +277,40 @@ def data_gen(input_dict: Dict, output_path: Path, timeout: int = 60, max_attempt
     goal = [agent['goal'] for agent in agents]
     map_.set_start(start)
     map_.set_goal(goal)
+
+    
     nodes = map_.generateRandomNodes(generate_grid_nodes = True)
     road_map = map_.generate_roadmap(nodes)
 
     start = [s.current for s in map_.get_start_nodes()]
     goal = [g.current for g in map_.get_goal_nodes()]
-    agents =[
-         {
-            "start": start[i],
-            "name": agent['name'],
-            "goal": goal[i]
-        }
-        for i, agent in enumerate(agents)
-    ]
-    env = Environment(map_, agents)
+    if param["mapf_solver"] == "cbs":
+        map_.set_constraint_sweep()
+        agents =[
+            {
+                "start": start[i],
+                "name": agent['name'],
+                "goal": goal[i]
+            }
+            for i, agent in enumerate(agents)
+        ]
+        env = Environment(map_, agents)
 
-    # Search for solution and measure runtime
-    cbs = CBS(env, time_limit=timeout, max_iterations=max_attempts)
-    start_time = time.time()
-    solution = cbs.search()
-    runtime = time.time() - start_time
+        # Search for solution and measure runtime
+        cbs = CBS(env, time_limit=timeout, max_iterations=max_attempts)
+        start_time = time.time()
+        solution = cbs.search()
+        runtime = time.time() - start_time
+    elif param["mapf_solver"] == "lacam":
+        starts, goals = set_starts_goals_config(start, goal)
+        planner = LaCAM()
+        solution = planner.solve(map_, starts, goals, time_limit_ms=timeout*1000)
+    elif param["mapf_solver"] == "lacam_random":
+        starts, goals = set_starts_goals_config(start, goal)
+        planner = LaCAM_random()
+        solution = planner.solve(map_, start, goal, time_limit_ms=timeout*1000)
+    else:
+        assert False, "Invalid MAPF solver"
 
     if not solution:
         print(f"No solution found for case {output_path.name}")
