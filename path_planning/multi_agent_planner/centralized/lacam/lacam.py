@@ -86,6 +86,7 @@ class LaCAM:
         self.seed: int = seed
         self.rng: np.random.Generator = np.random.default_rng(seed=seed)
         self.verbose = verbose
+        self.cost = float('inf')
         return self._solve()
 
     def _solve(self) -> Configs:
@@ -218,6 +219,7 @@ class LaCAM:
             self.info(1, "detected unsolvable instance")
         else:
             self.info(1, "failure due to timeout")
+        self.cost = N_goal.g
         return self.backtrack(N_goal)
 
     @staticmethod
@@ -272,3 +274,28 @@ class LaCAM:
         if self.verbose < level:
             return
         logger.debug(f"{int(self.deadline.elapsed):4d}ms  {msg}")
+
+    def get_solution_dict(self, solution: Configs) -> dict:
+        solution_dict = {}
+        solution_dict['schedule'] = {}
+        num_agents = len(solution[0])
+        for i in range(num_agents):
+            solution_dict['schedule'].update({f'agent_{i}': []})
+            for j in range(len(solution)):
+                if self.graph_map.dim == 2:
+                    solution_dict['schedule'][f'agent_{i}'].append({
+                        't': j,
+                        'x': solution[j][i][0],
+                        'y': solution[j][i][1]
+                    })
+                elif self.graph_map.dim == 3:
+                    solution_dict['schedule'][f'agent_{i}'].append({
+                        't': j,
+                        'x': solution[j][i][0],
+                        'y': solution[j][i][1],
+                        'z': solution[j][i][2]
+                    })
+                else:
+                    raise ValueError(f"Invalid dimension: {self.graph_map.dim}")
+        solution_dict['cost'] = self.cost
+        return solution_dict
