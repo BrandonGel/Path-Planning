@@ -317,7 +317,7 @@ class Visualizer2D(BaseVisualizer2D):
             dpi=200)
         self.set_fig_size(self.figsize[0], self.figsize[1])
 
-    def plot_density_map(self, density_map: np.ndarray, grid_map: Grid=None, equal: bool = False, alpha: float = 0.6,masked_map = None) -> None:
+    def plot_density_map(self, density_map: np.ndarray, grid_map: Grid=None, equal: bool = False, alpha: float = 0.6,masked_map = None,interpolation: str = 'bilinear') -> None:
         '''
         Plot density map as a heatmap that can be superimposed on other visualizations.
 
@@ -348,7 +348,7 @@ class Visualizer2D(BaseVisualizer2D):
             np.transpose(density_map), 
             cmap=self.cmap_density, 
             origin='lower', 
-            interpolation='bilinear', 
+            interpolation=interpolation, 
             extent=[*self.grid_map.bounds[0], *self.grid_map.bounds[1]],
             zorder=self.zorder['density_map'],  # Use esdf zorder to appear above grid_map but below paths
             alpha=alpha,
