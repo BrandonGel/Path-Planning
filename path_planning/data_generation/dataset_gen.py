@@ -301,25 +301,41 @@ def data_gen(input_dict: Dict, output_path: Path, timeout: int = 60, max_attempt
         start_time = time.time()
         solution = cbs.search()
         runtime = time.time() - start_time
+        if not solution:
+            print(f"No solution found for case {output_path.name}")
+            return False
+        cost = env.compute_solution_cost(solution)
     elif param["mapf_solver"] == "lacam":
-        starts, goals = set_starts_goals_config(start, goal)
+        starts, goals = set_starts_goals_config(start, goal)    
         planner = LaCAM()
+        start_time = time.time()
         solution = planner.solve(map_, starts, goals, time_limit_ms=timeout*1000)
+        runtime = time.time() - start_time
+        if planner.cost == float('inf'):
+            print(f"No solution found for case {output_path.name}")
+            return False
+        solution = planner.get_solution_dict(solution)
+        cost = planner.cost
     elif param["mapf_solver"] == "lacam_random":
         starts, goals = set_starts_goals_config(start, goal)
         planner = LaCAM_random()
+        start_time = time.time()
         solution = planner.solve(map_, start, goal, time_limit_ms=timeout*1000)
+        runtime = time.time() - start_time
+        if planner.cost == float('inf'):
+            print(f"No solution found for case {output_path.name}")
+            return False
+        solution = planner.get_solution_dict(solution)
+        cost = planner.cost
     else:
         assert False, "Invalid MAPF solver"
 
-    if not solution:
-        print(f"No solution found for case {output_path.name}")
-        return False
+    
 
     # Write solution file
     output = {
         "schedule": solution,
-        "cost": env.compute_solution_cost(solution),
+        "cost": cost,
         "runtime": runtime
     }
 

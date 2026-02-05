@@ -280,19 +280,17 @@ class LaCAM:
 
     def get_solution_dict(self, solution: Configs) -> dict:
         solution_dict = {}
-        solution_dict['schedule'] = {}
-        num_agents = len(solution[0])
-        for i in range(num_agents):
-            solution_dict['schedule'].update({f'agent_{i}': []})
+        for i in range(self.num_agents):
+            solution_dict.update({f'agent_{i}': []})
             for j in range(len(solution)):
                 if self.graph_map.dim == 2:
-                    solution_dict['schedule'][f'agent_{i}'].append({
+                    solution_dict[f'agent_{i}'].append({
                         't': j,
                         'x': solution[j][i][0],
                         'y': solution[j][i][1]
                     })
                 elif self.graph_map.dim == 3:
-                    solution_dict['schedule'][f'agent_{i}'].append({
+                    solution_dict[f'agent_{i}'].append({
                         't': j,
                         'x': solution[j][i][0],
                         'y': solution[j][i][1],
@@ -300,5 +298,4 @@ class LaCAM:
                     })
                 else:
                     raise ValueError(f"Invalid dimension: {self.graph_map.dim}")
-        solution_dict['cost'] = self.cost
         return solution_dict
