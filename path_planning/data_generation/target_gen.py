@@ -1,14 +1,16 @@
 from path_planning.utils.util import read_graph_sampler_from_yaml, read_agents_from_yaml
 import numpy as np
-import networkx as nx
-import numpy as np
 from pathlib import Path
 from tqdm import tqdm
 from path_planning.common.environment.map.graph_sampler import GraphSampler, Node
 from typing import List, Tuple
 from scipy.interpolate import RegularGridInterpolator
-import pickle
 from multiprocessing import Pool, cpu_count
+from scipy.ndimage import generic_filter,generate_binary_structure
+
+def weighted_max_op(window, weights):
+    # 'window' is passed as a 1D array by scipy
+    return np.max(window * weights)
 
 def generate_target_space(target_space_type:str, map:GraphSampler,density_map:np.ndarray,ignore_generate: bool = False,config:dict = None):
     y = []
@@ -29,7 +31,7 @@ def generate_target_space(target_space_type:str, map:GraphSampler,density_map:np
         if not ignore_generate:
             discrete_pos = [map.world_to_map(node.current,discrete=True) for node in map.nodes]
             y = np.array([density_map[s] for s in discrete_pos])
-            y = y / np.sum(y)
+            y = y / density_map.sum()
         name ='distribution'
     elif 'fuzzy' in target_space_type:
         if not ignore_generate:
@@ -84,6 +86,29 @@ def generate_target_space(target_space_type:str, map:GraphSampler,density_map:np
             name = 'fuzzy_binary'
         elif target_space_type == 'fuzzy_distribution':
             name = 'fuzzy_distribution'
+    elif 'convolution' in  target_space_type:
+        if not ignore_generate:
+            num_hops = int(config["num_hops"]) if config is not None and "num_hops" in config else 1
+            if num_hops < 1:
+                num_hops = 1
+            if target_space_type == 'convolution_binary':
+                new_density_map = np.clip(density_map,0,1)
+            elif target_space_type == 'convolution_distribution':
+                new_density_map = density_map / density_map.sum()
+
+            resolution = map.resolution
+            kernel = generate_binary_structure(map.dim,1).astype(int)/(1+resolution)
+            center_pt = (1,)*map.dim
+            kernel[tuple(center_pt)] = 1
+            for _ in range(num_hops):     
+                new_density_map = generic_filter(new_density_map, weighted_max_op, size=kernel.shape, 
+                        extra_keywords={'weights': kernel.flatten()})
+            discrete_pos = [map.world_to_map(node.current, discrete=True) for node in map.nodes]            
+            y = np.array([new_density_map[s] for s in discrete_pos]) 
+        if target_space_type == 'convolution_binary':
+            name = 'convolution_binary'
+        elif target_space_type == 'convolution_distribution':
+            name = 'convolution_distribution'
     else:
         if not ignore_generate:
             discrete_pos = [map.world_to_map(node.current,discrete=True) for node in map.nodes]
