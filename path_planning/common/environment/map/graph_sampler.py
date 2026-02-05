@@ -43,6 +43,10 @@ class GraphSampler(Grid):
         self.use_constraint_sweep = use_constraint_sweep
         self.constraint_sweep = CGAL_Sweep(record_sweep=record_sweep,use_exact_collision_check=use_exact_collision_check)
         self.sample_kd_tree = None
+    
+    @property
+    def size(self) -> int:
+        return np.prod(self.shape)
 
     def __str__(self) -> str:
         return "Graph Sampler"
@@ -456,10 +460,10 @@ class GraphSampler(Grid):
         self.sample_kd_tree = sample_kd_tree
         for i, node_s in zip(range(len(samples)), samples):
             s_pos = node_s.current
-            indexes = sample_kd_tree.query_ball_point(s_pos, self.max_edge_length)
+            indexes = sample_kd_tree.query_ball_point(s_pos, self.max_edge_length,return_sorted=True)
             edge_id = []
 
-            for ii in range(1, len(indexes)):
+            for ii in range(len(indexes)):
                 node_n = samples[indexes[ii]]
                 n_pos = samples[indexes[ii]].current
 
