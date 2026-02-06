@@ -22,10 +22,18 @@ def _load_single_graph(files: Tuple[Path, Path]) -> HeteroData:
         HeteroData object containing the processed graph
     """
     graph_file, target_file = files
+
+    # Normalize node features
+    graph_file_split = str(graph_file).split('/')
+    ind = [ii for ii in range(len(graph_file_split)) if 'map' in graph_file_split[ii] and 'resolution' in graph_file_split[ii]][0]
+    resolution = float(graph_file_split[ind].split('_')[1][len('resolution'):])
+    bounds = graph_file_split[ind].split('_')[0][len('map'):].split('x')
+    bounds = np.array([float(b) for b in bounds])
     
     # Load optimized npz format
     data_dict = np.load(graph_file)
     node_ndata = data_dict['node_features']
+    node_ndata[:,:-1] = node_ndata[:,:-1] / bounds
     node_to_node_edges = data_dict['edge_index'].T
     node_to_node_edata = data_dict['edge_attr']
     node_approx_node_edges = data_dict['approx_edge_index'].T
