@@ -1,7 +1,6 @@
 
 import numpy as np
 from torch_geometric.data import HeteroData
-import torch
 from typing import Optional, Callable
 from torch_geometric.data import InMemoryDataset,Data
 from torch_geometric.transforms import NormalizeFeatures
@@ -11,6 +10,14 @@ from typing import List,Tuple
 from multiprocessing import Pool, cpu_count
 from path_planning.data_generation.target_gen import generate_roadmap,generate_target_space
 import os
+import torch
+import torch_geometric
+
+# Allowlist PyG's base storage to bypass the security check
+torch.serialization.add_safe_globals([torch_geometric.data.storage.BaseStorage])
+torch.serialization.add_safe_globals([torch_geometric.data.storage.NodeStorage])
+torch.serialization.add_safe_globals([torch_geometric.data.storage.EdgeStorage])
+
 def _load_single_graph(files: Tuple[Path, Path]) -> HeteroData:
     """
     Load and process a single graph file (worker function for multiprocessing).
@@ -42,22 +49,22 @@ def _load_single_graph(files: Tuple[Path, Path]) -> HeteroData:
     # Load target
     y: np.ndarray = np.load(target_file)
     
-    # Create HeteroData
-    data = HeteroData()
-    data['node'].x = torch.tensor(node_ndata, dtype=torch.float)
-    data['node','to','node'].edge_index = torch.tensor(node_to_node_edges, dtype=torch.long)
-    data['node','to','node'].x = torch.tensor(node_to_node_edata, dtype=torch.float)
-    data['node','approx','node'].edge_index = torch.tensor(node_approx_node_edges, dtype=torch.long)
-    data['node','approx','node'].x = torch.tensor(node_aprox_node_edata, dtype=torch.float)
-    data['node'].y = torch.tensor(y, dtype=torch.float)
-    
-    return data
+
+    # Return as dictionary of numpy arrays instead of HeteroData
+    return {
+        'node_features': node_ndata,
+        'node_to_node_edges': node_to_node_edges,
+        'node_to_node_edata': node_to_node_edata,
+        'node_approx_node_edges': node_approx_node_edges,
+        'node_approx_node_edata': node_aprox_node_edata,
+        'y': y
+    }   
 
 class GraphDataset(InMemoryDataset):  
     def __init__(self,
-                data_files:List[Path],
+                data_files:List[Path]=None,
                 load_file:Path = None,
-                save_file:Path = '',
+                save_file:Path = None,
                 root:Optional[str] = None,
                 transform: Optional[Callable] = None,
                 pre_transform: Optional[Callable] = None,
@@ -65,7 +72,7 @@ class GraphDataset(InMemoryDataset):
                 num_workers: Optional[int] = 1):
         self.data_files = data_files
         self.load_file = load_file
-        self.save_file = save_file if len(save_file) > 0 else os.path.join(root, 'data.pt') if root is not None else 'data.pt'
+        self.save_file = save_file if save_file is not None and len(save_file) > 0 else os.path.join(root, 'data.pt') if root is not None else 'data.pt'
         super().__init__(root, transform, pre_transform, pre_filter)
         
         
@@ -79,6 +86,10 @@ class GraphDataset(InMemoryDataset):
         if len(data_files) == 0:
             raise ValueError("No data files provided")
 
+
+        if data_files is None:
+            raise ValueError("No data files provided")
+
         # Get number of workers
         if num_workers is None:
             num_workers = cpu_count()
@@ -88,16 +99,32 @@ class GraphDataset(InMemoryDataset):
         # Parallel processing
         if num_workers > 1 and len(data_files) > 1:
             with Pool(processes=num_workers) as pool:
-                for data in tqdm(
+                for result_dict in tqdm(
                     pool.imap(_load_single_graph, data_files),
                     total=len(data_files),
                     desc="Loading graphs"
                 ):
+                    # Convert numpy arrays to HeteroData in main process
+                    data = HeteroData()
+                    data['node'].x = torch.tensor(result_dict['node_features'], dtype=torch.float)
+                    data['node','to','node'].edge_index = torch.tensor(result_dict['node_to_node_edges'], dtype=torch.long)
+                    data['node','to','node'].x = torch.tensor(result_dict['node_to_node_edata'], dtype=torch.float)
+                    data['node','approx','node'].edge_index = torch.tensor(result_dict['node_approx_node_edges'], dtype=torch.long)
+                    data['node','approx','node'].x = torch.tensor(result_dict['node_approx_node_edata'], dtype=torch.float)
+                    data['node'].y = torch.tensor(result_dict['y'], dtype=torch.float)
                     data_list.append(data)
         else:
             # Sequential fallback (original behavior)
             for files in tqdm(data_files, desc="Loading graphs"):
-                data = _load_single_graph(files)
+                result_dict = _load_single_graph(files)
+                # Convert numpy arrays to HeteroData
+                data = HeteroData()
+                data['node'].x = torch.tensor(result_dict['node_features'], dtype=torch.float)
+                data['node','to','node'].edge_index = torch.tensor(result_dict['node_to_node_edges'], dtype=torch.long)
+                data['node','to','node'].x = torch.tensor(result_dict['node_to_node_edata'], dtype=torch.float)
+                data['node','approx','node'].edge_index = torch.tensor(result_dict['node_approx_node_edges'], dtype=torch.long)
+                data['node','approx','node'].x = torch.tensor(result_dict['node_approx_node_edata'], dtype=torch.float)
+                data['node'].y = torch.tensor(result_dict['y'], dtype=torch.float)
                 data_list.append(data)
         
         self.data, self.slices = self.collate(data_list)
@@ -111,7 +138,7 @@ class GraphDataset(InMemoryDataset):
         return [self.save_paths]
 
     def save(self):
-        torch.save((self.data, self.slices), self.save_file)
+        torch.save((self._data, self.slices), self.save_file)
 
 def create_graph_dataset_loader(paths:List[Path],config:dict):
     data_files = []
