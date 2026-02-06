@@ -188,55 +188,115 @@ def process_single_case(args: Tuple) -> Tuple[float, float, int]:
     if inpt is None:
         return 0.0, 1.0, case_id
     
-    with open(path / f"case_{case_id}" / "input.yaml", "w") as f:
-        yaml.safe_dump(inpt, f)
-    
-    case_path = path / f"case_{case_id}" / "ground_truth"
+    input_path = path / f"case_{case_id}" 
+    input_path.mkdir(parents=True, exist_ok=True)
+    if not (input_path / "input.yaml").exists():
+        with open(input_path / "input.yaml", "w") as f:
+            yaml.safe_dump(inpt, f)
+    else:
+        with open(input_path / "input.yaml", "r") as f:
+            inpt = yaml.load(f, Loader=yaml.FullLoader)
+
+    case_path = input_path / "ground_truth"
     case_path.mkdir(parents=True, exist_ok=True)
 
-    # Prepare permutation tasks
-    permutation_tasks = []
-    permutations = set()
-    agent_goal_index = np.arange(0, config["nb_agents"]*2, 1)
-    
-    # Check max permutations
-    max_permutations = math.factorial(2*config["nb_agents"])
+    # Prepare permutation generation
+    start_goal_index = np.arange(0, config["nb_agents"]*2, 1)
+    agent_start_goals = [tuple(agent["start"]) for agent in inpt["agents"]] + [tuple(agent["goal"]) for agent in inpt["agents"]]
+    agent_start_goals = dict(zip(agent_start_goals, range(len(agent_start_goals))))
     nb_permutations = config["nb_permutations"]
-    if nb_permutations <= 0:
-        assert False, "Number of permutations must be greater than 0"
+    nb_permutations_tries = config.get("nb_permutations_tries", nb_permutations * 2)
+
+    # Ensure tries >= permutations
+    if nb_permutations_tries < nb_permutations:
+        print(f"Warning: nb_permutations_tries ({nb_permutations_tries}) < nb_permutations ({nb_permutations})")
+        print(f"Setting nb_permutations_tries to {nb_permutations * 2}")
+        nb_permutations_tries = nb_permutations * 2
+
+    # Check max permutations
+    max_permutations = math.factorial(2 * config["nb_agents"])
     if nb_permutations > max_permutations:
+        print(f"Warning: Requested {nb_permutations} permutations, but only {max_permutations} possible")
         nb_permutations = max_permutations
     
-    # Generate all unique permutations
-    for perm_id in range(nb_permutations):
-        attempts = 0
-        while tuple(agent_goal_index) in permutations:
-            agent_goal_index = np.random.permutation(agent_goal_index)
-            attempts += 1
-            if attempts > 1000:
-                break
-        
-        permutations.add(tuple(agent_goal_index))
-        perm_seed = np.random.randint(0, 2**31)
-        task = (inpt.copy(), agent_goal_index.copy(), case_path, perm_id, perm_seed, timeout, max_attempts)
-        permutation_tasks.append(task)
-        agent_goal_index = np.random.permutation(agent_goal_index)
-    
-    # Process permutations sequentially
-    # Note: Permutations are always processed sequentially within each case worker
-    # to avoid nested multiprocessing complexity and daemon process errors.
+    if nb_permutations <= 0:
+        assert False, "Number of permutations must be greater than 0"
+
+    # Track unique permutations (as tuples of agent indices)
+    unique_permutations = set()
     successful_permutations = 0
     failed_permutations = 0
-    
-    for task in permutation_tasks:
+    total_attempts = 0
+    perm_id = 0
+
+    perm_ids_unfinished = []
+    for perm_id in range(nb_permutations):
+        perm_path = case_path / f"perm_{perm_id}"
+        if not (perm_path / "solution.yaml").exists():
+            perm_ids_unfinished.append(perm_id)
+        else:
+            with open(perm_path / "input.yaml", "r") as f:
+                perm_input = yaml.load(f, Loader=yaml.FullLoader)
+            starts = [tuple(agent["start"]) for agent in perm_input["agents"]]
+            goals = [tuple(agent["goal"]) for agent in perm_input["agents"]]
+            perm_start_goals = starts + goals
+            unique_permutations.add(tuple([agent_start_goals[pos] for pos in perm_start_goals]))
+    successful_permutations = len(unique_permutations)
+    print(f"Case {case_id}: Started with {nb_permutations-len(perm_ids_unfinished)}/{nb_permutations} permutations (max {nb_permutations_tries} attempts)")
+
+    # Generate permutations until we have enough successes or max attempts reached
+    while successful_permutations < nb_permutations and total_attempts < nb_permutations_tries:
+        # Generate unique permutation
+        max_unique_attempts = 1000
+        unique_attempts = 0
+        while tuple(start_goal_index) in unique_permutations:
+            start_goal_index = np.random.permutation(start_goal_index)
+            unique_attempts += 1
+            if unique_attempts >= max_unique_attempts:
+                print(f"Case {case_id}: Cannot generate more unique permutations after {unique_attempts} attempts")
+                break
+        
+        # If we couldn't find a unique permutation, stop
+        if unique_attempts >= max_unique_attempts:
+            break
+        
+        # Record this permutation
+        unique_permutations.add(tuple(start_goal_index))
+        
+        # Verify start/goal uniqueness
+        agents_shuffled = shuffle_agents_goals(inpt, start_goal_index)
+        starts = [tuple(agent["start"]) for agent in agents_shuffled]
+        goals = [tuple(agent["goal"]) for agent in agents_shuffled]
+        
+
+        # Try to generate solution for this permutation
+        inpt_copy = inpt.copy()
+        inpt_copy["agents"] = agents_shuffled
+        perm_seed = np.random.randint(0, 2**31)
+        
+        if len(perm_ids_unfinished) > 0:
+            perm_id = perm_ids_unfinished[0]
+        task = (inpt_copy, start_goal_index.copy(), case_path, perm_id, perm_seed, timeout, max_attempts)
         success, _ = process_single_permutation(task)
+        
+        total_attempts += 1
+        
         if success:
             successful_permutations += 1
+            if len(perm_ids_unfinished) > 0:
+                perm_ids_unfinished.pop(0)
         else:
             failed_permutations += 1
-    
-    successful_ratio = successful_permutations / nb_permutations
-    failed_ratio = failed_permutations / nb_permutations
+        
+        # Shuffle for next iteration
+        start_goal_index = np.random.permutation(start_goal_index)
+
+    # Summary
+    print(f"Case {case_id}: Completed with {successful_permutations}/{nb_permutations} successful permutations")
+    print(f"Case {case_id}: Total attempts: {total_attempts}, Failed: {failed_permutations}")
+
+    successful_ratio = successful_permutations / nb_permutations if nb_permutations > 0 else 0.0
+    failed_ratio = 1.0 - successful_ratio
     
     return successful_ratio, failed_ratio, case_id
 
@@ -263,7 +323,7 @@ def data_gen(input_dict: Dict, output_path: Path, timeout: int = 60, max_attempt
     map_.set_obstacle_map(obstacles)
 
     map_.inflate_obstacles(radius=0)
-    map_.set_parameters(sample_num=0, num_neighbors=4.0, min_edge_len=0.0, max_edge_len=1.1)
+    map_.set_parameters(sample_num=0, num_neighbors=4.0, min_edge_len=1e-10, max_edge_len=1.1)
 
     start = [agent['start'] for agent in agents]
     goal = [agent['goal'] for agent in agents]
@@ -282,7 +342,7 @@ def data_gen(input_dict: Dict, output_path: Path, timeout: int = 60, max_attempt
         }
         for i, agent in enumerate(agents)
     ]
-    env = Environment(map_, agents)
+    env = Environment(map_, agents,radius=0,velocity=0)
 
     # Search for solution and measure runtime
     cbs = CBS(env, time_limit=timeout, max_iterations=max_attempts)
@@ -325,18 +385,14 @@ def create_solutions(path: Path, num_cases: int, config: Dict):
     path = Path(path)
     path.mkdir(parents=True, exist_ok=True)
     
-    # Count existing cases
-    existing_cases = [d for d in path.iterdir() if d.is_dir() and d.name.startswith("case_")]
-    cases_ready = len(existing_cases) if existing_cases else 0
-    
-    print(f"Generating solutions (starting from case {cases_ready})")
+    print(f"Generating solutions for {num_cases} cases")
     
     # Get number of workers for cases
     num_workers = config.get("num_workers", cpu_count())
     
     # Prepare case tasks
     case_tasks = []
-    for i in range(cases_ready, num_cases):
+    for i in range(0, num_cases):
         seed = np.random.randint(0, 2**31)
         task = (i, path, config, seed)
         case_tasks.append(task)
@@ -367,8 +423,7 @@ def create_solutions(path: Path, num_cases: int, config: Dict):
             failed += failed_ratio
     
     # Print summary
-    cases_processed = num_cases - cases_ready
-    total_permutations = cases_processed * config["nb_permutations"]
+    total_permutations = num_cases * config["nb_permutations"]
     print(f"Generation complete: {successful:.2f} successful cases, {failed:.2f} failed cases")
     print(f"Total Successful permutations: {int(successful * total_permutations)}")
     print(f"Total Failed permutations: {int(failed * total_permutations)}")

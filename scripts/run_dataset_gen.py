@@ -18,6 +18,7 @@ if __name__ == "__main__":
     parser.add_argument("-n","--nb_agents",type=int, default=8, help="number of agents")
     parser.add_argument("-o","--nb_obstacles",type=float, default=0.1, help="number of obstacles or obstacle density")
     parser.add_argument("-p","--nb_permutations",type=int, default=64, help="number of permutations")
+    parser.add_argument("-pt","--nb_permutations_tries",type=int, default=64, help="number of permutations tries")
     parser.add_argument("-r","--resolution",type=float, default=1.0, help="resolution of the map")
     parser.add_argument("-c","--num_cases",type=int, default=1, help="number of cases to generate")
     parser.add_argument("-y","--config",type=str, default='', help="config file to use")
