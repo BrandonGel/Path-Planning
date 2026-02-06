@@ -188,7 +188,7 @@ def process_single_case_graphs(args: Tuple[Path, dict]) -> Tuple[bool, Path]:
     for ii in range(num_graph_samples):
         # Check if graph file exists
         road_map_type_name = generate_roadmap(road_map_type, None, [], True)
-        graph_sample_path = case_dir / "samples" / f"{road_map_type_name}" / f"graph_{ii}"
+        graph_sample_path = case_dir / "samples" / f"{road_map_type_name}" / f"graph_{ii}_0"
         graph_sample_path.mkdir(parents=True, exist_ok=True)
         # Check if npz graph already exists
         graph_file = graph_sample_path / f"graph.npz"
@@ -256,6 +256,30 @@ def process_single_case_graphs(args: Tuple[Path, dict]) -> Tuple[bool, Path]:
         # Generate Target Space ('y')
         y, y_type_name = generate_target_space(target_space, map_, density_map,config=config)
         np.save(graph_sample_path / f"target_{y_type_name}.npy", y)
+
+        num_augmentations = 2**map_.dim
+        for augmentation_id in range(1,num_augmentations):
+            ndata_augmented = ndata.copy()
+            graph_sample_path = case_dir / "samples" / f"{road_map_type_name}" / f"graph_{ii}_{augmentation_id}"
+            graph_sample_path.mkdir(parents=True, exist_ok=True)
+            # Generate Target Space ('y')
+            binary_id = np.binary_repr(augmentation_id, width=map_.dim)
+            for i in range(map_.dim):
+                if binary_id[i] == '1':
+                    bounds_offset = map_.bounds[i][1]-map_.bounds[i][0]
+                    ndata_augmented[:,i] = -ndata_augmented[:,i]
+                    ndata_augmented[:,i] += bounds_offset
+            np.savez_compressed(
+                graph_sample_path / f"graph.npz",
+                node_features=ndata_augmented.astype(np.float32),
+                edge_index=node_to_node_edges_arr,
+                edge_attr=node_to_node_weights_arr,
+                approx_edge_index=start_goal_edges_arr,
+                approx_edge_attr=start_goal_weights_arr
+            )
+            y, y_type_name = generate_target_space(target_space, map_, density_map,config=config)
+            np.save(graph_sample_path / f"target_{y_type_name}.npy", y)
+
 
         map_.clear_data()
 
