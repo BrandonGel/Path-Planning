@@ -140,39 +140,6 @@ class GraphDataset(InMemoryDataset):
     def save(self):
         torch.save((self._data, self.slices), self.save_file)
 
-def create_graph_dataset_loader(paths:List[Path],config:dict):
-    data_files = []
-
-    #Iterate over all paths
-    for path in paths:
-        path = Path(path)
-        cases = sorted([d for d in path.iterdir() if d.is_dir() and d.name.startswith("case_")])
-        if not cases:
-            print("No cases found to process")
-            return
-
-        #Iterate over all cases
-        for case_dir in cases:
-            road_map_type = config["road_map_type"] if "road_map_type" in config else "planar"
-            target_space = config["target_space"] if "target_space" in config else "binary"
-            road_map_type_name = generate_roadmap(road_map_type, None, [], True)
-            roadmap_dir = case_dir / "samples"  / f"{road_map_type_name}" 
-            _,y_type_name = generate_target_space(target_space,None,None,True)
-            if not roadmap_dir.exists():
-                continue
-            graphs_dirs = sorted([d for d in roadmap_dir.iterdir()], key = lambda x: int(x.name.split('_')[-1]))
-
-            #Iterate over all graphs
-            for ii in range(len(graphs_dirs)):
-                # Check if graph file exists
-                graph_dir = graphs_dirs[ii]
-                graph_file = graph_dir / f'graph.npz'
-                target_file = graph_dir / f'target_{y_type_name}.npy'
-                assert graph_file.exists(), f"{graph_file} does not exist"
-                assert target_file.exists(), f"{target_file} does not exist"
-                data_files.append((graph_file,target_file))
-    return data_files
-
 
 
 def get_graph_dataset_file_paths(paths:List[Path],config:dict):
@@ -181,7 +148,7 @@ def get_graph_dataset_file_paths(paths:List[Path],config:dict):
     #Iterate over all paths
     for path in paths:
         path = Path(path)
-        cases = sorted([d for d in path.iterdir() if d.is_dir() and d.name.startswith("case_")])
+        cases = sorted([d for d in path.iterdir() if d.is_dir() and d.name.startswith("case_")],key=lambda x: int(x.name.split('_')[-1]))
         if not cases:
             print("No cases found to process")
             return

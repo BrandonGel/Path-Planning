@@ -112,7 +112,7 @@ def parse_dataset_trajectories(path, visualize_density_map: bool = False, num_wo
         num_workers: Number of parallel workers (default: auto-detect CPU cores)
     """
     path = Path(path)
-    cases = sorted([d for d in path.iterdir() if d.is_dir() and d.name.startswith("case_")])
+    cases = sorted([d for d in path.iterdir() if d.is_dir() and d.name.startswith("case_")],key=lambda x: int(x.name.split('_')[-1]))
     
     if not cases:
         print("No cases found to process")
