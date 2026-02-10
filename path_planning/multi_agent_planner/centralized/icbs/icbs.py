@@ -296,6 +296,17 @@ class Environment(object):
             solution.update({agent: local_solution})
         return solution
 
+    def compute_agent_solution(self, target_agent):
+        solution = {}
+        for agent in self.agent_dict.keys():
+            if agent == target_agent:
+                self.constraints = self.constraint_dict.setdefault(agent, Constraints())
+                local_solution = self.a_star.search(agent)
+                if not local_solution:
+                    return False
+                solution.update({agent: local_solution})
+        return solution
+
     def compute_solution_cost(self, solution):
         return sum([len(path) for path in solution.values()])
 
@@ -421,14 +432,13 @@ class ICBS(object):
                 c_vals = list(costs.values())
 
                 if all(c > 0 for c in c_vals):
-                    score = 0  # cardinal (highest priority)
+                    score = 0  # cardinal, highest priority, no matter what solution is used the cost will increase
                 elif any(c > 0 for c in c_vals):
-                    score = 1  # semi-cardinal
+                    score = 1  # semi-cardinal, some solutions will cause cost increase but not all
                 else:
-                    score = 2  # non-cardinal (least important)
+                    score = 2  # non-cardinal, there is no cost to fix this solution
 
-                # Tie-break: smaller min cost increase is better
-                score += min(c_vals)
+                score += min(c_vals)  # smaller min cost increase is better
 
                 if score < best_conflict_score:
                     best_conflict_score = score
@@ -462,7 +472,7 @@ class ICBS(object):
                 self.env.constraint_dict = new_node.constraint_dict
 
                 # TODO: this replans the entire solution, we need to cut down on these redundant calls by only replanning the affected agent
-                new_node.solution = self.env.compute_solution()
+                new_node.solution = self.env.compute_agent_solution(agent=agent)
                 if not new_node.solution:
                     continue
                 new_node.cost = self.env.compute_solution_cost(new_node.solution)
