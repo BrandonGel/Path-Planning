@@ -460,7 +460,7 @@ class GraphSampler(Grid):
         self.sample_kd_tree = sample_kd_tree
         for i, node_s in zip(range(len(samples)), samples):
             s_pos = node_s.current
-            indexes = sample_kd_tree.query_ball_point(s_pos, self.max_edge_length,return_sorted=True)
+            _, indexes = sample_kd_tree.query(s_pos,k=len(samples))
             edge_id = []
 
             for ii in range(len(indexes)):

@@ -115,7 +115,6 @@ class CGAL_Sweep:
             for edge_idx in candidate_edge_indices:
                 if squared_distance(u_pt, self.edges[edge_idx])**0.5 < r:
                     overlapping_edges.add(self.edge_indices[edge_idx])
-                    overlapping_edges.add(self.edge_indices[edge_idx][::-1])
             
             if self.record_sweep:
                 self.overlapping_sweep[u,v,velocity,r] = overlapping_edges
@@ -151,11 +150,10 @@ class CGAL_Sweep:
         
         # Only run expensive CGAL check on candidates
         for edge_idx in candidate_edge_indices:
-            if edge_idx in self.edge_indices and edge_idx[::-1] in overlapping_edges:
+            if edge_idx in self.edge_indices:
                 continue
             if squared_distance(traversal_seg, self.edges[edge_idx])**0.5 < r:
                 overlapping_edges.add(self.edge_indices[edge_idx])
-                overlapping_edges.add(self.edge_indices[edge_idx][::-1])
 
         if self.use_exact_collision_check:
             crossing_edges = set()
