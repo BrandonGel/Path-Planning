@@ -6,7 +6,7 @@ authors = [
     {name = "Brandon Ho",email = "bho36@gatech.edu"}
 ]
 readme = "README.md"
-requires-python = ">=3.12,<3.14.1"
+requires-python = ">=3.12,<3.14"
 dependencies = [
     "ipykernel (>=7.1.0,<8.0.0)",
     "python-motion-planning (==2.0.dev2)",
@@ -16,11 +16,17 @@ dependencies = [
     "tqdm (>=4.67.1,<5.0.0)",
     "cgal (>=6.0.1.post202410241521,<7.0.0)",
     "rtree (>=1.4.1,<2.0.0)",
-    "torch (>=2.10.0,<3.0.0)",
-    "torchvision (>=0.25.0,<0.26.0)",
     "networkx (>=3.6.1,<4.0.0)",
     "torch-geometric (>=2.7.0,<3.0.0)",
     "scikit-learn (>=1.8.0,<2.0.0)",
+    "torch (==2.8.0+cu128)",
+    "torchvision (==0.23.0)",
+    "torchaudio (==2.8.0)",
+    "pyg-lib (>=0.5.0,<0.6.0)",
+    "torch-sparse (>=0.6.18,<0.7.0)",
+    "torch-cluster (>=1.6.3,<2.0.0)",
+    "torch-spline-conv (>=1.2.2,<2.0.0)",
+    "torch-scatter (>=2.1.2,<3.0.0)",
 ]
 
 
@@ -30,3 +36,23 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["path_planning"]
+
+[[tool.poetry.source]]
+name = "torch"
+url = "https://download.pytorch.org/whl/cu128"
+priority = "supplemental"
+
+[[tool.poetry.source]]
+name = "torch_graph"
+url = "https://data.pyg.org/whl/torch-2.8.0+cu128.html"
+priority = "supplemental"
+
+[tool.poetry.dependencies]
+torch = {source = "torch"}
+torchvision = {source = "torch"}
+torchaudio = {source = "torch"}
+pyg-lib = {source = "torch_graph"}
+torch-sparse = {source = "torch_graph"}
+torch-cluster = {source = "torch_graph"}
+torch-spline-conv = {source = "torch_graph"}
+torch-scatter = {source = "torch_graph"}
