@@ -8,9 +8,43 @@ from scipy.interpolate import RegularGridInterpolator
 from multiprocessing import Pool, cpu_count
 from scipy.ndimage import generic_filter,generate_binary_structure
 
-def weighted_max_op(window, weights):
+def weighted_max_op(window, weights,ignore_value = -1):
     # 'window' is passed as a 1D array by scipy
-    return np.max(window * weights)
+    return np.max(window * weights) if window[len(window)//2] != ignore_value else ignore_value
+
+def get_prob_map(target_space_type:str, map:GraphSampler,density_map:np.ndarray,config:dict = None):
+    if target_space_type == 'binary':
+        prob_map = np.clip(density_map,0,1)/np.clip(density_map,0,1).sum()
+    elif target_space_type == 'bilinear':
+        prob_map = density_map/np.sum(density_map)
+    elif target_space_type == 'distribution':
+        prob_map = density_map/np.sum(density_map)
+    elif 'fuzzy' in target_space_type:
+        if target_space_type == 'fuzzy_binary':
+            prob_map = np.clip(density_map,0,1)/np.clip(density_map,0,1).sum()
+        elif target_space_type == 'fuzzy_distribution':
+            prob_map = density_map/np.sum(density_map)
+    elif 'convolution' in  target_space_type:
+        num_hops = int(config["num_hops"]) if config is not None and "num_hops" in config else 1
+        if num_hops < 1:
+            num_hops = 1
+        resolution = map.resolution
+        kernel = generate_binary_structure(map.dim,1).astype(int)/(1+resolution)
+        center_pt = (1,)*map.dim
+        kernel[tuple(center_pt)] = 1
+        if target_space_type == 'convolution_binary':
+            new_density_map = np.clip(density_map,0,1)
+        elif target_space_type == 'convolution_distribution':
+            new_density_map = density_map / density_map.sum()
+        new_density_map[map.get_obstacle_map()] = -1
+        for _ in range(num_hops):     
+            new_density_map = generic_filter(new_density_map, weighted_max_op, size=kernel.shape, 
+                    extra_keywords={'weights': kernel.flatten()})    
+        new_density_map[map.get_obstacle_map()] = 0
+        prob_map = new_density_map/new_density_map.sum()
+    else:
+        prob_map = np.clip(density_map,0,1)/np.clip(density_map,0,1).sum()
+    return prob_map
 
 def generate_target_space(target_space_type:str, map:GraphSampler,density_map:np.ndarray,ignore_generate: bool = False,config:dict = None):
     y = []
@@ -95,6 +129,7 @@ def generate_target_space(target_space_type:str, map:GraphSampler,density_map:np
                 new_density_map = np.clip(density_map,0,1)
             elif target_space_type == 'convolution_distribution':
                 new_density_map = density_map / density_map.sum()
+            new_density_map[map.get_obstacle_map()] = -1
 
             resolution = map.resolution
             kernel = generate_binary_structure(map.dim,1).astype(int)/(1+resolution)
@@ -102,7 +137,7 @@ def generate_target_space(target_space_type:str, map:GraphSampler,density_map:np
             kernel[tuple(center_pt)] = 1
             for _ in range(num_hops):     
                 new_density_map = generic_filter(new_density_map, weighted_max_op, size=kernel.shape, 
-                        extra_keywords={'weights': kernel.flatten()})
+                        extra_keywords={'weights': kernel.flatten(),'ignore_value':-1})
             discrete_pos = [map.world_to_map(node.current, discrete=True) for node in map.nodes]            
             y = np.array([new_density_map[s] for s in discrete_pos]) 
         if target_space_type == 'convolution_binary':
@@ -205,8 +240,15 @@ def process_single_case_graphs(args: Tuple[Path, dict]) -> Tuple[bool, Path]:
             map_.read_from_numpy(position, edge_index, edge_attr, use_roadmap)
         else:
             # Generates Nodes & Edges
-            nodes = map_.generateRandomNodes(generate_grid_nodes=use_discrete_space)
+            weighted_sampling = config["weighted_sampling"] if "weighted_sampling" in config else False
+            if weighted_sampling:
+                prob_map = get_prob_map(target_space, map_, density_map,config=config)
+            else:
+                prob_map = None
+            samp_from_prob_map_ratio = config["samp_from_prob_map_ratio"] if "samp_from_prob_map_ratio" in config else 0.5
+            nodes = map_.generateRandomNodes(generate_grid_nodes=use_discrete_space,prob_map=prob_map,samp_from_prob_map_ratio=samp_from_prob_map_ratio)
             generate_roadmap(road_map_type, map_, nodes)
+            dims = map_.dim
 
             # Get Edges & Edge Weights
             edge_weights = map_.edge_weights
@@ -216,10 +258,13 @@ def process_single_case_graphs(args: Tuple[Path, dict]) -> Tuple[bool, Path]:
             # Generate Node Data ('node')
             pos = np.array([node.current for node in nodes])
             # Concatenate Position & zero class vector
-            ndata = np.concatenate((pos, np.zeros((pos.shape[0], 1))), axis=1)
+            ndata = np.concatenate((pos, np.zeros((pos.shape[0], 2))), axis=1)
+            start_goal_mask = np.full(len(ndata),fill_value=0).astype(bool)
             start_goal_idx = [map_.get_node_index(node) for node in start_goal_nodes]
+            start_goal_mask[start_goal_idx] = True
             # Specify Start & Goal Nodes to have the one class value
-            ndata[start_goal_idx, -1] = 1
+            ndata[start_goal_mask, dims] = 1
+            ndata[~start_goal_mask, dims+1] = 1
 
             # Generate Edges ('node', 'to', 'node')
             edges = np.array(map_.edges)
@@ -250,7 +295,8 @@ def process_single_case_graphs(args: Tuple[Path, dict]) -> Tuple[bool, Path]:
                 edge_index=node_to_node_edges_arr,
                 edge_attr=node_to_node_weights_arr,
                 approx_edge_index=start_goal_edges_arr,
-                approx_edge_attr=start_goal_weights_arr
+                approx_edge_attr=start_goal_weights_arr,
+                binary_id=np.binary_repr(0, width=map_.dim)
             )
 
         # Generate Target Space ('y')
@@ -275,7 +321,8 @@ def process_single_case_graphs(args: Tuple[Path, dict]) -> Tuple[bool, Path]:
                 edge_index=node_to_node_edges_arr,
                 edge_attr=node_to_node_weights_arr,
                 approx_edge_index=start_goal_edges_arr,
-                approx_edge_attr=start_goal_weights_arr
+                approx_edge_attr=start_goal_weights_arr,
+                binary_id=binary_id
             )
             y, y_type_name = generate_target_space(target_space, map_, density_map,config=config)
             np.save(graph_sample_path / f"target_{y_type_name}.npy", y)
@@ -284,8 +331,6 @@ def process_single_case_graphs(args: Tuple[Path, dict]) -> Tuple[bool, Path]:
         map_.clear_data()
 
     return True, case_dir
-
-
 
 def generate_graph_samples(path: Path, config: dict, num_workers: int | None = None) -> None:
     """
