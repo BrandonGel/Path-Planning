@@ -1,14 +1,13 @@
 import torch
 import torch.nn.functional as F
 from torchvision.ops import sigmoid_focal_loss
-from typing import List, Union, Callable, Dict, Any
+from typing import List, Union, Callable, Dict, Any, Tuple
 
 
 class LossFunction:
     def __init__(self, loss_type:List[str], loss_fcn_weights:List[float],loss_args:Dict[str,Any]={}):
         if len(loss_type) < len(loss_fcn_weights) :
             raise ValueError("loss_type, loss_fcn_weights, and loss_args must have the same length")
-        loss_args = {k: v if v is not None else None for k,v in loss_args.items()}
         self.loss_fcn_weights = {lt.lower(): weight for lt,weight in zip(loss_type,loss_fcn_weights)}
         self.loss_args = {lt.lower(): args for lt,args in zip(loss_type,loss_args)}
         self.loss_fcns = get_lost_fcn(loss_type=loss_type)
@@ -56,9 +55,11 @@ def dice_loss(y_logits, y_true,smooth=1):
     dice = (2 * intersection + smooth) / (union + smooth)  
     return 1 - dice
 
-def laplacian_loss(y_logits, edge_index,edge_types=[('node','to','node')],p = 2):
+def laplacian_loss(y_logits, edge_index,edge_types:List[Tuple[str,str,str]]=[('node','to','node')],p = 2):
     y_pred = torch.sigmoid(y_logits)
     loss =0
+    if isinstance(edge_types, tuple):
+        edge_types = [edge_types]
     for edge_type in edge_types:
         edge_index = edge_index[edge_type]
         y_pred_diff = y_pred[edge_index[0]]-y_pred[edge_index[1]]
@@ -66,13 +67,17 @@ def laplacian_loss(y_logits, edge_index,edge_types=[('node','to','node')],p = 2)
     loss /= len(y_pred)
     return loss
 
-def graphsage_unsupervised_loss(y_logits,y_true, edge_index,edge_types=[('node','to','node')],p = 2):
+def graphsage_unsupervised_loss(y_logits,y_true, edge_index,edge_types:List[Tuple[str,str,str]]=[('node','to','node')],p = 2):
     loss = 0
+    if isinstance(edge_types, tuple):
+        edge_types = [edge_types]
     for edge_type in edge_types:
         edge_index = edge_index[edge_type]
-        link_logits = (y_logits[edge_index[0]]*y_logits[edge_index[1]]).sum(dim=-1)
-        loss += bce_loss(link_logits, y_true)
-    return loss/len(edge_types)
+        link_logits = (y_logits[edge_index[0]]*y_logits[edge_index[1]]).sum(dim=-1,keepdim=True)
+        link_true = (y_true[edge_index[0]]*y_true[edge_index[1]]).sum(dim=-1,keepdim=True)
+        link_true[link_true>0] = 1
+        loss += bce_loss(link_logits, link_true)
+    return loss
 
 loss_fcn_types={
     'bce': bce_loss,
