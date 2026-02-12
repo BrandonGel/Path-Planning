@@ -1,9 +1,11 @@
 
 import numpy as np
-from torch_geometric.data import HeteroData
-from typing import Optional, Callable
+from torch_geometric.data import HeteroData as HeteroDataBase
+from typing import Any, Optional, Callable
 from torch_geometric.data import InMemoryDataset,Data
-from torch_geometric.transforms import NormalizeFeatures
+from torch_geometric.transforms import NormalizeFeatures, AddSelfLoops, RemoveDuplicatedEdges
+from torch_geometric.utils import subgraph, coalesce, add_self_loops
+from torch_geometric.utils import k_hop_subgraph
 from pathlib import Path
 from tqdm import tqdm
 from typing import List,Tuple
@@ -12,11 +14,72 @@ from path_planning.data_generation.target_gen import generate_roadmap,generate_t
 import os
 import torch
 import torch_geometric
+from torch_geometric.typing import EdgeType
+from typing import Dict, Any
 
 # Allowlist PyG's base storage to bypass the security check
 torch.serialization.add_safe_globals([torch_geometric.data.storage.BaseStorage])
 torch.serialization.add_safe_globals([torch_geometric.data.storage.NodeStorage])
 torch.serialization.add_safe_globals([torch_geometric.data.storage.EdgeStorage])
+
+class HeteroData(HeteroDataBase):
+    def __init__(self,):
+        super().__init__()
+    
+    @property
+    def edge_attr_dict(self) -> Dict[EdgeType, Any]:
+        r"""Returns a dictionary of all edge attributes of the graph."""
+        return {edge_type: getattr(self[edge_type], 'edge_attr', None) 
+                for edge_type in self.edge_index_dict.keys()}
+
+def add_self_loops_to_edge_type(data, edge_type, fill_value=0.0):
+    """
+    Adds self-loops to a specific edge type in a HeteroData object.
+
+    Args:
+        data (HeteroData): The input heterogeneous graph data.
+        edge_type (tuple): The edge type (src_node_type, edge_type, dst_node_type).
+        fill_value (float): The value to use for the self-loop edge attributes.
+    """
+    src_type, rel_type, dst_type = edge_type
+    
+    # 1. Isolate the specific edge type data
+    edge_index = data[edge_type].edge_index
+    
+    # Handle existing edge attributes if they exist
+    edge_attr_name = 'edge_attr' if 'edge_attr' in data[edge_type] else 'edge_weight'
+    edge_attr = data[edge_type][edge_attr_name] if edge_attr_name in data[edge_type] else None
+    
+    # Determine the number of nodes for source and destination types
+    num_src_nodes = data[src_type].num_nodes
+    num_dst_nodes = data[dst_type].num_nodes
+    
+    # Ensure source and destination nodes are the same for self-loops
+    if num_src_nodes != num_dst_nodes:
+        print(f"Cannot add self-loops to asymmetric edge type {edge_type}")
+        return data
+        
+    num_nodes = num_src_nodes
+
+    # 2. Add self-loops
+    # add_self_loops can return edge_attr, so we capture both
+    new_edge_index, new_edge_attr = add_self_loops(
+        edge_index,
+        edge_attr,
+        num_nodes=num_nodes,
+        fill_value=fill_value
+    )
+    
+    # Optionally, coalesce edges to remove duplicates if necessary
+    # (add_self_loops might add duplicate (i, i) if they already exist)
+    new_edge_index, new_edge_attr = coalesce(new_edge_index, new_edge_attr, num_nodes=num_nodes)
+
+    # 3. Update the HeteroData object
+    data[edge_type].edge_index = new_edge_index
+    if new_edge_attr is not None:
+        data[edge_type][edge_attr_name] = new_edge_attr
+
+    return data
 
 def _load_single_graph(files: Tuple[Path, Path]) -> HeteroData:
     """
@@ -35,17 +98,18 @@ def _load_single_graph(files: Tuple[Path, Path]) -> HeteroData:
     ind = [ii for ii in range(len(graph_file_split)) if 'map' in graph_file_split[ii] and 'resolution' in graph_file_split[ii]][0]
     resolution = float(graph_file_split[ind].split('_')[1][len('resolution'):])
     bounds = graph_file_split[ind].split('_')[0][len('map'):].split('x')
-    bounds = np.array([float(b) for b in bounds])
+    dims = len(bounds)
+    bounds = np.array([float(b) for b in bounds]).max()
     
     # Load optimized npz format
     data_dict = np.load(graph_file)
     node_ndata = data_dict['node_features']
-    node_ndata[:,:-1] = node_ndata[:,:-1] / bounds
+    node_ndata[:,:dims] = node_ndata[:,:dims] / bounds
     node_to_node_edges = data_dict['edge_index'].T
-    node_to_node_edata = data_dict['edge_attr']
+    node_to_node_edata = data_dict['edge_attr']/ bounds
     node_approx_node_edges = data_dict['approx_edge_index'].T
-    node_aprox_node_edata = data_dict['approx_edge_attr']
-    
+    node_aprox_node_edata = data_dict['approx_edge_attr']/ bounds
+    binary_id = str(data_dict['binary_id'])
     # Load target
     y: np.ndarray = np.load(target_file)
     
@@ -57,7 +121,8 @@ def _load_single_graph(files: Tuple[Path, Path]) -> HeteroData:
         'node_to_node_edata': node_to_node_edata,
         'node_approx_node_edges': node_approx_node_edges,
         'node_approx_node_edata': node_aprox_node_edata,
-        'y': y
+        'y': y,
+        'binary_id': binary_id
     }   
 
 class GraphDataset(InMemoryDataset):  
@@ -66,6 +131,7 @@ class GraphDataset(InMemoryDataset):
                 load_file:Path = None,
                 save_file:Path = None,
                 root:Optional[str] = None,
+                num_hops: int = 2,
                 transform: Optional[Callable] = None,
                 pre_transform: Optional[Callable] = None,
                 pre_filter: Optional[Callable] = None,
@@ -73,6 +139,7 @@ class GraphDataset(InMemoryDataset):
         self.data_files = data_files
         self.load_file = load_file
         self.save_file = save_file if save_file is not None and len(save_file) > 0 else os.path.join(root, 'data.pt') if root is not None else 'data.pt'
+        self.data_binary_id = []
         super().__init__(root, transform, pre_transform, pre_filter)
         
         
@@ -108,10 +175,47 @@ class GraphDataset(InMemoryDataset):
                     data = HeteroData()
                     data['node'].x = torch.tensor(result_dict['node_features'], dtype=torch.float)
                     data['node','to','node'].edge_index = torch.tensor(result_dict['node_to_node_edges'], dtype=torch.long)
-                    data['node','to','node'].x = torch.tensor(result_dict['node_to_node_edata'], dtype=torch.float)
+                    data['node','to','node'].edge_attr = torch.tensor(result_dict['node_to_node_edata'], dtype=torch.float)
                     data['node','approx','node'].edge_index = torch.tensor(result_dict['node_approx_node_edges'], dtype=torch.long)
-                    data['node','approx','node'].x = torch.tensor(result_dict['node_approx_node_edata'], dtype=torch.float)
+                    data['node','approx','node'].edge_attr = torch.tensor(result_dict['node_approx_node_edata'], dtype=torch.float)
                     data['node'].y = torch.tensor(result_dict['y'], dtype=torch.float)
+                    self.data_binary_id.append(result_dict['binary_id'])
+                    # data = add_self_loops_to_edge_type(data, ('node', 'to', 'node'))                    transform = torch_geometric.transforms.Compose([AddSelfLoops(), RemoveDuplicatedEdges()])
+                    transform = torch_geometric.transforms.Compose([AddSelfLoops()])
+                    data = transform(data)
+                    
+                    if num_hops >= 0:
+                        node_mask = data['node'].y > 0 
+                        node_idx = torch.where(node_mask)[0]
+                        if num_hops > 0:
+                            subset, _, _, _ = k_hop_subgraph(
+                                node_idx, 
+                                num_hops=num_hops, 
+                                edge_index=data['node','to','node'].edge_index, 
+                                relabel_nodes=False
+                            )
+                        else:
+                            subset = node_idx
+            
+
+                        node_mask[:] = False
+                        node_mask[subset] = True
+                        subset_dict = {
+                            'node': node_mask # Pass the boolean mask directly
+                        }
+                        for edge_type, edge_index in data.edge_index_dict.items():
+                            if edge_type[0] == 'node' and  edge_type[2] != 'node':
+                                edge_mask = node_mask[edge_index[0]]
+                            elif edge_type[0] != 'node' and  edge_type[2] == 'node':
+                                edge_mask = node_mask[edge_index[1]]
+                            elif edge_type[0] == 'node' and  edge_type[2] == 'node':
+                                edge_mask = node_mask[edge_index[0]] & node_mask[edge_index[1]]
+                            else:
+                                edge_mask = torch.ones(node_mask.shape,dtype=bool)
+                            subset_dict[edge_type] = edge_mask
+
+                        data = data.subgraph(subset_dict)
+
                     data_list.append(data)
         else:
             # Sequential fallback (original behavior)
@@ -121,10 +225,46 @@ class GraphDataset(InMemoryDataset):
                 data = HeteroData()
                 data['node'].x = torch.tensor(result_dict['node_features'], dtype=torch.float)
                 data['node','to','node'].edge_index = torch.tensor(result_dict['node_to_node_edges'], dtype=torch.long)
-                data['node','to','node'].x = torch.tensor(result_dict['node_to_node_edata'], dtype=torch.float)
+                data['node','to','node'].edge_attr = torch.tensor(result_dict['node_to_node_edata'], dtype=torch.float)
                 data['node','approx','node'].edge_index = torch.tensor(result_dict['node_approx_node_edges'], dtype=torch.long)
-                data['node','approx','node'].x = torch.tensor(result_dict['node_approx_node_edata'], dtype=torch.float)
-                data['node'].y = torch.tensor(result_dict['y'], dtype=torch.float)
+                data['node','approx','node'].edge_attr = torch.tensor(result_dict['node_approx_node_edata'], dtype=torch.float)
+                data['node'].y = torch.tensor(result_dict['y'], dtype=torch.float)  
+                self.data_binary_id.append(result_dict['binary_id'])
+                # data = add_self_loops_to_edge_type(data, ('node', 'to', 'node'))
+                transform = torch_geometric.transforms.Compose([AddSelfLoops('edge_attr',fill_value=0.0)])
+                data = transform(data)
+
+                if num_hops >= 0:
+                    node_mask = data['node'].y > 0 
+                    node_idx = torch.where(node_mask)[0]
+                    if num_hops > 0:
+                        subset, _, _, _ = k_hop_subgraph(
+                                node_idx, 
+                                num_hops=num_hops, 
+                                edge_index=data['node','to','node'].edge_index, 
+                                relabel_nodes=False
+                            )
+                    else:
+                        subset = node_idx
+
+                    node_mask[:] = False
+                    node_mask[subset] = True
+                    subset_dict = {
+                        'node': node_mask # Pass the boolean mask directly
+                    }
+                    for edge_type, edge_index in data.edge_index_dict.items():
+                        if edge_type[0] == 'node' and  edge_type[2] != 'node':
+                            edge_mask = node_mask[edge_index[0]]
+                        elif edge_type[0] != 'node' and  edge_type[2] == 'node':
+                            edge_mask = node_mask[edge_index[1]]
+                        elif edge_type[0] == 'node' and  edge_type[2] == 'node':
+                            edge_mask = node_mask[edge_index[0]] & node_mask[edge_index[1]]
+                        else:
+                            edge_mask = torch.ones(node_mask.shape,dtype=bool)
+                        edge_mask_index = torch.where(edge_mask)[0]
+                        subset_dict[edge_type] = edge_mask
+
+                    data = data.subgraph(subset_dict)
                 data_list.append(data)
         
         self.data, self.slices = self.collate(data_list)
