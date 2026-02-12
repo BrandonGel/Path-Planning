@@ -7,7 +7,6 @@ from scipy.spatial.distance import cdist
 from itertools import product
 from python_motion_planning.common import TYPES
 from path_planning.utils.cgal_sweep import CGAL_Sweep
-import networkx as nx
 
 class GraphSampler(Grid):
     def __init__(self,*args,start,goal,sample_num=0,num_neighbors = 13.0, min_edge_len = 0.0, max_edge_len = 30.0,use_discrete_space=True,use_constraint_sweep=True,record_sweep=True,use_exact_collision_check=True,**kwargs):
@@ -18,16 +17,14 @@ class GraphSampler(Grid):
         assert goal is not None, "Goal must not be None"
         assert isinstance(start, list), "Start must be a list"
         assert isinstance(goal, list), "Goal must be a list"
-        self.start = [tuple(float(pt) for pt in  s) for s in start]
-        self.goal = [tuple(float(pt) for pt in g) for g in goal]
+        self.start = start
+        self.goal = goal
         self.sample_num = sample_num
         self.num_total_nodes = sample_num + len(self.start) + len(self.goal)
         self.num_neighbors = num_neighbors
         self.min_edge_length = min_edge_len
         self.max_edge_length = max_edge_len
         self.cost_matrix = None
-        self.start_to_all_edges_dict = {}
-        self.goal_to_all_edges_dict = {}
         self.node_index_list = {}
         self.start_nodes_index = {}
         self.goal_nodes_index = {}
@@ -38,15 +35,10 @@ class GraphSampler(Grid):
         self.road_map = []
         self.use_discrete_space = use_discrete_space
         self.edges = []
-        self.edge_weights = []
         self.edge_indices = {}
         self.use_constraint_sweep = use_constraint_sweep
         self.constraint_sweep = CGAL_Sweep(record_sweep=record_sweep,use_exact_collision_check=use_exact_collision_check)
         self.sample_kd_tree = None
-    
-    @property
-    def size(self) -> int:
-        return np.prod(self.shape)
 
     def __str__(self) -> str:
         return "Graph Sampler"
@@ -62,7 +54,7 @@ class GraphSampler(Grid):
             start_pixel = start
         else:
             start_pixel = [self.world_to_map(s,discrete=True) for s in start]
-        self.start = [tuple(float(pt) for pt in  s) for s in start]
+        self.start = start
         for s in start_pixel:
             self.type_map[tuple(s)] = TYPES.START
         
@@ -72,7 +64,7 @@ class GraphSampler(Grid):
             goal_pixel = goal
         else:
             goal_pixel =  [self.world_to_map(g,discrete=True) for g in goal]
-        self.goal = [tuple(float(pt) for pt in g) for g in goal]
+        self.goal = goal
         for g in goal_pixel:
             self.type_map[tuple(g)] = TYPES.GOAL
     
@@ -102,7 +94,7 @@ class GraphSampler(Grid):
         edge_indices = {}
         for ii in range(len(roadmap)):
             for jj in roadmap[ii]:
-                if (ii,jj) not in edges:
+                if (ii,jj) not in edges and (jj,ii) not in edges:
                     edges.add((ii,jj))
                     edge_indices[len(edges)-1] = (ii,jj)
         return list(edges), edge_indices
@@ -410,9 +402,9 @@ class GraphSampler(Grid):
                 if self.is_expandable(grid_coords_tuple):
                     # Adjust the world coordinates to avoid precision and rounding issues
                     if self.use_discrete_space:
-                        current = tuple(float(i) for i in grid_coords_tuple)
+                        current = grid_coords_tuple
                     else:
-                        current =tuple(float(i) for i in self.map_to_world(grid_coords_tuple))
+                        current =tuple(i for i in self.map_to_world(grid_coords_tuple))
                     node = Node(current, None, 0, 0)
                     nodes.append(node)
                     self.node_index_list[node] = len(nodes) - 1
@@ -435,18 +427,6 @@ class GraphSampler(Grid):
             self.node_index_list[node] = len(nodes) - 1
             self.goal_nodes_index[node] = len(nodes) - 1
         
-
-        for start in self.start:
-            start_node = Node(tuple(start),None,0,0)
-            start_idx = self.node_index_list[start_node]
-            other_costs = [self.get_distance(start_node.current, nodes[i].current) for i in range(len(nodes))]
-            self.start_to_all_edges_dict[start_idx] = list(zip(range(len(nodes)), other_costs))
-        for goal in self.goal:
-            goal_node = Node(tuple(goal),None,0,0)
-            goal_idx = self.node_index_list[goal_node]
-            other_costs = [self.get_distance(goal_node.current, nodes[i].current) for i in range(len(nodes))]
-            self.goal_to_all_edges_dict[goal_idx] = list(zip(range(len(nodes)), other_costs))
-
         # Update total node count after all nodes are added
         self.num_total_nodes = len(nodes)
         self.cost_matrix = cdist(np.array([node.current for node in nodes]), np.array([node.current for node in nodes]), metric='euclidean')
@@ -463,7 +443,7 @@ class GraphSampler(Grid):
             _, indexes = sample_kd_tree.query(s_pos,k=len(samples))
             edge_id = []
 
-            for ii in range(len(indexes)):
+            for ii in range(1, len(indexes)):
                 node_n = samples[indexes[ii]]
                 n_pos = samples[indexes[ii]].current
 
@@ -482,7 +462,6 @@ class GraphSampler(Grid):
             road_map.append(edge_id)
         self.road_map = road_map
         self.edges, self.edge_indices = self.calculate_edges(road_map)
-        self.edge_weights = [self.get_cost(self.nodes[i], self.nodes[j]) for i, j in self.edges]
         return road_map
 
     def generate_planar_map(self, samples: List[Node]):
@@ -514,7 +493,6 @@ class GraphSampler(Grid):
 
         self.road_map = planar_map
         self.edges, self.edge_indices = self.calculate_edges(planar_map)
-        self.edge_weights = [self.get_cost(self.nodes[i], self.nodes[j]) for i, j in self.edges]
         return planar_map
 
     def set_constraint_sweep(self):
@@ -568,62 +546,6 @@ class GraphSampler(Grid):
             point_int.append(max(0, min(self.shape[d] - 1, int(round(point[d]+1e-10)))))
         point_int = tuple(point_int)
         return point_int
-
-    def read_from_numpy(self,position:np.ndarray,edge_index:np.ndarray,edge_attr:np.ndarray, use_roadmap:bool = True):
-        self.clear_data()
-        position = position.tolist()
-        node_start_idx = len(position) - len(self.start) - len(self.goal)
-        node_goal_idx = len(position) - len(self.goal)
-        nodes= []
-        for ii in range(len(position)):
-            nodes.append(Node(current=tuple(position[ii])))
-            self.node_index_list[nodes[ii]] = len(nodes) - 1
-
-            if ii >= node_start_idx and ii < node_goal_idx:
-                self.start_nodes_index[nodes[ii]] = len(nodes) - 1
-            elif ii >= node_goal_idx:
-                self.goal_nodes_index[nodes[ii]] = len(nodes) - 1
-        
-        if use_roadmap: 
-            edge_index = edge_index.tolist()
-            edge_attr = edge_attr.tolist()
-            self.edges = [tuple(e) for e in edge_index]
-            self.edge_indices = {i: (e[0], e[1]) for i, e in enumerate(self.edges)}
-            self.edge_weights = edge_attr
-            self.road_map= [[] for ii in range(len(position))]
-            for i, j in self.edges:
-                self.road_map[i].append(j)
-
-            for start in self.start:
-                start_node = Node(tuple(start),None,0,0)
-                start_idx = self.node_index_list[start_node]
-                other_costs = [self.get_distance(start_node.current, nodes[i].current) for i in range(len(nodes))]
-                self.start_to_all_edges_dict[start_idx] = list(zip(range(len(nodes)), other_costs))
-            for goal in self.goal:
-                goal_node = Node(tuple(goal),None,0,0)
-                goal_idx = self.node_index_list[goal_node]
-                other_costs = [self.get_distance(goal_node.current, nodes[i].current) for i in range(len(nodes))]
-                self.goal_to_all_edges_dict[goal_idx] = list(zip(range(len(nodes)), other_costs))
-
-        # Update total node count after all nodes are added
-        self.num_total_nodes = len(nodes)
-        self.cost_matrix = cdist(np.array([node.current for node in nodes]), np.array([node.current for node in nodes]), metric='euclidean')
-        self.nodes = nodes
-
-
-    def clear_data(self):
-        self.start_to_all_edges_dict = {}
-        self.goal_to_all_edges_dict = {}
-        self.node_index_list = {}
-        self.start_nodes_index = {}
-        self.goal_nodes_index = {}
-        self.grid_nodes_index = {}
-        self.nodes = []
-        self.obstacle_nodes = []
-        self.road_map = []
-        self.edges = []
-        self.edge_weights = []
-        self.edge_indices = {}
 
     def plan(self):
         pass
