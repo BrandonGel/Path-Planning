@@ -150,8 +150,6 @@ class CGAL_Sweep:
         
         # Only run expensive CGAL check on candidates
         for edge_idx in candidate_edge_indices:
-            if edge_idx in self.edge_indices:
-                continue
             if squared_distance(traversal_seg, self.edges[edge_idx])**0.5 < r:
                 overlapping_edges.add(self.edge_indices[edge_idx])
 
