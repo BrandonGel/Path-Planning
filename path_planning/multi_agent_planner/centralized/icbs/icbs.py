@@ -147,7 +147,7 @@ class Constraints(object):
         )
 
 
-class Environment(object):
+class IEnvironment(object):
     def __init__(self, graph_map, agents, astar_max_iterations=-1):
         self.graph_map = graph_map
         self.agents = agents
@@ -332,13 +332,13 @@ class HighLevelNode(object):
 class ICBS(object):
     def __init__(
         self,
-        environment: Environment,
+        environment: IEnvironment,
         time_limit: float | None = None,
         max_iterations: int | None = None,
         verbose: bool = False,
     ):
         """
-        :param environment: Environment instance
+        :param environment: IEnvironment instance
         :param time_limit: Optional wall-clock time limit (in seconds) for the
                            high-level CBS search. If None, no time limit is
                            enforced. If exceeded, the search terminates early
