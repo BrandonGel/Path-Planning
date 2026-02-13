@@ -1,3 +1,4 @@
+from platform import node
 from typing import List, Tuple
 import numpy as np
 from scipy.spatial import KDTree, Delaunay
@@ -25,17 +26,20 @@ class GraphSampler(Grid):
         self.min_edge_length = min_edge_len
         self.max_edge_length = max_edge_len
         self.cost_matrix = None
-        self.node_index_list = {}
+        self.node_index_dict = {}
         self.start_nodes_index = {}
         self.goal_nodes_index = {}
         self.grid_nodes_index = {}
+        self.start_to_all_edges_dict = {}
+        self.goal_to_all_edges_dict = {}
         self.nodes = []
         self.obstacle_nodes = []
         self.track_with_link = False
         self.road_map = []
         self.use_discrete_space = use_discrete_space
         self.edges = []
-        self.edge_indices = {}
+        self.edge_indices_dict = {}
+        self.edge_weights = []
         self.use_constraint_sweep = use_constraint_sweep
         self.constraint_sweep = CGAL_Sweep(record_sweep=record_sweep,use_exact_collision_check=use_exact_collision_check)
         self.sample_kd_tree = None
@@ -87,17 +91,38 @@ class GraphSampler(Grid):
         return self.nodes
     
     def get_node_index(self, node: Node) -> int:
-        return self.node_index_list[node]
+        return self.node_index_dict[node]
 
-    def calculate_edges(self,roadmap: List[List[int]]):
+    def get_start_nodes_with_all_edges(self):
+        if len(self.start_to_all_edges_dict) > 0:
+            return self.start_to_all_edges_dict
+        if len(self.edges) > 0:
+            u_indices = [self.start_nodes_index[node] for node in self.get_start_nodes()]
+            self.start_to_all_edges_dict = {u_index : [(v_index,self.edge_weights[self.edge_indices_dict[(u_index,v_index.item())]]) for v_index in self.road_map[u_index]] for u_index in u_indices}
+            return self.start_to_all_edges_dict
+        raise ValueError("Edges have not been generated yet. Please generate the roadmap first.")
+
+    def get_goal_nodes_with_all_edges(self):
+        if len(self.goal_to_all_edges_dict) > 0:
+            return self.goal_to_all_edges_dict
+        if len(self.edges) > 0:
+            u_indices = [self.goal_nodes_index[node] for node in self.get_goal_nodes()]
+            self.goal_to_all_edges_dict = {u_index : [(v_index,self.edge_weights[self.edge_indices_dict[(u_index,v_index.item())]]) for v_index in self.road_map[u_index]] for u_index in u_indices}
+            return self.goal_to_all_edges_dict
+        raise ValueError("Edges have not been generated yet. Please generate the roadmap first.")
+
+    def calculate_edges(self,roadmap: List[List[int]],roadmap_edge_weights: List[List[float]] = None) -> Tuple[List[Tuple[int,int]], dict, List[float]]:
         edges = set()
-        edge_indices = {}
+        edge_indices_dict = {}
+        edge_weights = []
         for ii in range(len(roadmap)):
             for jj in roadmap[ii]:
-                if (ii,jj) not in edges and (jj,ii) not in edges:
+                if (ii,jj) not in edges:
                     edges.add((ii,jj))
-                    edge_indices[len(edges)-1] = (ii,jj)
-        return list(edges), edge_indices
+                    edge_indices_dict[(ii,jj)] = len(edges)-1
+                    if roadmap_edge_weights is not None:
+                        edge_weights.append(roadmap_edge_weights[ii][roadmap[ii].index(jj)])
+        return list(edges), edge_indices_dict, edge_weights
     
     def set_obstacle_map(self, obstacles: np.ndarray):
         obstacles = np.array(obstacles)
@@ -131,17 +156,17 @@ class GraphSampler(Grid):
             
             return self.get_distance(p1_node.current, p2_node.current)
         else:
-            p1_index = self.node_index_list[p1_node]
-            p2_index = self.node_index_list[p2_node]
+            p1_index = self.node_index_dict[p1_node]
+            p2_index = self.node_index_dict[p2_node]
             return self.cost_matrix[p1_index, p2_index]
 
     def get_neighbors(self, node: Node, **kwargs) -> List[Node]:
         """
         Get the neighbors of a node.
         """
-        if self.road_map is None or node not in self.node_index_list:
+        if self.road_map is None or node not in self.node_index_dict:
             return []
-        neighbors =  [self.nodes[i] for i in self.road_map[self.node_index_list[node]]]
+        neighbors =  [self.nodes[i] for i in self.road_map[self.node_index_dict[node]]]
         if self.track_with_link:
             neighbors = [node.link(neighbor) for neighbor in neighbors]
         return neighbors
@@ -357,14 +382,41 @@ class GraphSampler(Grid):
         
         return False  # No collision found
 
-    def generateRandomNodes(self, generate_grid_nodes = False):
+    # Sample points from the probability map if provided, and the rest from uniform distribution
+    # Cumulative sum of the probability map is 1
+    def sample_from_prob_map(self,prob_map=None,samp_from_prob_map_ratio=0.5):
+        bounds = np.array(self.bounds)
+        if prob_map is None:
+            normalized_points = np.random.random((self.sample_num,self.dim))
+            points = normalized_points * (bounds[:,1] - bounds[:,0]) + bounds[:,0]
+            return points,0
+        else:
+            weighted_normalized_points = np.clip(np.random.random((self.sample_num,self.dim)),0,1) + 1e-10
+            num_prob_map_samples = int(self.sample_num * samp_from_prob_map_ratio)
+            if num_prob_map_samples > 0:
+                prob_map_flat = prob_map.flatten()
+                prob_map_flat /= np.sum(prob_map_flat)
+                prob_map_indices = np.random.choice(len(prob_map_flat), size=num_prob_map_samples, p=prob_map_flat)
+                prob_map_points = np.array([np.unravel_index(idx, prob_map.shape) for idx in prob_map_indices])
+                # Convert to world coordinates
+                prob_map_points_world = np.array([self.map_to_world(tuple(point)) for point in prob_map_points])
+                weighted_normalized_points[:num_prob_map_samples] = (prob_map_points_world - bounds[:,0]) / (bounds[:,1] - bounds[:,0])
+            weighted_points = weighted_normalized_points * (bounds[:,1] - bounds[:,0]) + bounds[:,0]
+
+            num_uniform_samples = self.sample_num - num_prob_map_samples
+            uniform_normalized_points = np.random.random((num_uniform_samples,self.dim))
+            uniform_points = uniform_normalized_points * (bounds[:,1] - bounds[:,0]) + bounds[:,0]
+            points = np.concatenate((weighted_points,uniform_points))
+
+            return points,num_prob_map_samples
+
+    def generateRandomNodes(self, generate_grid_nodes = False,prob_map = None,samp_from_prob_map_ratio = 0.5):
         num_nodes = 0
         bounds = np.array(self.bounds)
         nodes = []
-
+        rejected_weighted_samples = []
         while num_nodes < self.sample_num:
-            normalized_points = np.random.random((self.sample_num,self.dim))
-            points = normalized_points * (bounds[:,1] - bounds[:,0]) + bounds[:,0]
+            points,num_weighted_samples = self.sample_from_prob_map(prob_map,samp_from_prob_map_ratio)
             pixels = [self.world_to_map(point,discrete=True) for point in points]
             for ii in range(self.sample_num):
                 if self.use_discrete_space:
@@ -374,8 +426,14 @@ class GraphSampler(Grid):
                 node = Node(current,None,0,0)
                 if self.is_expandable(tuple(pixels[ii])):
                     nodes.append(node)
-                    self.node_index_list[node] = len(nodes) - 1
+                    self.node_index_dict[node] = len(nodes) - 1
                     num_nodes += 1
+                else:
+                    if ii > num_weighted_samples:
+                        continue
+                    if ii == num_weighted_samples:
+                        samp_from_prob_map_ratio = len(rejected_weighted_samples)/self.sample_num
+                    rejected_weighted_samples.append(points[ii])
                 if num_nodes == self.sample_num:
                     break
 
@@ -407,24 +465,24 @@ class GraphSampler(Grid):
                         current =tuple(i for i in self.map_to_world(grid_coords_tuple))
                     node = Node(current, None, 0, 0)
                     nodes.append(node)
-                    self.node_index_list[node] = len(nodes) - 1
+                    self.node_index_dict[node] = len(nodes) - 1
                     self.grid_nodes_index[node] = len(nodes)-1
         
         for start in self.start:
             node = Node(tuple(start),None,0,0)
-            if node in self.node_index_list:
-                self.start_nodes_index[node] = self.node_index_list[node]
+            if node in self.node_index_dict:
+                self.start_nodes_index[node] = self.node_index_dict[node]
                 continue
             nodes.append(node)
-            self.node_index_list[node] = len(nodes) - 1
+            self.node_index_dict[node] = len(nodes) - 1
             self.start_nodes_index[node] = len(nodes) - 1
         for goal in self.goal:
             node = Node(tuple(goal),None,0,0)
-            if node in self.node_index_list:
-                self.goal_nodes_index[node] = self.node_index_list[node]
+            if node in self.node_index_dict:
+                self.goal_nodes_index[node] = self.node_index_dict[node]
                 continue
             nodes.append(node)
-            self.node_index_list[node] = len(nodes) - 1
+            self.node_index_dict[node] = len(nodes) - 1
             self.goal_nodes_index[node] = len(nodes) - 1
         
         # Update total node count after all nodes are added
@@ -435,37 +493,44 @@ class GraphSampler(Grid):
 
     def generate_roadmap(self, samples: List[Node]):
         road_map = []
+        edge_weights = []
         points = np.array([samp.current for samp in samples])
         sample_kd_tree = KDTree(points)
         self.sample_kd_tree = sample_kd_tree
         for i, node_s in zip(range(len(samples)), samples):
             s_pos = node_s.current
             _, indexes = sample_kd_tree.query(s_pos,k=len(samples))
+            indexes = list(indexes)
             edge_id = []
+            edge_weight = []
 
             for ii in range(1, len(indexes)):
                 node_n = samples[indexes[ii]]
                 n_pos = samples[indexes[ii]].current
+                e_weight = self.get_cost(node_s,node_n)
 
-                if self.get_cost(node_s,node_n) < self.min_edge_length:
+                if e_weight < self.min_edge_length:
                     continue
 
-                if self.get_cost(node_s,node_n) > self.max_edge_length:
+                if e_weight > self.max_edge_length:
                     break
 
                 if not self.in_collision(s_pos, n_pos) and not self.in_collision(n_pos, s_pos):
                     edge_id.append(indexes[ii])
+                    edge_weight.append(e_weight)
 
                 if self.num_neighbors > 0 and len(edge_id) >= self.num_neighbors:
                     break
 
             road_map.append(edge_id)
+            edge_weights.append(edge_weight)
         self.road_map = road_map
-        self.edges, self.edge_indices = self.calculate_edges(road_map)
+        self.edges, self.edge_indices_dict,self.edge_weights  = self.calculate_edges(road_map,edge_weights)
         return road_map
 
     def generate_planar_map(self, samples: List[Node]):
         planar_map = [[] for ii in range(len(samples))]
+        edge_weights = [[] for ii in range(len(samples))]
         edge_list = {}
         points = np.array([samp.current for samp in samples])
         tri = Delaunay(points)
@@ -474,6 +539,7 @@ class GraphSampler(Grid):
         # Get the edges of the Delaunay triangulation
         edges = [tuple(edge) for edge in np.concatenate([tri.simplices[:,[0,1]],tri.simplices[:,[1,2]],tri.simplices[:,[2,0]]],axis=0).tolist()]
         selected_edges = []
+        selected_weights = []
         for edge in edges:
             if edge in edge_list:
                 continue
@@ -483,16 +549,20 @@ class GraphSampler(Grid):
             node_n = samples[edge[1]]
             s_pos = points[edge[0]]    
             n_pos = points[edge[1]]
+            e_weight = self.get_cost(node_s,node_n)
             if not self.in_collision(s_pos, n_pos) and not self.in_collision(n_pos, s_pos) \
-                and  self.get_cost(node_s,node_n) >= self.min_edge_length and  self.get_cost(node_s,node_n) <= self.max_edge_length:
+                and  e_weight >= self.min_edge_length and  e_weight <= self.max_edge_length:
                 selected_edges.append(edge)
+                selected_weights.append(e_weight)
 
-        for edge in selected_edges:
+        for edge,weight in zip(selected_edges,selected_weights):
             planar_map[edge[0]].append(edge[1])
             planar_map[edge[1]].append(edge[0])
+            edge_weights[edge[0]].append(weight)
+            edge_weights[edge[1]].append(weight)
 
         self.road_map = planar_map
-        self.edges, self.edge_indices = self.calculate_edges(planar_map)
+        self.edges, self.edge_indices_dict,self.edge_weights  = self.calculate_edges(planar_map,edge_weights)
         return planar_map
 
     def set_constraint_sweep(self):
@@ -546,6 +616,20 @@ class GraphSampler(Grid):
             point_int.append(max(0, min(self.shape[d] - 1, int(round(point[d]+1e-10)))))
         point_int = tuple(point_int)
         return point_int
+
+    def clear_data(self):
+        self.road_map = {}
+        self.edges = []
+        self.edge_indices_dict = {}
+        self.edge_weights = []
+        self.start_to_all_edges_dict = {}
+        self.goal_to_all_edges_dict = {}
+        self.nodes = []
+        self.node_index_dict = {}
+        self.start_nodes_index = {}
+        self.goal_nodes_index = {}
+        self.grid_nodes_index = {}
+        self.cost_matrix = None
 
     def plan(self):
         pass
