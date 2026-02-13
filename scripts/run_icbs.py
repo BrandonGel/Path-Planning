@@ -17,6 +17,8 @@ from path_planning.multi_agent_planner.centralized.icbs.icbs import Environment,
 from python_motion_planning.common import TYPES
 import os
 import time
+import numpy as np
+from copy import deepcopy
 
 if __name__ == "__main__":
     map_ = read_graph_sampler_from_yaml("path_planning/maps/2d/2d.yaml")
@@ -55,3 +57,14 @@ if __name__ == "__main__":
     output["schedule"] = solution
     output["cost"] = env.compute_solution_cost(solution)
     write_to_yaml(output, "path_planning/maps/2d/output.yaml")
+
+    vis = Visualizer2D()
+    vis.plot_grid_map(map_)
+    vis.plot_road_map(map_, nodes, road_map)
+
+    # Plot each agent's path
+    for agent_name, trajectory in solution.items():
+        path = np.array([([point["x"], point["y"]]) for point in trajectory])
+        vis.plot_path(path)
+
+    vis.show()

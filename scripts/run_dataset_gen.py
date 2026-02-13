@@ -75,6 +75,13 @@ if __name__ == "__main__":
         default=10000,
         help="max attempts for the solver",
     )
+    parser.add_argument(
+        "-i",
+        "--improved",
+        type=str,
+        default="no",
+        help="enable icbs? (yes or no)",
+    )
     args = parser.parse_args()
 
     # Convert bounds from flat list to nested list format
@@ -120,7 +127,8 @@ if __name__ == "__main__":
             "num_workers": num_workers,
             "timeout": args.timeout,
             "max_attempts": args.max_attempts,
-            "mapf_alg": args.mapf_alg,
+            # "mapf_alg": args.mapf_alg,
+            "improved": args.improved,
         }
     path = create_path_parameter_directory(base_path, config)
     create_solutions(path, args.num_cases, config)

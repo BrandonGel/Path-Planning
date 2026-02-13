@@ -1,7 +1,9 @@
 import random
+
 random.seed(0)
 
 import numpy as np
+
 np.random.seed(0)
 
 from path_planning.utils.util import read_grid_from_yaml
@@ -15,28 +17,28 @@ from path_planning.multi_agent_planner.centralized.cbs.cbs import Environment, C
 from python_motion_planning.common import TYPES
 import os
 import time
+import numpy as np
+from copy import deepcopy
 
 if __name__ == "__main__":
-    map_ =read_graph_sampler_from_yaml('path_planning/maps/2d/2d.yaml')
-    agents = read_agents_from_yaml('path_planning/maps/2d/2d.yaml')
+    map_ = read_graph_sampler_from_yaml("path_planning/maps/2d/2d.yaml")
+    agents = read_agents_from_yaml("path_planning/maps/2d/2d.yaml")
     map_.inflate_obstacles(radius=1)
-    map_.set_parameters(sample_num=0, num_neighbors=4.0, min_edge_len=0.0, max_edge_len=1.1)
+    map_.set_parameters(
+        sample_num=0, num_neighbors=4.0, min_edge_len=0.0, max_edge_len=1.1
+    )
 
-    start = [agent['start'] for agent in agents]
-    goal = [agent['goal'] for agent in agents]
+    start = [agent["start"] for agent in agents]
+    goal = [agent["goal"] for agent in agents]
     map_.set_start(start)
     map_.set_goal(goal)
-    nodes = map_.generateRandomNodes(generate_grid_nodes = True)
+    nodes = map_.generateRandomNodes(generate_grid_nodes=True)
     road_map = map_.generate_roadmap(nodes)
 
     start = [s.current for s in map_.get_start_nodes()]
     goal = [g.current for g in map_.get_goal_nodes()]
-    agents =[
-         {
-            "start": start[i],
-            "name": agent['name'],
-            "goal": goal[i]
-        }
+    agents = [
+        {"start": start[i], "name": agent["name"], "goal": goal[i]}
         for i, agent in enumerate(agents)
     ]
 
@@ -48,10 +50,21 @@ if __name__ == "__main__":
     solution = cbs.search()
     print(f"Time taken to search: {time.time() - st} seconds")
     if not solution:
-        print(" Solution not found" )
+        print(" Solution not found")
 
     # Write to output file
     output = dict()
     output["schedule"] = solution
     output["cost"] = env.compute_solution_cost(solution)
     write_to_yaml(output, "path_planning/maps/2d/output.yaml")
+
+    vis = Visualizer2D()
+    vis.plot_grid_map(map_)
+    vis.plot_road_map(map_, nodes, road_map)
+
+    # Plot each agent's path
+    for agent_name, trajectory in solution.items():
+        path = np.array([([point["x"], point["y"]]) for point in trajectory])
+        vis.plot_path(path)
+
+    vis.show()

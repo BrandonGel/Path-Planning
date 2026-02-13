@@ -471,7 +471,6 @@ class ICBS(object):
 
                 self.env.constraint_dict = new_node.constraint_dict
 
-                # TODO: this replans the entire solution, we need to cut down on these redundant calls by only replanning the affected agent
                 new_node.solution = self.env.compute_agent_solution(agent=agent)
                 if not new_node.solution:
                     continue
