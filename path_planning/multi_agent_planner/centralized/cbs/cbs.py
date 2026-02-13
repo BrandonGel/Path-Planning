@@ -101,6 +101,8 @@ class Constraints(object):
 class Environment(object):
     def __init__(self, graph_map, agents, astar_max_iterations=-1, radius = 1.0, velocity = 0.0, use_constraint_sweep=True):
         self.graph_map = graph_map
+        if radius > 0:
+            self.graph_map.set_constraint_sweep()
         self.agents = agents
         self.agent_dict = {}
 
