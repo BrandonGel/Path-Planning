@@ -252,7 +252,7 @@ def process_single_case_graphs(args: Tuple[Path, dict]) -> Tuple[bool, Path]:
 
             # Get Edges & Edge Weights
             edge_weights = map_.edge_weights
-            start_goal_edges_dict = map_.start_to_all_edges_dict | map_.goal_to_all_edges_dict
+            start_goal_edges_dict = {**map_.get_start_nodes_with_all_edges(), **map_.get_goal_nodes_with_all_edges()}
             start_goal_nodes = map_.get_start_nodes() + map_.get_goal_nodes()
 
             # Generate Node Data ('node')
