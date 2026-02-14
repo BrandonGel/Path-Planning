@@ -21,7 +21,6 @@ np.random.seed(0)
 if __name__ == "__main__":
     """Main entry point for dataset generation."""
 
-    # TODO: add cbs vs icbs as an argument here, then choose the function in dataset_gen.py based on that
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "-s",
@@ -123,7 +122,6 @@ if __name__ == "__main__":
         elif "num_workers" not in config:
             config["num_workers"] = cpu_count()
     else:
-        # TODO: also put the argument here in the config file
         config = {
             "bounds": bounds,
             "resolution": args.resolution,

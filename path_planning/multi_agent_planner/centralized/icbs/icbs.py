@@ -394,8 +394,15 @@ class ICBS(object):
 
             constraint_dict = self.env.create_constraints_from_conflict(best_conflict)
 
-            # TODO: the loop below will take the two constraints that solve the conflict and add them to the heap, this could be inhanced by doing things like noticing the cost
-            for agent in constraint_dict.keys():
+            # Second improvement, grabs the "best" agents (cheapest ones to resolve) and only adds those to heap
+            min_cost = min(costs.values())
+            best_agents = [a for a, c in costs.items() if c == min_cost]
+
+            # print("Costs:", costs)
+            # print("Best agents:", best_agents)
+            # print("Constraint dict:", constraint_dict)
+
+            for agent in best_agents:
                 new_node = HighLevelNode()
                 new_node.solution = P.solution.copy()
 
