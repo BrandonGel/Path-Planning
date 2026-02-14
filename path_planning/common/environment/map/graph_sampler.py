@@ -1,7 +1,4 @@
-
-from typing import Union, List, Tuple, Dict, Any, Iterable
-
-from typing import List
+from typing import List, Tuple
 import numpy as np
 from scipy.spatial import KDTree, Delaunay
 from path_planning.common.environment.node import Node
@@ -9,9 +6,10 @@ from python_motion_planning.common.env.map.grid import Grid
 from scipy.spatial.distance import cdist
 from itertools import product
 from python_motion_planning.common import TYPES
+from path_planning.utils.cgal_sweep import CGAL_Sweep
 
 class GraphSampler(Grid):
-    def __init__(self,*args,start,goal,sample_num=0,num_neighbors = 13.0, min_edge_len = 0.0, max_edge_len = 30.0,use_discrete_space=True,**kwargs):
+    def __init__(self,*args,start,goal,sample_num=0,num_neighbors = 13.0, min_edge_len = 0.0, max_edge_len = 30.0,use_discrete_space=True,use_constraint_sweep=True,record_sweep=True,use_exact_collision_check=True,**kwargs):
         super().__init__(*args, **kwargs)
 
         # Check if start and goal are lists, non-empty, and not None
@@ -36,6 +34,11 @@ class GraphSampler(Grid):
         self.track_with_link = False
         self.road_map = []
         self.use_discrete_space = use_discrete_space
+        self.edges = []
+        self.edge_indices = {}
+        self.use_constraint_sweep = use_constraint_sweep
+        self.constraint_sweep = CGAL_Sweep(record_sweep=record_sweep,use_exact_collision_check=use_exact_collision_check)
+        self.sample_kd_tree = None
 
     def __str__(self) -> str:
         return "Graph Sampler"
@@ -85,12 +88,24 @@ class GraphSampler(Grid):
     
     def get_node_index(self, node: Node) -> int:
         return self.node_index_list[node]
+
+    def calculate_edges(self,roadmap: List[List[int]]):
+        edges = set()
+        edge_indices = {}
+        for ii in range(len(roadmap)):
+            for jj in roadmap[ii]:
+                if (ii,jj) not in edges and (jj,ii) not in edges:
+                    edges.add((ii,jj))
+                    edge_indices[len(edges)-1] = (ii,jj)
+        return list(edges), edge_indices
     
     def set_obstacle_map(self, obstacles: np.ndarray):
         obstacles = np.array(obstacles)
-        if len(obstacles.shape) == 2:
+        if len(obstacles) == 0:
+            return
+        if len(obstacles[0]) == 2:
             self.type_map[obstacles[:,0], obstacles[:,1]] = TYPES.OBSTACLE 
-        elif len(obstacles.shape) == 3:
+        elif len(obstacles[0]) == 3:
             self.type_map[obstacles[:,0], obstacles[:,1], obstacles[:,2]] = TYPES.OBSTACLE 
         else:
             raise ValueError(f"Unsupported dimensions: {len(obstacles.shape)}")
@@ -422,9 +437,10 @@ class GraphSampler(Grid):
         road_map = []
         points = np.array([samp.current for samp in samples])
         sample_kd_tree = KDTree(points)
+        self.sample_kd_tree = sample_kd_tree
         for i, node_s in zip(range(len(samples)), samples):
             s_pos = node_s.current
-            dists, indexes = sample_kd_tree.query(s_pos, k=self.num_total_nodes)
+            _, indexes = sample_kd_tree.query(s_pos,k=len(samples))
             edge_id = []
 
             for ii in range(1, len(indexes)):
@@ -445,16 +461,18 @@ class GraphSampler(Grid):
 
             road_map.append(edge_id)
         self.road_map = road_map
+        self.edges, self.edge_indices = self.calculate_edges(road_map)
         return road_map
 
     def generate_planar_map(self, samples: List[Node]):
-        planar_map = [[] for _ in range(len(samples))]
+        planar_map = [[] for ii in range(len(samples))]
         edge_list = {}
         points = np.array([samp.current for samp in samples])
         tri = Delaunay(points)
+        self.sample_kd_tree = KDTree(points)
 
         # Get the edges of the Delaunay triangulation
-        edges = [tuple(edge) for edge in np.concatenate([tri.simplices[:,[0,1]],tri.simplices[:,[1,2]],tri.simplices[:,[2,0]]],axis=0)]
+        edges = [tuple(edge) for edge in np.concatenate([tri.simplices[:,[0,1]],tri.simplices[:,[1,2]],tri.simplices[:,[2,0]]],axis=0).tolist()]
         selected_edges = []
         for edge in edges:
             if edge in edge_list:
@@ -472,9 +490,46 @@ class GraphSampler(Grid):
         for edge in selected_edges:
             planar_map[edge[0]].append(edge[1])
             planar_map[edge[1]].append(edge[0])
+
         self.road_map = planar_map
+        self.edges, self.edge_indices = self.calculate_edges(planar_map)
         return planar_map
 
+    def set_constraint_sweep(self):
+        self.constraint_sweep.set_graph([node.current for node in self.nodes],self.edges)
+
+    def get_constraint_sweep(self, p1: tuple[float,float], p2: tuple[float,float],v: float = 0.0, r: float = 0.5):
+        if not self.use_constraint_sweep:
+            return set()
+        overlapping_edges = self.constraint_sweep.overlapping_graph_elements_cgal(p1, p2,v, r)
+        edges_locations = set((self.nodes[edge_idx[0]].current, self.nodes[edge_idx[1]].current) for edge_idx in overlapping_edges)
+        return edges_locations
+
+    def get_constraint_segment(self, p1a: Tuple[float, ...],p1b: Tuple[float, ...],p2a: Tuple[float, ...],p2b: Tuple[float, ...],v: float = 0.0,r: float = 0.5) -> bool:
+        p1a = np.array(p1a)
+        p2a = np.array(p2a)
+        p1b = np.array(p1b)
+        p2b = np.array(p2b)
+        if v == 0.0:
+            v1 = p1b-p1a
+            v2 = p2b-p2a
+            t_dur = 1.0
+        else:
+            dist1 = np.linalg.norm(p1b-p1a)
+            dist2 = np.linalg.norm(p2b-p2a)
+            t_dur1 = dist1/v
+            t_dur2 = dist2/v
+            t_dur = min(t_dur1, t_dur2)
+            v1 = (p1b-p1a)/t_dur1 if dist1 > 0.0 else np.zeros(self.dim)
+            v2 = (p2b-p2a)/t_dur2 if dist2 > 0.0 else np.zeros(self.dim)
+        r = 2*r
+        r_vec = p2a-p1a
+        vel = v2-v1
+        tmin = np.clip(-np.dot(vel,r_vec)/(np.dot(vel,vel)+1e-10),0.0,t_dur)
+        r_min_vec = r_vec + vel*tmin
+        if np.linalg.norm(r_min_vec) < r:
+            return True
+        return False
 
     def point_float_to_int(self, point: Tuple[float, ...]) -> Tuple[int, ...]:
         """

@@ -99,8 +99,10 @@ class Constraints(object):
             "EC: " + str([str(ec) for ec in self.edge_constraints])
 
 class Environment(object):
-    def __init__(self, graph_map, agents, astar_max_iterations=-1):
+    def __init__(self, graph_map, agents, astar_max_iterations=-1, radius = 1.0, velocity = 0.0, use_constraint_sweep=True):
         self.graph_map = graph_map
+        if radius > 0:
+            self.graph_map.set_constraint_sweep()
         self.agents = agents
         self.agent_dict = {}
 
@@ -110,6 +112,11 @@ class Environment(object):
         self.constraint_dict = {}
 
         self.a_star = AStar(self, astar_max_iterations)
+        self.radius = radius
+        self.velocity = velocity
+        self.use_constraint_sweep = use_constraint_sweep
+        self._constraint_sweep_cache = {}  # (p1, p2, r) -> (nodes, edges, start_nodes)
+        self._constraint_segment_cache = {}  # (p1a, p1b, p2a, p2b, v1, v2, r1, r2) -> bool
 
     def get_neighbors(self, state):
         neighbors = []
@@ -132,16 +139,19 @@ class Environment(object):
         max_t = max([len(plan) for plan in solution.values()])
         result = Conflict()
         for t in range(max_t):
-            for agent_1, agent_2 in combinations(solution.keys(), 2):
-                state_1 = self.get_state(agent_1, solution, t)
-                state_2 = self.get_state(agent_2, solution, t)
-                if state_1.is_equal_except_time(state_2):
-                    result.time = t
-                    result.type = Conflict.VERTEX
-                    result.location_1 = state_1.location
-                    result.agent_1 = agent_1
-                    result.agent_2 = agent_2
-                    return result
+            if self.radius == 0:
+                for agent_1, agent_2 in combinations(solution.keys(), 2):
+                    state_1 = self.get_state(agent_1, solution, t)
+                    state_2 = self.get_state(agent_2, solution, t)
+
+                    # Vertex conflict check (default)
+                    if state_1.is_equal_except_time(state_2):
+                        result.time = t
+                        result.type = Conflict.VERTEX
+                        result.location_1 = state_1.location
+                        result.agent_1 = agent_1
+                        result.agent_2 = agent_2
+                        return result
 
             for agent_1, agent_2 in combinations(solution.keys(), 2):
                 state_1a = self.get_state(agent_1, solution, t)
@@ -150,7 +160,31 @@ class Environment(object):
                 state_2a = self.get_state(agent_2, solution, t)
                 state_2b = self.get_state(agent_2, solution, t+1)
 
-                if state_1a.is_equal_except_time(state_2b) and state_1b.is_equal_except_time(state_2a):
+                if self.radius == 0:
+                    # Edge conflict check (default)
+                    if state_1a.is_equal_except_time(state_2b) and state_1b.is_equal_except_time(state_2a):
+                        result.time = t
+                        result.type = Conflict.EDGE
+                        result.agent_1 = agent_1
+                        result.agent_2 = agent_2
+                        result.location_1 = state_1a.location
+                        result.location_2 = state_1b.location
+                        return result
+                    continue
+
+                # Edge conflict check (use constraint sweep)
+                if self.use_constraint_sweep :
+                    state1_edges_locations = self._get_constraint_sweep_cached(state_1a.location.point,state_1b.location.point,self.velocity,2*self.radius)
+                    state2_edges_locations = self._get_constraint_sweep_cached(state_2a.location.point,state_2b.location.point,self.velocity,2*self.radius)
+                    edge_1 = (state_1a.location.point,state_1b.location.point)
+                    edge_2 = (state_2a.location.point,state_2b.location.point)
+                    edge_conflict = edge_1 in state2_edges_locations or edge_2 in state1_edges_locations
+                else:
+                    # Edge conflict check (use distances based on radius and vertices)                    
+                    edge_conflict = self._get_constraint_segment_cached(
+                        state_1a.location.point,state_1b.location.point,state_2a.location.point,state_2b.location.point,self.velocity,self.radius
+                    )
+                if edge_conflict:
                     result.time = t
                     result.type = Conflict.EDGE
                     result.agent_1 = agent_1
@@ -193,7 +227,8 @@ class Environment(object):
     def state_valid(self, state):
         if self.graph_map.in_collision_point(state.location.point):
             return False
-        return VertexConstraint(state.time, state.location) not in self.constraints.vertex_constraints
+        
+        return  VertexConstraint(state.time,state.location) not in self.constraints.vertex_constraints
 
     def transition_valid(self, state_1, state_2):
         return EdgeConstraint(state_1.time, state_1.location, state_2.location) not in self.constraints.edge_constraints
@@ -217,7 +252,24 @@ class Environment(object):
             
             self.agent_dict.update({agent['name']:{'start':start_state, 'goal':goal_state}})
 
+    def _get_constraint_sweep_cached(self, p1, p2,v, r):
+        """Cached wrapper for get_constraint_sweep to avoid duplicate queries."""
+        key = (p1, p2, v, r)
+        if key not in self._constraint_sweep_cache:
+            self._constraint_sweep_cache[key] = self.graph_map.get_constraint_sweep(p1, p2,v, r)
+        return self._constraint_sweep_cache[key]
+
+    def _get_constraint_segment_cached(self, p1a, p1b, p2a, p2b, v, r):
+        """Cached wrapper for get_constraint_sweep to avoid duplicate queries."""
+        key = (p1a, p1b, p2a, p2b, v, r)
+        if key not in self._constraint_segment_cache:
+            self._constraint_segment_cache[key] = self.graph_map.get_constraint_segment(p1a, p1b, p2a, p2b, v,r)
+        return self._constraint_segment_cache[key]
+
     def compute_solution(self):
+        # Clear caches for fresh solution attempt
+        self._constraint_sweep_cache.clear()
+        self._constraint_segment_cache.clear()
         solution = {}
         for agent in self.agent_dict.keys():
             self.constraints = self.constraint_dict.setdefault(agent, Constraints())

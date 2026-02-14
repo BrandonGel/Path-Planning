@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 from path_planning.common.visualizer.visualizer_2d import Visualizer2D
 from path_planning.common.environment.map.graph_sampler import GraphSampler
 from python_motion_planning.common import TYPES
+from path_planning.data_generation.trajectory_parser import get_trajectory_map
 
 def load_and_visualize_case(case_path: Path, show_static=True, show_animation=True):
     """
@@ -63,7 +64,7 @@ def load_and_visualize_case(case_path: Path, show_static=True, show_animation=Tr
     # Static visualization
     if show_static:
         plt.close('all')
-        vis = Visualizer2D(figsize=(8, 8))
+        vis = Visualizer2D(figname = f"{case_path.name} - Static Paths", figsize=(8, 8))
         vis.plot_grid_map(map_)
         
         # Plot each agent's path
@@ -74,6 +75,17 @@ def load_and_visualize_case(case_path: Path, show_static=True, show_animation=Tr
         
         plt.title(f"{case_path.name} - Static Paths")
         vis.show()
+        vis.close()
+
+        perm_trajectory_map = get_trajectory_map(solution_data["schedule"], map_)
+        density_map = perm_trajectory_map.sum(axis=(0,1))
+        visualizer = Visualizer2D(figname = f"{case_path.name} - Density Map", figsize=(8, 8))
+        masked_map = ~map_.get_obstacle_map()
+        visualizer.plot_grid_map(map_, masked_map=masked_map)
+        visualizer.plot_density_map(density_map)
+        visualizer.savefig(case_path / 'density_map.png')
+        visualizer.show()
+        visualizer.close()
     
     # Animation
     if show_animation:

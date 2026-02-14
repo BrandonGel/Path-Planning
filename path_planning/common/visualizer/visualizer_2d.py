@@ -13,6 +13,8 @@ import re
 import numpy as np
 from python_motion_planning.common.visualizer.visualizer_2d import Visualizer2D as BaseVisualizer2D
 import matplotlib.colors as mcolors
+from mpl_toolkits.axes_grid1 import make_axes_locatable
+import copy
 
 class Visualizer2D(BaseVisualizer2D):
     """
@@ -202,10 +204,15 @@ class Visualizer2D(BaseVisualizer2D):
                 if len(goal) >= 2:
                     self.ax.scatter(goal[0], goal[1], c='blue', s=20, alpha=1, zorder=self.zorder['expand_tree_node'], label='Goal')
 
-    def animate(self,file_name,map, schedule, road_map=None, skip_frames=1, intermediate_frames=3,speed=1):
+    def animate(self,file_name,map, schedule, road_map=None, skip_frames=1, intermediate_frames=3,speed=1,map_frame=True,radius=0.0):
 
         combined_schedule = {}
-        combined_schedule.update(schedule["schedule"])
+        combined_schedule.update(copy.deepcopy(schedule["schedule"]))
+
+        if map_frame:
+            for agent_name, agent in combined_schedule.items():
+                for state in agent:
+                    state["x"],state["y"] = map.map_to_world((state["x"],state["y"]))
         self.fig.subplots_adjust(left=0,right=1,bottom=0,top=1, wspace=None, hspace=None)
         self.set_fig_size(self.figsize[0], self.figsize[1], map.shape[0]/map.shape[1])
 
@@ -214,8 +221,7 @@ class Visualizer2D(BaseVisualizer2D):
         self.ax.clear()
         self.plot_grid_map(map)
         if road_map is not None and map.nodes != []:
-            self.plot_road_map(map,map.nodes,road_map)
-
+            self.plot_road_map(map,map.nodes,road_map,map_frame=map_frame)
         patches = []
         artists = []
         agents = dict()
@@ -228,7 +234,7 @@ class Visualizer2D(BaseVisualizer2D):
         for name in schedule["schedule"]:
             start = schedule["schedule"][name][0]
             x,y = start["x"], start["y"]
-            agents[name] = Circle((x, y), 0.3, facecolor=Colors[0], edgecolor='black',zorder=self.zorder['robot_circle'])
+            agents[name] = Circle((x, y), max(radius, np.sqrt(2)/4), facecolor=Colors[0], edgecolor='black',zorder=self.zorder['robot_circle'])
             agents[name].original_face_color = Colors[0]
             patches.append(agents[name])
 
@@ -347,7 +353,13 @@ class Visualizer2D(BaseVisualizer2D):
             zorder=self.zorder['density_map'],  # Use esdf zorder to appear above grid_map but below paths
             alpha=alpha,
             )
-        self.fig.colorbar(im,ax=self.ax, orientation='vertical',label="Frequency")
+        # Adjust axes position to make room for colorbar
+        pos = self.ax.get_position()
+        self.ax.set_position([pos.x0, pos.y0, pos.width * 0.92, pos.height])
+        # Create a colorbar that matches the height of the plot
+        divider = make_axes_locatable(self.ax)
+        cax = divider.append_axes("right", size="5%", pad=0.05)
+        self.fig.colorbar(im, cax=cax, orientation='vertical', label="Frequency")
             
         if equal: 
             plt.axis("equal")
