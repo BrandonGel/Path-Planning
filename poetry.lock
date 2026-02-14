@@ -322,6 +322,39 @@ files = [
 pycparser = {version = "*", markers = "implementation_name != \"PyPy\""}
 
 [[package]]
+name = "cgal"
+version = "6.0.1.post202410241521"
+description = "CGAL bindings, allowing to use some of the CGAL library in Python."
+optional = false
+python-versions = ">=3.6"
+groups = ["main"]
+files = [
+    {file = "cgal-6.0.1.post202410241521-cp310-cp310-macosx_10_13_x86_64.whl", hash = "sha256:d668984dc4528537044d71190a0c3234948ff69e9c77c2a41437da23dea30865"},
+    {file = "cgal-6.0.1.post202410241521-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:288c4ee6266e20e4730cffbfebeefa9af64df5ed06b0fc6947fef2d78773fe1e"},
+    {file = "cgal-6.0.1.post202410241521-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:830fa74688fe79e545bfdbc7b577184e45371774214184617680233234553b98"},
+    {file = "cgal-6.0.1.post202410241521-cp310-cp310-win_amd64.whl", hash = "sha256:bfe6514f8beef476c50da36c44e3a565295408ba3856fffbc35274f692f0ca1d"},
+    {file = "cgal-6.0.1.post202410241521-cp311-cp311-macosx_10_13_x86_64.whl", hash = "sha256:71519601772dcc642247ddc721764f0154badab0e819b09462b3a1e01eb464a7"},
+    {file = "cgal-6.0.1.post202410241521-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:151156aabdb6c95e962d7b1017157faf606e301882278e726a620a7095342b48"},
+    {file = "cgal-6.0.1.post202410241521-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:1ebe41ebd1b427f7d7baabbb88f081b40c7b151c1093c3b2699590b7d3a21b52"},
+    {file = "cgal-6.0.1.post202410241521-cp311-cp311-win_amd64.whl", hash = "sha256:7a7eb61238be20f6bee11e13dfcba0e7dbbdceb8b87b125b3497f5303de1e058"},
+    {file = "cgal-6.0.1.post202410241521-cp312-cp312-macosx_10_13_x86_64.whl", hash = "sha256:48aab4d91a4172e2a6691965440bb23e4bf292f75ebb600a4f9bf298d119368c"},
+    {file = "cgal-6.0.1.post202410241521-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:80bcb6d2106ea0f9d81bf71fe578d910ab94aac93f673d63db845112f459daed"},
+    {file = "cgal-6.0.1.post202410241521-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:0914c255cd0c97f6330f74f65f64b20f099068203c147b572835599f1718341c"},
+    {file = "cgal-6.0.1.post202410241521-cp312-cp312-win_amd64.whl", hash = "sha256:2389d5fb8ed3d77344e43813ea1c2a7b590368fa89a6dfc742b2ca615c311ea9"},
+    {file = "cgal-6.0.1.post202410241521-cp38-cp38-macosx_10_13_x86_64.whl", hash = "sha256:db3f45ece7a2b7d82771fd69f243f030617d4fa9bdb433aa10d39b8f29aca7d5"},
+    {file = "cgal-6.0.1.post202410241521-cp38-cp38-macosx_11_0_arm64.whl", hash = "sha256:ae0173ae08b071d2bec50b6cfaf0b69bb5fc56a1271a9d9960bb2657565107bc"},
+    {file = "cgal-6.0.1.post202410241521-cp38-cp38-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:2ec2d0609ada6b1b68a9ac25d68acc41ae2fe281853c872a5c46f8ba8961a804"},
+    {file = "cgal-6.0.1.post202410241521-cp38-cp38-win_amd64.whl", hash = "sha256:09778ad591b7c1265b0c3b0b5694d7b1be1d0e44f27c8066d144d1fa25ef9875"},
+    {file = "cgal-6.0.1.post202410241521-cp39-cp39-macosx_10_13_x86_64.whl", hash = "sha256:d9e3165db821919c4ff823edae2f753f218a79ae71478cdad0ab2715e87a3939"},
+    {file = "cgal-6.0.1.post202410241521-cp39-cp39-macosx_11_0_arm64.whl", hash = "sha256:b9e798e489bace2282b998557ef8c27cb9f874660a876a174419d3d6bc113e44"},
+    {file = "cgal-6.0.1.post202410241521-cp39-cp39-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:bd1a8061f1b127ce86829709b14fee7f51ff2768ab2eb3b2bf9bc099f09f5d9d"},
+    {file = "cgal-6.0.1.post202410241521-cp39-cp39-win_amd64.whl", hash = "sha256:cca78a2200f728e855580ec707b383ef8631c76b7a1f2d181d6767c001edc5f4"},
+]
+
+[package.dependencies]
+numpy = "*"
+
+[[package]]
 name = "charset-normalizer"
 version = "3.4.4"
 description = "The Real First Universal Charset Detector. Open, modern and actively maintained alternative to Chardet."
@@ -463,7 +496,7 @@ description = "Cross-platform colored terminal text."
 optional = false
 python-versions = "!=3.0.*,!=3.1.*,!=3.2.*,!=3.3.*,!=3.4.*,!=3.5.*,!=3.6.*,>=2.7"
 groups = ["main"]
-markers = "sys_platform == \"win32\""
+markers = "sys_platform == \"win32\" or platform_system == \"Windows\""
 files = [
     {file = "colorama-0.4.6-py2.py3-none-any.whl", hash = "sha256:4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6"},
     {file = "colorama-0.4.6.tar.gz", hash = "sha256:08695f5cb7ed6e0531a20572697297273c47b8cae5a63ffc6d6ed5c201be6e44"},
@@ -2635,6 +2668,25 @@ socks = ["PySocks (>=1.5.6,!=1.5.7)"]
 use-chardet-on-py3 = ["chardet (>=3.0.2,<6)"]
 
 [[package]]
+name = "rtree"
+version = "1.4.1"
+description = "R-Tree spatial index for Python GIS"
+optional = false
+python-versions = ">=3.9"
+groups = ["main"]
+files = [
+    {file = "rtree-1.4.1-py3-none-macosx_10_9_x86_64.whl", hash = "sha256:d672184298527522d4914d8ae53bf76982b86ca420b0acde9298a7a87d81d4a4"},
+    {file = "rtree-1.4.1-py3-none-macosx_11_0_arm64.whl", hash = "sha256:a7e48d805e12011c2cf739a29d6a60ae852fb1de9fc84220bbcef67e6e595d7d"},
+    {file = "rtree-1.4.1-py3-none-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:efa8c4496e31e9ad58ff6c7df89abceac7022d906cb64a3e18e4fceae6b77f65"},
+    {file = "rtree-1.4.1-py3-none-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:12de4578f1b3381a93a655846900be4e3d5f4cd5e306b8b00aa77c1121dc7e8c"},
+    {file = "rtree-1.4.1-py3-none-musllinux_1_2_aarch64.whl", hash = "sha256:b558edda52eca3e6d1ee629042192c65e6b7f2c150d6d6cd207ce82f85be3967"},
+    {file = "rtree-1.4.1-py3-none-musllinux_1_2_x86_64.whl", hash = "sha256:f155bc8d6bac9dcd383481dee8c130947a4866db1d16cb6dff442329a038a0dc"},
+    {file = "rtree-1.4.1-py3-none-win_amd64.whl", hash = "sha256:efe125f416fd27150197ab8521158662943a40f87acab8028a1aac4ad667a489"},
+    {file = "rtree-1.4.1-py3-none-win_arm64.whl", hash = "sha256:3d46f55729b28138e897ffef32f7ce93ac335cb67f9120125ad3742a220800f0"},
+    {file = "rtree-1.4.1.tar.gz", hash = "sha256:c6b1b3550881e57ebe530cc6cffefc87cd9bf49c30b37b894065a9f810875e46"},
+]
+
+[[package]]
 name = "scipy"
 version = "1.17.0"
 description = "Fundamental algorithms for scientific computing in Python"
@@ -2802,6 +2854,28 @@ files = [
     {file = "tornado-6.5.4-cp39-abi3-win_arm64.whl", hash = "sha256:053e6e16701eb6cbe641f308f4c1a9541f91b6261991160391bfc342e8a551a1"},
     {file = "tornado-6.5.4.tar.gz", hash = "sha256:a22fa9047405d03260b483980635f0b041989d8bcc9a313f8fe18b411d84b1d7"},
 ]
+
+[[package]]
+name = "tqdm"
+version = "4.67.1"
+description = "Fast, Extensible Progress Meter"
+optional = false
+python-versions = ">=3.7"
+groups = ["main"]
+files = [
+    {file = "tqdm-4.67.1-py3-none-any.whl", hash = "sha256:26445eca388f82e72884e0d580d5464cd801a3ea01e63e5601bdff9ba6a48de2"},
+    {file = "tqdm-4.67.1.tar.gz", hash = "sha256:f8aef9c52c08c13a65f30ea34f4e5aac3fd1a34959879d7e59e63027286627f2"},
+]
+
+[package.dependencies]
+colorama = {version = "*", markers = "platform_system == \"Windows\""}
+
+[package.extras]
+dev = ["nbval", "pytest (>=6)", "pytest-asyncio (>=0.24)", "pytest-cov", "pytest-timeout"]
+discord = ["requests"]
+notebook = ["ipywidgets (>=6)"]
+slack = ["slack-sdk"]
+telegram = ["requests"]
 
 [[package]]
 name = "traitlets"
@@ -3152,4 +3226,4 @@ propcache = ">=0.2.1"
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12"
-content-hash = "b6b12e5c30809aa8d455a0188c6b4967af58aaa03e4aeef40f5df054f4db901a"
+content-hash = "f33a615a63808b6701c6f6ec5bd86f8fb708f29da072ace5c558998000a07abf"

@@ -60,6 +60,7 @@ class Visualizer3D(BaseVisualizer3D):
         linewidth: float = 2.0,
         node_alpha: float = 1.0,
         edge_alpha: float = 0.3,
+        map_frame: bool = True
     ) -> None:
         """
         Plot a roadmap (nodes + edges) in 3D using pyvista.
@@ -74,7 +75,10 @@ class Visualizer3D(BaseVisualizer3D):
             return
 
         # ---- Nodes (as spheres) ----
-        pts = np.array([n.current for n in nodes], dtype=float)
+        if map_frame:
+            pts = np.array([map_.map_to_world(n.current) for n in nodes], dtype=float)
+        else:
+            pts = np.array([n.current for n in nodes], dtype=float)
         cloud = pv.PolyData(pts)
         sphere = pv.Sphere(radius=float(node_size))
         glyph = cloud.glyph(geom=sphere, scale=False)
