@@ -13,7 +13,7 @@ from path_planning.common.visualizer.visualizer_2d import Visualizer2D
 from path_planning.common.visualizer.visualizer_3d import Visualizer3D
 from path_planning.utils.util import write_to_yaml
 from path_planning.utils.util import read_graph_sampler_from_yaml, read_agents_from_yaml
-from path_planning.multi_agent_planner.centralized.icbs.icbs import Environment, ICBS
+from path_planning.multi_agent_planner.centralized.icbs.icbs import IEnvironment, ICBS
 from python_motion_planning.common import TYPES
 import os
 import time
@@ -42,7 +42,10 @@ if __name__ == "__main__":
         for i, agent in enumerate(agents)
     ]
 
-    env = Environment(map_, agents)
+    map_.set_constraint_sweep()
+    env = IEnvironment(
+        map_, agents, radius=1.0, velocity=0.0, use_constraint_sweep=True
+    )
 
     # Searching
     st = time.time()
@@ -68,3 +71,26 @@ if __name__ == "__main__":
         vis.plot_path(path)
 
     vis.show()
+
+    # from path_planning.common.visualizer.visualizer_2d import Visualizer2D
+    # import numpy as np
+    # from copy import deepcopy
+
+    # schedule = {"schedule": deepcopy(solution)}
+
+    # # Create animation
+    # temp_filename = f"temp.gif"
+    # vis = Visualizer2D()
+    # vis.animate(
+    #     temp_filename,
+    #     map_,
+    #     schedule,
+    #     road_map=road_map,
+    #     skip_frames=1,
+    #     intermediate_frames=3,
+    #     speed=3,
+    #     radius=0.9 * 2.0,
+    #     map_frame=False,
+    # )
+    # print(f"Animation saved to: {temp_filename}")
+    # vis.show()

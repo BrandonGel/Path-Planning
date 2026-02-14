@@ -327,17 +327,17 @@ def data_gen(
         {"start": start[i], "name": agent["name"], "goal": goal[i]}
         for i, agent in enumerate(agents)
     ]
-    env = Environment(map_, agents)
 
-    # TODO: call cbs and icbs here seperately
     if improved == "no":
         # Search for solution and measure runtime using cbs
+        env = Environment(map_, agents)
         cbs = CBS(env, time_limit=timeout, max_iterations=max_attempts)
         start_time = time.time()
         solution = cbs.search()
         runtime = time.time() - start_time
     else:
         # Search for solution and measure runtime using icbs
+        env = IEnvironment(map_, agents)
         icbs = ICBS(env, time_limit=timeout, max_iterations=max_attempts)
         start_time = time.time()
         solution = icbs.search()

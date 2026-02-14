@@ -11,6 +11,12 @@ import argparse
 from pathlib import Path
 import yaml
 from multiprocessing import cpu_count
+import random
+import numpy as np
+
+# Set seeding so that randomness is deterministic
+random.seed(0)
+np.random.seed(0)
 
 if __name__ == "__main__":
     """Main entry point for dataset generation."""
@@ -33,7 +39,7 @@ if __name__ == "__main__":
         help="bounds of the map as x_min x_max y_min y_max (e.g., 0 32 0 32)",
     )
     parser.add_argument(
-        "-n", "--nb_agents", type=int, default=8, help="number of agents"
+        "-n", "--nb_agents", type=int, default=16, help="number of agents"
     )
     parser.add_argument(
         "-o",
@@ -43,7 +49,7 @@ if __name__ == "__main__":
         help="number of obstacles or obstacle density",
     )
     parser.add_argument(
-        "-p", "--nb_permutations", type=int, default=64, help="number of permutations"
+        "-p", "--nb_permutations", type=int, default=10, help="number of permutations"
     )
     parser.add_argument(
         "-r", "--resolution", type=float, default=1.0, help="resolution of the map"
