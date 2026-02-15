@@ -8,6 +8,14 @@ class LossFunction:
     def __init__(self, loss_type:List[str], loss_fcn_weights:List[float],loss_args:Dict[str,Any]={}):
         if len(loss_type) < len(loss_fcn_weights) :
             raise ValueError("loss_type, loss_fcn_weights, and loss_args must have the same length")
+        assert len(loss_type) == len(loss_fcn_weights) == len(loss_args), "loss_type, loss_fcn_weights, and loss_args must have the same length"
+        assert len(loss_type) > 0, "loss_type must be a non-empty list"
+        assert len(loss_fcn_weights) > 0, "loss_fcn_weights must be a non-empty list"
+        assert len(loss_args) > 0, "loss_args must be a non-empty dictionary"
+        assert all(isinstance(lt, str) for lt in loss_type), "loss_type must be a list of strings"
+        assert all(isinstance(weight, float) for weight in loss_fcn_weights), "loss_fcn_weights must be a list of floats"
+        assert all(isinstance(args, dict) for args in loss_args), "loss_args must be a dictionary"
+        assert all(isinstance(args, dict) for args in loss_args), "loss_args must be a dictionary"
         self.loss_fcn_weights = {lt.lower(): weight for lt,weight in zip(loss_type,loss_fcn_weights)}
         self.loss_args = {lt.lower(): args for lt,args in zip(loss_type,loss_args)}
         self.loss_fcns = get_lost_fcn(loss_type=loss_type)
