@@ -40,21 +40,24 @@ model:
   edge_dim: 1
   concat: true
   residual: true
-  dropout: 0.0
+  dropout: 0.2
   num_start_layers: 1
   num_mlp_layers: 2
   activation_function: relu
   to_hetero_aggr: sum
+  compile: false
+  compile_dynamic: true
 optimizer:
-  type: adam
+  type: adamw
   lr: 0.0001
   weight_decay: 0.0005
 train:
   batch_size: 128
   test_size: 0.1
-  num_epochs: 50
+  num_epochs: 2500
   resume_epoch: 0
-  save_epoch: 5
+  save_epoch: 100
+  verbose_epoch: 10
   save_folder: 'logs'
   load_folder: 'logs'
   gradient_clip_val: 5.0
