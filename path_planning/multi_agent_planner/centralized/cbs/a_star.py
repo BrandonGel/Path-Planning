@@ -58,7 +58,7 @@ class AStar():
                 continue
 
             if self.is_at_goal(current, agent_name):
-                return self.reconstruct_path(came_from, current)
+                return self.reconstruct_path(came_from, current), g_score[current]
 
             open_set.remove(current)
             closed_set.add(current)
@@ -80,5 +80,5 @@ class AStar():
                     if neighbor not in open_set:
                         open_set.add(neighbor)
                     heapq.heappush(open_heap, (f_score_neighbor,next(counter), neighbor))
-        return False
+        return False, float("inf")
 
