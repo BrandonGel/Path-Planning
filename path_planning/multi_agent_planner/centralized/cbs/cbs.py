@@ -288,7 +288,10 @@ class Environment(object):
         cost = 0
         for agent, path in solution.items():
             path_array = np.array([list(p.values())[1:] for p in path])
-            cost += np.linalg.norm(path_array[1:] - path_array[:-1], axis=1).sum()
+            dist_travel = np.linalg.norm(path_array[1:] - path_array[:-1], axis=1)
+            travel_cost = dist_travel.sum()
+            wait_cost = (dist_travel == 0).sum()
+            cost += travel_cost + wait_cost
         return cost.item()
 
 class HighLevelNode(object):
