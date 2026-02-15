@@ -180,8 +180,8 @@ class GraphDataset(InMemoryDataset):
                     data['node','approx','node'].edge_attr = torch.tensor(result_dict['node_approx_node_edata'], dtype=torch.float)
                     data['node'].y = torch.tensor(result_dict['y'], dtype=torch.float)
                     self.data_binary_id.append(result_dict['binary_id'])
-                    # data = add_self_loops_to_edge_type(data, ('node', 'to', 'node'))                    transform = torch_geometric.transforms.Compose([AddSelfLoops(), RemoveDuplicatedEdges()])
-                    transform = torch_geometric.transforms.Compose([AddSelfLoops()])
+                    # transform = torch_geometric.transforms.Compose([AddSelfLoops(), RemoveDuplicatedEdges()])
+                    transform = torch_geometric.transforms.Compose([AddSelfLoops('edge_attr',fill_value=0.0)])
                     data = transform(data)
                     
                     if num_hops >= 0:
