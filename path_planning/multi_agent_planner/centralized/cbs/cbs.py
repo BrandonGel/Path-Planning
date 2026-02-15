@@ -134,7 +134,6 @@ class Environment(object):
                 neighbors.append(n)
         return neighbors
 
-
     def get_conflicts(self, solution,get_first_conflict: bool = True):
         max_t = max([len(plan) for plan in solution.values()])
         result = Conflict()
@@ -290,7 +289,7 @@ class Environment(object):
         for agent, path in solution.items():
             path_array = np.array([list(p.values())[1:] for p in path])
             cost += np.linalg.norm(path_array[1:] - path_array[:-1], axis=1).sum()
-        return cost
+        return cost.item()
 
 class HighLevelNode(object):
     def __init__(self):
@@ -377,6 +376,7 @@ class CBS(object):
             for agent in constraint_dict.keys():
                 new_node = HighLevelNode()
                 new_node.solution = P.solution.copy()
+                new_node.solution_cost = P.solution_cost.copy()
 
                 # Selective deep copy only for affected agent's constraints
                 new_node.constraint_dict = {}
