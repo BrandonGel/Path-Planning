@@ -279,7 +279,7 @@ class Environment(object):
             self.constraints = self.constraint_dict.setdefault(agent, Constraints())
             local_solution, local_cost = self.a_star.search(agent)
             if not local_solution:
-                return False
+                return False, float('inf')
             solution.update({agent:local_solution})
             solution_cost[agent] = local_cost
         return solution, solution_cost
