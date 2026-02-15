@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 from path_planning.common.visualizer.visualizer_2d import Visualizer2D
 from path_planning.common.environment.map.graph_sampler import GraphSampler
 from python_motion_planning.common import TYPES
-from path_planning.data_generation.trajectory_parser import get_trajectory_map
+from path_planning.data_generation.dataset_label import get_trajectory_map
 
 def load_and_visualize_case(case_path: Path, show_static=True, show_animation=True):
     """

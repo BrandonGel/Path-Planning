@@ -4,23 +4,23 @@ Generate a dataset of MAPF instances and their solutions for 4 agents in a 32x32
 Save the dataset in the benchmark/train folder.
 
 Only provide the save path
-python scripts/generate/run_dataset_gen.py -s benchmark/train 
+python scripts/generate/run_ground_truth.py -s benchmark/train 
 
 Generate a dataset of MAPF instances and their solutions for 4 agents in a 32x32 grid with 0.1 obstacles and 64 permutations.
-python scripts/generate/run_dataset_gen.py -s benchmark/train -b 0 32.0 0 32.0 -n 4 -o 0.1 -p 64 -r 1.0 -c 100
+python scripts/generate/run_ground_truth.py -s benchmark/train -b 0 32.0 0 32.0 -n 4 -o 0.1 -p 64 -r 1.0 -c 100
 
 3D Scenario
 Generate a dataset of MAPF instances and their solutions for 8 agents in a 32x32x32 grid with 0.1 obstacles and 64 permutations.
 Save the dataset in the benchmark/train folder.
 
 Only provide the save path
-python scripts/generate/run_dataset_gen.py -s benchmark/train 
+python scripts/generate/run_ground_truth.py -s benchmark/train 
 
 Generate a dataset of MAPF instances and their solutions for 8 agents in a 32x32x32 grid with 0.1 obstacles and 64 permutations.
-python scripts/generate/run_dataset_gen.py -s benchmark/train -b 0 32.0 0 32.0 0 32.0 -n 8 -o 0.1 -p 64 -r 1.0 -c 100
+python scripts/generate/run_ground_truth.py -s benchmark/train -b 0 32.0 0 32.0 0 32.0 -n 8 -o 0.1 -p 64 -r 1.0 -c 100
 '''
 
-from path_planning.data_generation.dataset_gen import create_solutions,create_path_parameter_directory
+from path_planning.data_generation.dataset_ground_truth import create_solutions,create_path_parameter_directory
 import argparse
 from pathlib import Path
 import yaml

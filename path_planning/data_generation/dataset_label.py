@@ -102,9 +102,9 @@ def process_single_case_trajectories(args: Tuple) -> Tuple[bool, Path]:
         return False, case_dir
 
 
-def parse_dataset_trajectories(path, visualize_density_map: bool = False, num_workers: int = None):
+def label_dataset(path, visualize_density_map: bool = False, num_workers: int = None):
     """
-    Parse trajectories for all cases in a dataset directory.
+    Label & parse all trajectories for all cases in a dataset directory.
 
     Args:
         path: Path to dataset directory containing case folders

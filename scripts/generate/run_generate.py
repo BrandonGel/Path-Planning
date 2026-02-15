@@ -1,17 +1,17 @@
 '''
 Generate a dataset of MAPF instances and their solutions with a single provided path
 Only provide the save path
-python scripts/generate/run_target_gen.py
+python scripts/generate/run_generate.py
 
 Generate a dataset of MAPF instances and their solutions for 4 agents in a 32x32 grid with 0.1 obstacles and 64 permutations.
-python scripts/generate/run_target_gen.py -s benchmark/train/map32.0x32.0_resolution1.0/agents4_obst0.1
+python scripts/generate/run_generate.py -s benchmark/train/map32.0x32.0_resolution1.0/agents4_obst0.1
 
 Generate a dataset of MAPF instances and their solutions with multiple provided paths
 Note: the paths args are the same
-python scripts/generate/run_target_gen.py -s benchmark/train/map32.0x32.0_resolution1.0/agents4_obst0.1  benchmark/train/map32.0x32.0_resolution1.0/agents4_obst0.1 
+python scripts/generate/run_generate.py -s benchmark/train/map32.0x32.0_resolution1.0/agents4_obst0.1  benchmark/train/map32.0x32.0_resolution1.0/agents4_obst0.1 
 
 Generate a dataset of MAPF instances and their solutions with multiple provided paths with 1 worker
-python scripts/generate/run_target_gen.py -s benchmark/train/map32.0x32.0_resolution1.0/agents4_obst0.1  benchmark/train/map32.0x32.0_resolution1.0/agents4_obst0.1 -w 1
+python scripts/generate/run_generate.py -s benchmark/train/map32.0x32.0_resolution1.0/agents4_obst0.1  benchmark/train/map32.0x32.0_resolution1.0/agents4_obst0.1 -w 1
 
 Generate a dataset of MAPF instances and their solutions with multiple provided paths with max number of workers
 Generate 1000 random samples + the start/goal samples
@@ -19,12 +19,12 @@ Generate edges based on the number of neighbors of each nodes with a minimum edg
 Create 1 new (generate_new_graph True) graph sample with the prm roadmap type and the convolution_binary target space as a labeler
 Let the generator know that the start and goal are discrete (is_start_goal_discrete True)
 Useing Weighted sampling (weighted_sampling True) and sample from the target space with a probability of 50% of the times (samp_from_prob_map_ratio 0.5)
-python scripts/generate/run_target_gen.py -s benchmark/train/map32.0x32.0_resolution1.0/agents4_obst0.1 --num_samples 1000 --num_neighbors 13.0 --min_edge_len 1e-10 --max_edge_len 5.0000001 --num_graph_samples 1 --road_map_type prm --target_space convolution_binary --generate_new_graph True --is_start_goal_discrete True --weighted_sampling True --samp_from_prob_map_ratio 0.5
+python scripts/generate/run_generate.py -s benchmark/train/map32.0x32.0_resolution1.0/agents4_obst0.1 --num_samples 1000 --num_neighbors 13.0 --min_edge_len 1e-10 --max_edge_len 5.0000001 --num_graph_samples 1 --road_map_type prm --target_space convolution_binary --generate_new_graph True --is_start_goal_discrete True --weighted_sampling True --samp_from_prob_map_ratio 0.5
 '''
 
 import argparse
 from pathlib import Path
-from path_planning.data_generation.target_gen import generate_graph_samples
+from path_planning.data_generation.dataset_generate import generate_graph_samples
 from multiprocessing import cpu_count
 
 if __name__ == "__main__":

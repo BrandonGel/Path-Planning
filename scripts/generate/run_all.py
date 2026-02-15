@@ -23,13 +23,14 @@ Generate & Visualize & Target a dataset of MAPF instances and their solutions fo
 python scripts/generate/run_all.py -s benchmark/train -b 0 32.0 0 32.0 -n 4 -o 0.1 -p 64 -r 1.0 -c 100 -v -ds True -ns 1000 -nn 13.0 -min_el 1e-10 -max_el 5.0000001 -ngs 1 -rmt prm -ts convolution_binary -gn True -isg True -ws True -spfr 0.5
 '''
 
-from path_planning.data_generation.dataset_gen import create_solutions,create_path_parameter_directory
+
 import argparse
 from pathlib import Path
 import yaml
 from multiprocessing import cpu_count
-from path_planning.data_generation.trajectory_parser import parse_dataset_trajectories
-from path_planning.data_generation.target_gen import generate_graph_samples
+from path_planning.data_generation.dataset_ground_truth import create_solutions,create_path_parameter_directory
+from path_planning.data_generation.dataset_label import label_dataset
+from path_planning.data_generation.dataset_generate import generate_graph_samples
 
 if __name__ == "__main__":
     """Main entry point for dataset generation."""
@@ -94,7 +95,7 @@ if __name__ == "__main__":
         }
     path = create_path_parameter_directory(base_path, data_gen_config)
     create_solutions(path, args.num_cases, data_gen_config,num_workers=num_workers)
-    parse_dataset_trajectories(path, args.visualize, num_workers=num_workers)
+    label_dataset(path, args.visualize, num_workers=num_workers)
 
 
     target_gen_config = {

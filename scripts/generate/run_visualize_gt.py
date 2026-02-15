@@ -1,34 +1,34 @@
 '''
 2D Scenario
 Visualize a dataset of MAPF instances and their solutions for 4 agents in a 32x32 grid with 0.1 obstacles and 16 permutations for the first 3 cases with all workers.
-python scripts/generate/run_dataset_vis.py -s benchmark/train
+python scripts/generate/run_visualize_gt.py -s benchmark/train
 
 Save the dataset in the benchmark/train folder if path not
-python scripts/generate/run_dataset_vis.py -s benchmark/train -b 0 32.0 0 32.0 -n 4 -o 0.1 -p 16 -r 1.0 
+python scripts/generate/run_visualize_gt.py -s benchmark/train -b 0 32.0 0 32.0 -n 4 -o 0.1 -p 16 -r 1.0 
 
 Visualize a dataset of MAPF instances and their solutions with a config file.
-python scripts/generate/run_dataset_vis.py -s benchmark/train -y benchmark/train/map32.0x32.0_resolution1.0/agents4_obst0.1/config.yaml
+python scripts/generate/run_visualize_gt.py -s benchmark/train -y benchmark/train/map32.0x32.0_resolution1.0/agents4_obst0.1/config.yaml
 
 Visualize a dataset of MAPF instances and their solutions with all cases, first_n, range, and specific modes.
-python scripts/generate/run_dataset_vis.py -s benchmark/train -y benchmark/train/map32.0x32.0_resolution1.0/agents4_obst0.1/config.yaml -cm all
-python scripts/generate/run_dataset_vis.py -s benchmark/train -y benchmark/train/map32.0x32.0_resolution1.0/agents4_obst0.1/config.yaml -cm first_n -cn 3
-python scripts/generate/run_dataset_vis.py -s benchmark/train -y benchmark/train/map32.0x32.0_resolution1.0/agents4_obst0.1/config.yaml -cm range -cr 3 4
-python scripts/generate/run_dataset_vis.py -s benchmark/train -y benchmark/train/map32.0x32.0_resolution1.0/agents4_obst0.1/config.yaml -cm specific -cs 0 5 10
+python scripts/generate/run_visualize_gt.py -s benchmark/train -y benchmark/train/map32.0x32.0_resolution1.0/agents4_obst0.1/config.yaml -cm all
+python scripts/generate/run_visualize_gt.py -s benchmark/train -y benchmark/train/map32.0x32.0_resolution1.0/agents4_obst0.1/config.yaml -cm first_n -cn 3
+python scripts/generate/run_visualize_gt.py -s benchmark/train -y benchmark/train/map32.0x32.0_resolution1.0/agents4_obst0.1/config.yaml -cm range -cr 3 4
+python scripts/generate/run_visualize_gt.py -s benchmark/train -y benchmark/train/map32.0x32.0_resolution1.0/agents4_obst0.1/config.yaml -cm specific -cs 0 5 10
 
 Visualize a dataset of MAPF instances and their solutions with first_n, range, and specific modes for casese and permutations.
-python scripts/generate/run_dataset_vis.py -s benchmark/train -y benchmark/train/map32.0x32.0_resolution1.0/agents4_obst0.1/config.yaml -cm first_n -cn 3 -pv all
-python scripts/generate/run_dataset_vis.py -s benchmark/train -y benchmark/train/map32.0x32.0_resolution1.0/agents4_obst0.1/config.yaml -cm first_n -cn 3 -pv first_n -pn 3
-python scripts/generate/run_dataset_vis.py -s benchmark/train -y benchmark/train/map32.0x32.0_resolution1.0/agents4_obst0.1/config.yaml -cm range -cr 3 4 -pv range -pr 3 4
-python scripts/generate/run_dataset_vis.py -s benchmark/train -y benchmark/train/map32.0x32.0_resolution1.0/agents4_obst0.1/config.yaml -cm specific -cs 5 -pv specific -ps 0 5 10
+python scripts/generate/run_visualize_gt.py -s benchmark/train -y benchmark/train/map32.0x32.0_resolution1.0/agents4_obst0.1/config.yaml -cm first_n -cn 3 -pv all
+python scripts/generate/run_visualize_gt.py -s benchmark/train -y benchmark/train/map32.0x32.0_resolution1.0/agents4_obst0.1/config.yaml -cm first_n -cn 3 -pv first_n -pn 3
+python scripts/generate/run_visualize_gt.py -s benchmark/train -y benchmark/train/map32.0x32.0_resolution1.0/agents4_obst0.1/config.yaml -cm range -cr 3 4 -pv range -pr 3 4
+python scripts/generate/run_visualize_gt.py -s benchmark/train -y benchmark/train/map32.0x32.0_resolution1.0/agents4_obst0.1/config.yaml -cm specific -cs 5 -pv specific -ps 0 5 10
 
 Visualize a dataset of MAPF instances and their solutions with static visualization and animation.
-python scripts/generate/run_dataset_vis.py -s benchmark/train -y benchmark/train/map32.0x32.0_resolution1.0/agents4_obst0.1/config.yaml -ss True 
-python scripts/generate/run_dataset_vis.py -s benchmark/train -y benchmark/train/map32.0x32.0_resolution1.0/agents4_obst0.1/config.yaml -cm specific -cs 0 -sa True
+python scripts/generate/run_visualize_gt.py -s benchmark/train -y benchmark/train/map32.0x32.0_resolution1.0/agents4_obst0.1/config.yaml -ss True 
+python scripts/generate/run_visualize_gt.py -s benchmark/train -y benchmark/train/map32.0x32.0_resolution1.0/agents4_obst0.1/config.yaml -cm specific -cs 0 -sa True
 
 '''
 
-from path_planning.data_generation.dataset_gen import create_path_parameter_directory
-from path_planning.data_generation.dataset_visualize import load_and_visualize_case
+from path_planning.data_generation.dataset_ground_truth import create_path_parameter_directory
+from path_planning.data_generation.dataset_visualize_ground_truth import load_and_visualize_case
 import argparse
 from pathlib import Path
 import yaml

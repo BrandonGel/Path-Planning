@@ -1,5 +1,5 @@
 """
-Dataset generation for MAPF training.
+Ground Truth Dataset generation for MAPF training.
 Generates random MAPF instances and solves them using CBS.
 Modified from the original implementation to work with the new common environment.
 

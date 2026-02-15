@@ -1,3 +1,7 @@
+"""
+Dataset generation for MAPF training using the ground truth dataset.
+"""
+
 from path_planning.utils.util import read_graph_sampler_from_yaml, read_agents_from_yaml
 import numpy as np
 from pathlib import Path
