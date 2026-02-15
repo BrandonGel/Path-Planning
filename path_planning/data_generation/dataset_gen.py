@@ -429,7 +429,7 @@ def create_solutions(path: Path, num_cases: int, config: Dict):
     print(f"Total Failed permutations: {int(failed * total_permutations)}")
     print(f"Cases stored in {path}")
 
-def create_path_parameter_directory(base_path: Path, config: Dict):
+def create_path_parameter_directory(base_path: Path, config: Dict,dump_config: bool = True):
     """
     Create a path parameters file.
     """
@@ -444,7 +444,8 @@ def create_path_parameter_directory(base_path: Path, config: Dict):
     path = base_path / f"map{str_bounds}_resolution{resolution}" / f"agents{nb_agents}_obst{nb_obstacles}"
     os.makedirs(path, exist_ok=True)
 
-    with open(path / "config.yaml", "w") as f:
-        yaml.safe_dump(config, f)
+    if dump_config:
+        with open(path / "config.yaml", "w") as f:
+            yaml.safe_dump(config, f)
     return path
 

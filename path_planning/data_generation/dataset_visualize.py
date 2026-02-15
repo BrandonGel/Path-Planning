@@ -56,10 +56,7 @@ def load_and_visualize_case(case_path: Path, show_static=True, show_animation=Tr
     road_map = map_.generate_roadmap(nodes)
     
     # Print case info
-    print(f"\n{'='*60}")
-    print(f"Case: {case_path.name}")
-    print(f"Agents: {len(agents)} | Cost: {solution_data['cost']} | Obstacles: {len(obstacles)}")
-    print(f"{'='*60}")
+    print(f"{case_path.parent.parent.name} + {case_path.name} | Agents: {len(agents)} | Cost: {solution_data['cost']} | Obstacles: {len(obstacles)}")
     
     # Static visualization
     if show_static:
