@@ -3,6 +3,8 @@ from path_planning.gnn.dataloader import GraphDataset
 from torch_geometric.loader import DataLoader
 import torch.nn.functional as F
 import torch
+import wandb
+from time import time
 
 def split_dataset(graph_dataset:GraphDataset,batch_size=128,test_size=0.1,random_state=42,num_workers=1):
 
@@ -20,10 +22,12 @@ def split_dataset(graph_dataset:GraphDataset,batch_size=128,test_size=0.1,random
 
 
 
-def train(train_loader,model,optimizer,device='cuda:0',loss_function=F.binary_cross_entropy_with_logits):
+def train(train_loader,model,optimizer,device='cuda:0',loss_function=F.binary_cross_entropy_with_logits,run: wandb.Run =None):
     model.train()
-    total_examples = total_loss = 0
+    train_loss = []
+    train_time = []
     for batch in train_loader:
+        st = time()
         optimizer.zero_grad()
         batch = batch.to(device)
         out = model(batch.x_dict, batch.edge_index_dict,batch.edge_attr_dict)
@@ -33,23 +37,34 @@ def train(train_loader,model,optimizer,device='cuda:0',loss_function=F.binary_cr
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
         optimizer.step()
+        et = time()
+        train_time.append(et-st)
+        train_loss.append(float(loss.item()))
+        if run is not None:
+            run.log({
+                "batch/train_loss": train_loss[-1],
+                "batch/train_time": train_time[-1],
+            })
+    return train_loss,train_time
 
-        total_examples += 1
-        total_loss += float(loss.item())
-
-    return total_loss / total_examples
-
-def test(test_loader,model,device='cuda:0',loss_function=F.binary_cross_entropy_with_logits):
+def test(test_loader,model,device='cuda:0',loss_function=F.binary_cross_entropy_with_logits,run: wandb.Run =None):
     model.eval()
-    total_examples = total_loss = 0
+    test_loss = []
+    test_time = []
     with torch.no_grad():
         for batch in test_loader:
+            st = time()
             batch = batch.to(device)
             out = model(batch.x_dict, batch.edge_index_dict,batch.edge_attr_dict)
             loss = loss_function(out['node'],
                                batch['node'].y.reshape(-1,1),
                                batch.edge_index_dict)
-            total_examples += 1
-            total_loss += float(loss.item())
-
-    return total_loss / total_examples
+            et = time()
+            test_time.append(et-st)
+            test_loss.append(float(loss.item()))
+            if run is not None:
+                run.log({
+                    "batch/test_loss": test_loss[-1],
+                    "batch/test_time": test_time[-1],
+                })
+    return test_loss,test_time
