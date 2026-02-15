@@ -3,6 +3,9 @@ Run trajectory parser for a single path with no visualization and max number of 
 python scripts/generate/run_trajectory_parser.py -s benchmark/train/map32.0x32.0_resolution1.0/agents4_obst0.1
 
 Run trajectory parser for multiple paths with no visualization and max number of workers
+Only provide the save path
+python scripts/generate/run_trajectory_parser.py -s benchmark/train 
+
 Note: the paths args are the same
 python scripts/generate/run_trajectory_parser.py -s benchmark/train/map32.0x32.0_resolution1.0/agents4_obst0.1  benchmark/train/map32.0x32.0_resolution1.0/agents4_obst0.1
 

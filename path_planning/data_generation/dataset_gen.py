@@ -373,7 +373,7 @@ def data_gen(input_dict: Dict, output_path: Path, timeout: int = 60, max_attempt
     return True
 
 
-def create_solutions(path: Path, num_cases: int, config: Dict):
+def create_solutions(path: Path, num_cases: int, config: Dict,num_workers: int = cpu_count()):
     """
     Create multiple MAPF instances and their solutions with parallel processing.
 
@@ -386,9 +386,6 @@ def create_solutions(path: Path, num_cases: int, config: Dict):
     path.mkdir(parents=True, exist_ok=True)
     
     print(f"Generating solutions for {num_cases} cases")
-    
-    # Get number of workers for cases
-    num_workers = config.get("num_workers", cpu_count())
     
     # Prepare case tasks
     case_tasks = []

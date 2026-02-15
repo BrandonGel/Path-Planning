@@ -2,12 +2,22 @@
 2D Scenario
 Generate a dataset of MAPF instances and their solutions for 4 agents in a 32x32 grid with 0.1 obstacles and 64 permutations.
 Save the dataset in the benchmark/train folder.
-python scripts/run_dataset_gen.py -s benchmark/train -b 0 32.0 0 32.0 -n 4 -o 0.1 -p 64 -r 1.0 -c 100
+
+Only provide the save path
+python scripts/generate/run_dataset_gen.py -s benchmark/train 
+
+Generate a dataset of MAPF instances and their solutions for 4 agents in a 32x32 grid with 0.1 obstacles and 64 permutations.
+python scripts/generate/run_dataset_gen.py -s benchmark/train -b 0 32.0 0 32.0 -n 4 -o 0.1 -p 64 -r 1.0 -c 100
 
 3D Scenario
 Generate a dataset of MAPF instances and their solutions for 8 agents in a 32x32x32 grid with 0.1 obstacles and 64 permutations.
 Save the dataset in the benchmark/train folder.
-python scripts/run_dataset_gen.py -s benchmark/train -b 0 32.0 0 32.0 0 32.0 -n 8 -o 0.1 -p 64 -r 1.0 -c 100
+
+Only provide the save path
+python scripts/generate/run_dataset_gen.py -s benchmark/train 
+
+Generate a dataset of MAPF instances and their solutions for 8 agents in a 32x32x32 grid with 0.1 obstacles and 64 permutations.
+python scripts/generate/run_dataset_gen.py -s benchmark/train -b 0 32.0 0 32.0 0 32.0 -n 8 -o 0.1 -p 64 -r 1.0 -c 100
 '''
 
 from path_planning.data_generation.dataset_gen import create_solutions,create_path_parameter_directory
@@ -15,6 +25,8 @@ import argparse
 from pathlib import Path
 import yaml
 from multiprocessing import cpu_count
+
+
 
 if __name__ == "__main__":
     """Main entry point for dataset generation."""
@@ -54,11 +66,6 @@ if __name__ == "__main__":
     if args.config != '':
         with open(args.config, 'r') as yaml_file:
             config = yaml.load(yaml_file, Loader=yaml.FullLoader)
-        # Override worker settings if specified via command line
-        if args.num_workers is not None:
-            config["num_workers"] = args.num_workers
-        elif "num_workers" not in config:
-            config["num_workers"] = cpu_count()
     else:
         config = {
             "bounds": bounds,
@@ -66,10 +73,9 @@ if __name__ == "__main__":
             "nb_agents": args.nb_agents,
             "nb_obstacles": args.nb_obstacles,
             "nb_permutations": args.nb_permutations,
-            "num_workers": num_workers,
             "timeout": args.timeout,
             "max_attempts": args.max_attempts,
         }
     path = create_path_parameter_directory(base_path, config)
-    create_solutions(path, args.num_cases, config)
+    create_solutions(path, args.num_cases, config,num_workers=num_workers)
 
