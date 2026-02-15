@@ -112,17 +112,20 @@ class GraphSampler(Grid):
         raise ValueError("Edges have not been generated yet. Please generate the roadmap first.")
 
     def calculate_edges(self,roadmap: List[List[int]],roadmap_edge_weights: List[List[float]] = None) -> Tuple[List[Tuple[int,int]], dict, List[float]]:
-        edges = set()
+        edges_seen = set()
+        edges = []  # list to preserve order so indices match edge_indices_dict and edge_weights
         edge_indices_dict = {}
         edge_weights = []
         for ii in range(len(roadmap)):
             for jj in roadmap[ii]:
-                if (ii,jj) not in edges:
-                    edges.add((ii,jj))
-                    edge_indices_dict[(ii,jj)] = len(edges)-1
+                if (ii, jj) not in edges_seen:
+                    edges_seen.add((ii, jj))
+                    idx = len(edges)
+                    edges.append((ii, jj))
+                    edge_indices_dict[(ii, jj)] = idx
                     if roadmap_edge_weights is not None:
                         edge_weights.append(roadmap_edge_weights[ii][roadmap[ii].index(jj)])
-        return list(edges), edge_indices_dict, edge_weights
+        return edges, edge_indices_dict, edge_weights
     
     def set_obstacle_map(self, obstacles: np.ndarray):
         obstacles = np.array(obstacles)
@@ -391,8 +394,9 @@ class GraphSampler(Grid):
             points = normalized_points * (bounds[:,1] - bounds[:,0]) + bounds[:,0]
             return points,0
         else:
-            weighted_normalized_points = np.clip(np.random.random((self.sample_num,self.dim)),0,1) + 1e-10
             num_prob_map_samples = int(self.sample_num * samp_from_prob_map_ratio)
+            weighted_normalized_points = np.clip(np.random.random((num_prob_map_samples,self.dim))-0.5,-0.5,0.5) + 1e-10
+            weighted_points = np.zeros((num_prob_map_samples,self.dim))
             if num_prob_map_samples > 0:
                 prob_map_flat = prob_map.flatten()
                 prob_map_flat /= np.sum(prob_map_flat)
@@ -400,8 +404,7 @@ class GraphSampler(Grid):
                 prob_map_points = np.array([np.unravel_index(idx, prob_map.shape) for idx in prob_map_indices])
                 # Convert to world coordinates
                 prob_map_points_world = np.array([self.map_to_world(tuple(point)) for point in prob_map_points])
-                weighted_normalized_points[:num_prob_map_samples] = (prob_map_points_world - bounds[:,0]) / (bounds[:,1] - bounds[:,0])
-            weighted_points = weighted_normalized_points * (bounds[:,1] - bounds[:,0]) + bounds[:,0]
+                weighted_points = prob_map_points_world + weighted_normalized_points
 
             num_uniform_samples = self.sample_num - num_prob_map_samples
             uniform_normalized_points = np.random.random((num_uniform_samples,self.dim))
@@ -429,13 +432,16 @@ class GraphSampler(Grid):
                     self.node_index_dict[node] = len(nodes) - 1
                     num_nodes += 1
                 else:
-                    if ii > num_weighted_samples:
+                    # Only track rejected WEIGHTED samples (indices 0 to num_weighted_samples-1)
+                    if ii >= num_weighted_samples:
                         continue
-                    if ii == num_weighted_samples:
-                        samp_from_prob_map_ratio = len(rejected_weighted_samples)/self.sample_num
                     rejected_weighted_samples.append(points[ii])
                 if num_nodes == self.sample_num:
                     break
+            # Update ratio after processing batch (for next iteration if needed)
+            if num_nodes < self.sample_num and num_weighted_samples > 0:
+                samp_from_prob_map_ratio = len(rejected_weighted_samples) / self.sample_num 
+                samp_from_prob_map_ratio = max(0.0, min(1.0, samp_from_prob_map_ratio))
 
         if generate_grid_nodes:
             # Iterate through all grid points in the mesh
