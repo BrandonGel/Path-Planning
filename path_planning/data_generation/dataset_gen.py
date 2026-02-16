@@ -6,12 +6,13 @@ Modified from the original implementation to work with the new common environmen
 author: Brandon Ho
 original author: Victor Retamal
 """
+
 import os
 from pathlib import Path
 import yaml
 import numpy as np
 from typing import Any, Dict, List, Tuple, Optional
-from path_planning.multi_agent_planner.centralized.cbs.cbs import Environment, CBS
+from path_planning.multi_agent_planner.centralized.get_centralized import get_centralized
 from path_planning.common.environment.map.graph_sampler import GraphSampler
 from python_motion_planning.common import TYPES
 import math
@@ -20,24 +21,28 @@ from tqdm import tqdm
 from multiprocessing import Pool, cpu_count
 import shutil
 
-def shuffle_agents_goals(inpt: Dict,agent_goal_index: List[int]) -> Dict:
+
+def shuffle_agents_goals(inpt: Dict, agent_goal_index: List[int]) -> Dict:
     """
     Shuffle the goals of the agents.
     """
     agents = inpt["agents"]
-    start_goals = [agent["start"].copy() for agent in agents] + [agent["goal"].copy() for agent in agents]
+    start_goals = [agent["start"].copy() for agent in agents] + [
+        agent["goal"].copy() for agent in agents
+    ]
     for i in range(len(agents)):
         agents[i]["start"] = start_goals[agent_goal_index[i]]
-        agents[i]["goal"] = start_goals[agent_goal_index[i+len(agents)]]
+        agents[i]["goal"] = start_goals[agent_goal_index[i + len(agents)]]
     return agents
+
 
 def gen_input(
     bounds: List[List[float]],
     nb_obstacles: int,
     nb_agents: int,
     resolution: float = 1.0,
-    max_attempts: int = 10000
-    ) -> Optional[Dict]:
+    max_attempts: int = 10000,
+) -> Optional[Dict]:
     """
     Generate random MAPF instance with agents and obstacles.
 
@@ -50,17 +55,17 @@ def gen_input(
     Returns:
         Dictionary with agent and map configuration, or None if generation fails
     """
-    
-    map_ = GraphSampler(bounds=bounds, resolution=resolution,start=[],goal=[])
+
+    map_ = GraphSampler(bounds=bounds, resolution=resolution, start=[], goal=[])
     dimensions = list(map_.shape)
     input_dict = {
         "map": {
             "dimensions": dimensions,
-            'bounds': bounds,
-            'resolution': resolution,
-            "obstacles": []
+            "bounds": bounds,
+            "resolution": resolution,
+            "obstacles": [],
         },
-        "agents": []
+        "agents": [],
     }
 
     total_cells = dimensions[0] * dimensions[1]
@@ -69,25 +74,31 @@ def gen_input(
     required_cells = nb_obstacles + 2 * nb_agents  # obstacles + starts + goals
 
     if required_cells > total_cells * 0.9:
-        print(f"Warning: Requesting {required_cells} positions in {total_cells} cells (>90% fill)")
+        print(
+            f"Warning: Requesting {required_cells} positions in {total_cells} cells (>90% fill)"
+        )
 
     # Use set for O(1) lookup
     occupied_positions = set()
 
-    def get_random_position(exclude_set: set, max_attempts: int = 1000) -> Optional[Tuple[int, int]]:
+    def get_random_position(
+        exclude_set: set, max_attempts: int = 1000
+    ) -> Optional[Tuple[int, int]]:
         """Get random position not in exclude set."""
         # For sparse boards, use random sampling
         if len(exclude_set) < total_cells * 0.7:
             for _ in range(max_attempts):
                 pos = (
                     np.random.randint(0, dimensions[0]),
-                    np.random.randint(0, dimensions[1])
+                    np.random.randint(0, dimensions[1]),
                 )
                 if pos not in exclude_set:
                     return pos
         else:
             # For dense boards, sample from available positions
-            all_positions = {(x, y) for x in range(dimensions[0]) for y in range(dimensions[1])}
+            all_positions = {
+                (x, y) for x in range(dimensions[0]) for y in range(dimensions[1])
+            }
             available = list(all_positions - exclude_set)
             if available:
                 return available[np.random.randint(0, len(available))]
@@ -99,7 +110,9 @@ def gen_input(
     for _ in range(nb_obstacles):
         obs_pos = get_random_position(occupied_positions, max_attempts=max_attempts)
         if obs_pos is None:
-            print(f"Failed to place all obstacles (placed {len(obstacles)}/{nb_obstacles})")
+            print(
+                f"Failed to place all obstacles (placed {len(obstacles)}/{nb_obstacles})"
+            )
             return None
 
         obstacles.append(obs_pos)
@@ -122,11 +135,13 @@ def gen_input(
             return None
         occupied_positions.add(goal_pos)
 
-        input_dict["agents"].append({
-            "start": list(start_pos),
-            "goal": list(goal_pos),
-            "name": f"agent{agent_id}"
-        })
+        input_dict["agents"].append(
+            {
+                "start": list(start_pos),
+                "goal": list(goal_pos),
+                "name": f"agent{agent_id}",
+            }
+        )
 
     return input_dict
 
@@ -134,48 +149,63 @@ def gen_input(
 def process_single_permutation(args: Tuple) -> Tuple[bool, int]:
     """
     Process a single permutation in parallel.
-    
+
     Args:
         args: Tuple of (inpt_dict, agent_goal_index, case_path, perm_id, seed)
-    
+
     Returns:
         Tuple of (success: bool, perm_id: int)
     """
-    inpt, agent_goal_index, case_path, perm_id, seed, timeout, max_attempts = args
-    
+    (
+        inpt,
+        agent_goal_index,
+        case_path,
+        perm_id,
+        seed,
+        timeout,
+        max_attempts,
+        centralized_alg_name,
+    ) = args
+
     # Set random seed for this worker process
     np.random.seed(seed)
-    
+
     # Shuffle agents/goals
     agents = shuffle_agents_goals(inpt, agent_goal_index)
     inpt_copy = inpt.copy()
     inpt_copy["agents"] = agents
-    
+
     # Generate solution
     perm_path = case_path / f"perm_{perm_id}"
-    success = data_gen(inpt_copy, perm_path, timeout=timeout, max_attempts=max_attempts)
-    
+    success = data_gen(
+        inpt_copy,
+        perm_path,
+        centralized_alg_name=centralized_alg_name,
+        timeout=timeout,
+        max_attempts=max_attempts,
+    )
+
     if not success and perm_path.exists():
         shutil.rmtree(perm_path)
-    
+
     return success, perm_id
 
 
 def process_single_case(args: Tuple) -> Tuple[float, float, int]:
     """
     Process a single case in parallel (including all its permutations).
-    
+
     Args:
         args: Tuple of (case_id, path, config, seed)
-    
+
     Returns:
         Tuple of (successful_ratio, failed_ratio, case_id)
     """
     case_id, path, config, seed = args
-    
+
     # Set random seed for this worker process
     np.random.seed(seed)
-    
+
     # Generate random instance
     inpt = gen_input(
         config["bounds"],
@@ -301,7 +331,13 @@ def process_single_case(args: Tuple) -> Tuple[float, float, int]:
     return successful_ratio, failed_ratio, case_id
 
 
-def data_gen(input_dict: Dict, output_path: Path, timeout: int = 60, max_attempts: int = 10000) -> bool:
+def data_gen(
+    input_dict: Dict,
+    output_path: Path,
+    centralized_alg_name: str = 'cbs',
+    timeout: int = 60,
+    max_attempts: int = 10000,
+) -> bool:
     """
     Generate solution for given MAPF instance.
 
@@ -319,36 +355,35 @@ def data_gen(input_dict: Dict, output_path: Path, timeout: int = 60, max_attempt
     bounds = param["map"]["bounds"]
     resolution = param["map"]["resolution"]
     agents = param["agents"]
-    map_ = GraphSampler(bounds=bounds, resolution=resolution,start=[],goal=[],use_discrete_space=True)
+    map_ = GraphSampler(
+        bounds=bounds, resolution=resolution, start=[], goal=[], use_discrete_space=True
+    )
     map_.set_obstacle_map(obstacles)
 
     map_.inflate_obstacles(radius=0)
     map_.set_parameters(sample_num=0, num_neighbors=4.0, min_edge_len=1e-10, max_edge_len=1.1)
 
-    start = [agent['start'] for agent in agents]
-    goal = [agent['goal'] for agent in agents]
+    start = [agent["start"] for agent in agents]
+    goal = [agent["goal"] for agent in agents]
     map_.set_start(start)
     map_.set_goal(goal)
-    nodes = map_.generateRandomNodes(generate_grid_nodes = True)
+    nodes = map_.generateRandomNodes(generate_grid_nodes=True)
     road_map = map_.generate_roadmap(nodes)
 
     start = [s.current for s in map_.get_start_nodes()]
     goal = [g.current for g in map_.get_goal_nodes()]
-    agents =[
-         {
-            "start": start[i],
-            "name": agent['name'],
-            "goal": goal[i]
-        }
+    agents = [
+        {"start": start[i], "name": agent["name"], "goal": goal[i]}
         for i, agent in enumerate(agents)
     ]
-    env = Environment(map_, agents,radius=0,velocity=0)
 
-    # Search for solution and measure runtime
+    CBS,Environment = get_centralized(centralized_alg_name)
+    env = Environment(map_, agents,radius=0,velocity=0)
     cbs = CBS(env, time_limit=timeout, max_iterations=max_attempts)
     start_time = time.time()
     solution = cbs.search()
     runtime = time.time() - start_time
+
 
     if not solution:
         print(f"No solution found for case {output_path.name}")
@@ -358,7 +393,7 @@ def data_gen(input_dict: Dict, output_path: Path, timeout: int = 60, max_attempt
     output = {
         "schedule": solution,
         "cost": env.compute_solution_cost(solution),
-        "runtime": runtime
+        "runtime": runtime,
     }
 
     solution_file = output_path / "solution.yaml"
@@ -389,28 +424,28 @@ def create_solutions(path: Path, num_cases: int, config: Dict):
     
     # Get number of workers for cases
     num_workers = config.get("num_workers", cpu_count())
-    
+
     # Prepare case tasks
     case_tasks = []
     for i in range(0, num_cases):
         seed = np.random.randint(0, 2**31)
         task = (i, path, config, seed)
         case_tasks.append(task)
-    
+
     # Process cases in parallel
     successful = 0
     failed = 0
-    
+
     if num_workers > 1 and len(case_tasks) > 1:
         with Pool(processes=num_workers) as pool:
             results = []
             for result in tqdm(
                 pool.imap_unordered(process_single_case, case_tasks),
                 total=len(case_tasks),
-                desc="Generating cases"
+                desc="Generating cases",
             ):
                 results.append(result)
-        
+
         # Aggregate results
         for successful_ratio, failed_ratio, case_id in results:
             successful += successful_ratio
@@ -421,13 +456,14 @@ def create_solutions(path: Path, num_cases: int, config: Dict):
             successful_ratio, failed_ratio, case_id = process_single_case(task)
             successful += successful_ratio
             failed += failed_ratio
-    
+
     # Print summary
     total_permutations = num_cases * config["nb_permutations"]
     print(f"Generation complete: {successful:.2f} successful cases, {failed:.2f} failed cases")
     print(f"Total Successful permutations: {int(successful * total_permutations)}")
     print(f"Total Failed permutations: {int(failed * total_permutations)}")
     print(f"Cases stored in {path}")
+
 
 def create_path_parameter_directory(base_path: Path, config: Dict):
     """
@@ -437,14 +473,17 @@ def create_path_parameter_directory(base_path: Path, config: Dict):
     nb_agents = config["nb_agents"]
     nb_obstacles = config["nb_obstacles"]
     resolution = config["resolution"]
-    str_bounds ="" 
+    str_bounds = ""
     for b in bounds:
-        str_bounds+=f"{b[1]-b[0]}x"
+        str_bounds += f"{b[1]-b[0]}x"
     str_bounds = str_bounds[:-1]
-    path = base_path / f"map{str_bounds}_resolution{resolution}" / f"agents{nb_agents}_obst{nb_obstacles}"
+    path = (
+        base_path
+        / f"map{str_bounds}_resolution{resolution}"
+        / f"agents{nb_agents}_obst{nb_obstacles}"
+    )
     os.makedirs(path, exist_ok=True)
 
     with open(path / "config.yaml", "w") as f:
         yaml.safe_dump(config, f)
     return path
-
