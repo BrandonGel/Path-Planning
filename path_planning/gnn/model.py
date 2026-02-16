@@ -1,7 +1,6 @@
 import torch
 from torch import nn
-from torch_geometric.nn import GCNConv, GATConv, GATv2Conv
-from torch_geometric.nn import SAGEConv, to_hetero
+from torch_geometric.nn import GCNConv, GATConv, GATv2Conv, TransformerConv
 import torch.nn.functional as F
 import inspect
 
@@ -24,6 +23,12 @@ def get_model(model_type:str,**kwargs):
         gatv2_params.discard('self')  # Remove 'self' from the set
         filtered_kwargs = {k: v for k, v in kwargs.items() if k in gatv2_params}
         return GATv2(**filtered_kwargs)
+    elif model_type == 'transformer':
+        # Filter kwargs to only include parameters accepted by Transformer
+        transformer_params = set(inspect.signature(Transformer.__init__).parameters.keys())
+        transformer_params.discard('self')  # Remove 'self' from the set
+        filtered_kwargs = {k: v for k, v in kwargs.items() if k in transformer_params}
+        return Transformer(**filtered_kwargs)
     else:
         raise ValueError(f"Invalid model type: {model_type}")
 
@@ -272,3 +277,57 @@ class GATv2(GAT):
             
     def __repr__(self):
         return f"GATv2Conv"
+
+class Transformer(GNN):
+
+    def __init__(self, 
+                    node_in_channels:int=-1, node_out_channels:int=1,
+                    num_mlp_start_layers:int=1,node_mlp_start_channels:int=16,
+                    num_gnn_blocks:int=3,gnn_hidden_channels:int=64,
+                    num_mlp_end_layers:int=2, node_mlp_end_channels:int=16,
+                    edge_in_channels:int=None,edge_use_mlp_start:bool=True,edge_mlp_start_channels:int=16,
+                    num_heads:int=4,concat:bool=True,beta=False,dropout:float=0.0,use_edge_dim:bool=False,
+                    activation_function:str='relu'):
+        self.num_heads = num_heads
+        self.concat = concat
+        self.beta = beta
+        self.dropout = dropout
+        super().__init__(node_in_channels=node_in_channels, node_out_channels=node_out_channels,
+                         num_gnn_blocks=num_gnn_blocks,gnn_hidden_channels=gnn_hidden_channels,
+                         num_mlp_start_layers=num_mlp_start_layers,node_mlp_start_channels=node_mlp_start_channels,
+                         num_mlp_end_layers=num_mlp_end_layers,node_mlp_end_channels=node_mlp_end_channels,
+                         edge_in_channels=edge_in_channels,edge_use_mlp_start=edge_use_mlp_start,edge_mlp_start_channels=edge_mlp_start_channels,
+                         use_edge_dim=use_edge_dim,activation_function=activation_function)
+        self.num_gnn_input = self.gnn_hidden_channels*self.num_heads if self.concat else self.gnn_hidden_channels
+        # Build the model structure
+        self.build_model()
+
+    def build_gnn(self):
+        # GNN layers
+        self.gnn = nn.ModuleList()
+        if self.num_gnn_blocks == 1:
+            self.gnn.append(TransformerConv(self.gnn_hidden_channels, self.gnn_hidden_channels,heads=self.num_heads,concat=self.concat,beta=self.beta,dropout=self.dropout,edge_dim=self.edge_gnn_in_channels))
+        else:
+            self.gnn.append(TransformerConv(self.gnn_hidden_channels, self.gnn_hidden_channels,heads=self.num_heads,concat=self.concat,beta=self.beta,dropout=self.dropout,edge_dim=self.edge_gnn_in_channels))
+            
+            for _ in range(1,self.num_gnn_blocks-1):
+                self.gnn.append(self.activation_function)
+                self.gnn.append(TransformerConv(self.num_gnn_input, self.gnn_hidden_channels,heads=self.num_heads,concat=self.concat,beta=self.beta,dropout=self.dropout,edge_dim=self.edge_gnn_in_channels))
+            self.gnn.append(self.activation_function)
+            self.gnn.append(TransformerConv(self.num_gnn_input, self.gnn_hidden_channels,heads=self.num_heads,concat=self.concat,beta=self.beta,dropout=self.dropout,edge_dim=self.edge_gnn_in_channels))
+
+    def build_last_linear(self):
+        # last linear: input is num_gnn_input (heads * gnn_hidden_channels), not gnn_hidden_channels
+        self.last_linear = nn.ModuleList()
+        if self.num_mlp_end_layers == 1:
+            self.last_linear.append(nn.Linear(self.num_gnn_input, self.node_out_channels))
+        else:
+            self.last_linear.append(nn.Linear(self.num_gnn_input, self.node_mlp_end_channels))
+            self.last_linear.append(self.activation_function)
+            for _ in range(1, self.num_mlp_end_layers - 1):
+                self.last_linear.append(nn.Linear(self.node_mlp_end_channels, self.node_mlp_end_channels))
+                self.last_linear.append(self.activation_function)
+            self.last_linear.append(nn.Linear(self.node_mlp_end_channels, self.node_out_channels))
+
+    def __repr__(self):
+        return f"TransformerConv"
