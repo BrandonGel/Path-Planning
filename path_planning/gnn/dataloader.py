@@ -32,6 +32,12 @@ class HeteroData(HeteroDataBase):
         return {edge_type: getattr(self[edge_type], 'edge_attr', None) 
                 for edge_type in self.edge_index_dict.keys()}
 
+    @property
+    def edge_weight_dict(self) -> Dict[EdgeType, Any]:
+        r"""Returns a dictionary of all edge weights of the graph."""
+        return {edge_type: getattr(self[edge_type], 'edge_weight', None) 
+                for edge_type in self.edge_index_dict.keys()}
+
 def add_self_loops_to_edge_type(data, edge_type, fill_value=0.0):
     """
     Adds self-loops to a specific edge type in a HeteroData object.
@@ -106,9 +112,9 @@ def _load_single_graph(files: Tuple[Path, Path]) -> HeteroData:
     node_ndata = data_dict['node_features']
     node_ndata[:,:dims] = node_ndata[:,:dims] / bounds
     node_to_node_edges = data_dict['edge_index'].T
-    node_to_node_edata = data_dict['edge_attr']/ bounds
+    node_to_node_edata = data_dict['edge_attr'].reshape(len(data_dict['edge_attr']),-1)/ bounds
     node_approx_node_edges = data_dict['approx_edge_index'].T
-    node_aprox_node_edata = data_dict['approx_edge_attr']/ bounds
+    node_aprox_node_edata = data_dict['approx_edge_attr'].reshape(len(data_dict['approx_edge_attr']),-1)/ bounds
     binary_id = str(data_dict['binary_id'])
     # Load target
     y: np.ndarray = np.load(target_file)
@@ -176,14 +182,18 @@ class GraphDataset(InMemoryDataset):
                     data['node'].x = torch.tensor(result_dict['node_features'], dtype=torch.float)
                     data['node','to','node'].edge_index = torch.tensor(result_dict['node_to_node_edges'], dtype=torch.long)
                     data['node','to','node'].edge_attr = torch.tensor(result_dict['node_to_node_edata'], dtype=torch.float)
+                    
                     data['node','approx','node'].edge_index = torch.tensor(result_dict['node_approx_node_edges'], dtype=torch.long)
                     data['node','approx','node'].edge_attr = torch.tensor(result_dict['node_approx_node_edata'], dtype=torch.float)
+                    
                     data['node'].y = torch.tensor(result_dict['y'], dtype=torch.float)
                     self.data_binary_id.append(result_dict['binary_id'])
-                    # transform = torch_geometric.transforms.Compose([AddSelfLoops(), RemoveDuplicatedEdges()])
+                    # data = add_self_loops_to_edge_type(data, ('node', 'to', 'node'))                    transform = torch_geometric.transforms.Compose([AddSelfLoops(), RemoveDuplicatedEdges()])
+                    # transform = torch_geometric.transforms.Compose([AddSelfLoops('edge_attr',fill_value=0.0)])
                     transform = torch_geometric.transforms.Compose([AddSelfLoops('edge_attr',fill_value=0.0)])
                     data = transform(data)
-                    
+                    # data['node','to','node'].edge_weight = 1/(1 + data['node','to','node'].edge_attr) 
+                    # data['node','approx','node'].edge_weight = 1/(1 + data['node','approx','node'].edge_attr)
                     if num_hops >= 0:
                         node_mask = data['node'].y > 0 
                         node_idx = torch.where(node_mask)[0]
@@ -282,17 +292,31 @@ class GraphDataset(InMemoryDataset):
 
 
 
-def get_graph_dataset_file_paths(paths:List[Path],config:dict):
+def get_graph_dataset_file_paths(paths:List[Path],config:dict, max_cases:list[int]=None,max_graphs:list[int]=None):
     data_files = []
 
+    if max_cases is not None:
+        if isinstance(max_cases,int):
+            max_cases = [max_cases]*len(paths)
+        if len(max_cases) != len(paths):
+            raise ValueError("max_cases must be a list of the same length as paths")
+    if max_graphs is not None:
+        if isinstance(max_graphs,int):
+            max_graphs = [max_graphs]*len(paths)
+        if len(max_graphs) != len(paths):
+            raise ValueError("max_graphs must be a list of the same length as paths")
+
     #Iterate over all paths
-    for path in paths:
+    for ii,path in enumerate(paths):
         path = Path(path)
         cases = sorted([d for d in path.iterdir() if d.is_dir() and d.name.startswith("case_")],key=lambda x: int(x.name.split('_')[-1]))
         if not cases:
             print("No cases found to process")
             return
 
+        if max_cases is not None:   
+            cases_end = min(max_cases[ii],len(cases))
+            cases = cases[:cases_end]
         #Iterate over all cases
         for case_dir in cases:
             road_map_type = config["road_map_type"] if "road_map_type" in config else "planar"
@@ -302,7 +326,11 @@ def get_graph_dataset_file_paths(paths:List[Path],config:dict):
             _,y_type_name = generate_target_space(target_space,None,None,True)
             if not roadmap_dir.exists():
                 continue
+
             graphs_dirs = sorted([d for d in roadmap_dir.iterdir()], key = lambda x: int(x.name.split('_')[-1]))
+            if max_graphs is not None:
+                graphs_dirs_end = min(max_graphs[ii],len(graphs_dirs))
+                graphs_dirs = graphs_dirs[:graphs_dirs_end]
 
             #Iterate over all graphs
             for ii in range(len(graphs_dirs)):
