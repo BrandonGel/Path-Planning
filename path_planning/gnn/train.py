@@ -5,6 +5,7 @@ import torch.nn.functional as F
 import torch
 import wandb
 from time import time
+from path_planning.gnn.loss import LossFunction
 
 def split_dataset(graph_dataset:GraphDataset,batch_size=128,test_size=0.1,random_state=42,num_workers=1):
 
@@ -22,7 +23,7 @@ def split_dataset(graph_dataset:GraphDataset,batch_size=128,test_size=0.1,random
 
 
 
-def train(train_loader,model,optimizer,device='cuda:0',loss_function=F.binary_cross_entropy_with_logits,run: wandb.Run =None):
+def train(train_loader,model,optimizer,device='cuda:0',loss_function=LossFunction,run: wandb.Run =None):
     model.train()
     train_loss = []
     train_time = []
@@ -33,7 +34,9 @@ def train(train_loader,model,optimizer,device='cuda:0',loss_function=F.binary_cr
         out = model(batch.x_dict, batch.edge_index_dict,batch.edge_attr_dict)
         loss = loss_function(out['node'],
                                batch['node'].y.reshape(-1,1),
-                               batch.edge_index_dict)
+                               batch.edge_index_dict,
+                               batch.edge_attr_dict,
+                               batch.edge_weight_dict)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
         optimizer.step()
@@ -47,7 +50,7 @@ def train(train_loader,model,optimizer,device='cuda:0',loss_function=F.binary_cr
             })
     return train_loss,train_time
 
-def test(test_loader,model,device='cuda:0',loss_function=F.binary_cross_entropy_with_logits,run: wandb.Run =None):
+def test(test_loader,model,device='cuda:0',loss_function=LossFunction,run: wandb.Run =None):
     model.eval()
     test_loss = []
     test_time = []
@@ -58,7 +61,8 @@ def test(test_loader,model,device='cuda:0',loss_function=F.binary_cross_entropy_
             out = model(batch.x_dict, batch.edge_index_dict,batch.edge_attr_dict)
             loss = loss_function(out['node'],
                                batch['node'].y.reshape(-1,1),
-                               batch.edge_index_dict)
+                               batch.edge_index_dict,
+                               batch.edge_weight_dict)
             et = time()
             test_time.append(et-st)
             test_loss.append(float(loss.item()))
