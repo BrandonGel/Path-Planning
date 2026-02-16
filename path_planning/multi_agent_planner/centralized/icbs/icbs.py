@@ -5,148 +5,10 @@ original author: Ashwin Bose (@atb033)
 description: This file implements the Conflict-based search algorithm for multi-agent path planning. Modified from the original implementation to work with the new common environment.
 """
 
-from typing import Any
-from path_planning.common.environment.node import Node
-from path_planning.multi_agent_planner.centralized.cbs.a_star import AStar
-from path_planning.multi_agent_planner.centralized.cbs.cbs import Environment
+from path_planning.multi_agent_planner.centralized.cbs.cbs import Environment, Constraints, HighLevelNode, CBS,Conflict
 import heapq
 import time
-from math import fabs
-from itertools import count, combinations
-from copy import deepcopy
-
-
-class Location(object):
-    def __init__(self, point: tuple = None):
-        self.point = tuple(point) if point is not None else None
-
-    def __hash__(self):
-        return hash(self.point)
-
-    def __eq__(self, other):
-        return self.point == other.point
-
-    def __str__(self):
-        return str(self.point)
-
-    def __len__(self):
-        return len(self.point)
-
-    def __getitem__(self, index):
-        return self.point[index]
-
-    def __add__(self, other):
-        return Location(tuple(self.point + other.point))
-
-
-class State(object):
-    def __init__(self, time, location):
-        self.time = time
-        self.location = location
-
-    def __eq__(self, other):
-        return self.time == other.time and self.location == other.location
-
-    def __hash__(self):
-        return hash(str(self.time) + str(self.location))
-
-    def is_equal_except_time(self, state):
-        return self.location == state.location
-
-    def __str__(self):
-        return str((self.time, self.location))
-
-
-class Conflict(object):
-    VERTEX = 1
-    EDGE = 2
-
-    def __init__(self):
-        self.time = -1
-        self.type = -1
-
-        self.agent_1 = ""
-        self.agent_2 = ""
-
-        self.location_1 = Location()
-        self.location_2 = Location()
-
-    def __str__(self):
-        return (
-            "("
-            + str(self.time)
-            + ", "
-            + self.agent_1
-            + ", "
-            + self.agent_2
-            + ", "
-            + str(self.location_1)
-            + ", "
-            + str(self.location_2)
-            + ")"
-        )
-
-
-class VertexConstraint(object):
-    def __init__(self, time, location):
-        self.time = time
-        self.location = location
-
-    def __eq__(self, other):
-        return self.time == other.time and self.location == other.location
-
-    def __hash__(self):
-        return hash(str(self.time) + str(self.location))
-
-    def __str__(self):
-        return "(" + str(self.time) + ", " + str(self.location) + ")"
-
-
-class EdgeConstraint(object):
-    def __init__(self, time, location_1, location_2):
-        self.time = time
-        self.location_1 = location_1
-        self.location_2 = location_2
-
-    def __eq__(self, other):
-        return (
-            self.time == other.time
-            and self.location_1 == other.location_1
-            and self.location_2 == other.location_2
-        )
-
-    def __hash__(self):
-        return hash(str(self.time) + str(self.location_1) + str(self.location_2))
-
-    def __str__(self):
-        return (
-            "("
-            + str(self.time)
-            + ", "
-            + str(self.location_1)
-            + ", "
-            + str(self.location_2)
-            + ")"
-        )
-
-
-class Constraints(object):
-    def __init__(self):
-        self.vertex_constraints = set()
-        self.edge_constraints = set()
-
-    def add_constraint(self, other):
-        self.vertex_constraints |= other.vertex_constraints
-        self.edge_constraints |= other.edge_constraints
-
-    def __str__(self):
-        return (
-            "VC: "
-            + str([str(vc) for vc in self.vertex_constraints])
-            + "EC: "
-            + str([str(ec) for ec in self.edge_constraints])
-        )
-
+from path_planning.multi_agent_planner.centralized.icbs.a_star import AStar
 
 class IEnvironment(Environment):
     def __init__(
@@ -166,119 +28,19 @@ class IEnvironment(Environment):
             velocity,
             use_constraint_sweep,
         )
+        self.a_star = AStar(self, astar_max_iterations,radius)
 
-    def get_conflicts(self, solution):
-        max_t = max([len(plan) for plan in solution.values()])
-        result = Conflict()
-        conflicts = []
-
-        for t in range(max_t):
-            if self.radius == 0:
-                for agent_1, agent_2 in combinations(solution.keys(), 2):
-                    state_1 = self.get_state(agent_1, solution, t)
-                    state_2 = self.get_state(agent_2, solution, t)
-
-                    # Vertex conflict check (default)
-                    if state_1.is_equal_except_time(state_2):
-                        result.time = t
-                        result.type = Conflict.VERTEX
-                        result.location_1 = state_1.location
-                        result.agent_1 = agent_1
-                        result.agent_2 = agent_2
-                        conflicts.append(result)
-
-            for agent_1, agent_2 in combinations(solution.keys(), 2):
-                state_1a = self.get_state(agent_1, solution, t)
-                state_1b = self.get_state(agent_1, solution, t + 1)
-
-                state_2a = self.get_state(agent_2, solution, t)
-                state_2b = self.get_state(agent_2, solution, t + 1)
-
-                if self.radius == 0:
-                    # Edge conflict check (default)
-                    if state_1a.is_equal_except_time(
-                        state_2b
-                    ) and state_1b.is_equal_except_time(state_2a):
-                        result.time = t
-                        result.type = Conflict.EDGE
-                        result.agent_1 = agent_1
-                        result.agent_2 = agent_2
-                        result.location_1 = state_1a.location
-                        result.location_2 = state_1b.location
-                        conflicts.append(result)
-                    continue
-
-                # Edge conflict check (use constraint sweep)
-                if self.use_constraint_sweep:
-                    state1_edges_locations = self._get_constraint_sweep_cached(
-                        state_1a.location.point,
-                        state_1b.location.point,
-                        self.velocity,
-                        2 * self.radius,
-                    )
-                    state2_edges_locations = self._get_constraint_sweep_cached(
-                        state_2a.location.point,
-                        state_2b.location.point,
-                        self.velocity,
-                        2 * self.radius,
-                    )
-                    edge_1 = (state_1a.location.point, state_1b.location.point)
-                    edge_2 = (state_2a.location.point, state_2b.location.point)
-                    edge_conflict = (
-                        edge_1 in state2_edges_locations
-                        or edge_2 in state1_edges_locations
-                    )
-                else:
-                    # Edge conflict check (use distances based on radius and vertices)
-                    edge_conflict = self._get_constraint_segment_cached(
-                        state_1a.location.point,
-                        state_1b.location.point,
-                        state_2a.location.point,
-                        state_2b.location.point,
-                        self.velocity,
-                        self.radius,
-                    )
-                if edge_conflict:
-                    result.time = t
-                    result.type = Conflict.EDGE
-                    result.agent_1 = agent_1
-                    result.agent_2 = agent_2
-                    result.location_1 = state_1a.location
-                    result.location_2 = state_1b.location
-                    conflicts.append(result)
-
-        return conflicts
-
-    def compute_agent_solution(self, target_agent, curr_solution):
-        for agent in self.agent_dict.keys():
-            if agent == target_agent:
-                self.constraints = self.constraint_dict.setdefault(agent, Constraints())
-                local_solution = self.a_star.search(agent)
-                if not local_solution:
-                    return False
-                curr_solution.update({agent: local_solution})
-        return curr_solution
+    def compute_agent_solution(self, target_agent, curr_solution,curr_solution_cost):
+        self.constraints = self.constraint_dict.setdefault(target_agent, Constraints())
+        local_solution, local_cost = self.a_star.search(target_agent)
+        if not local_solution:
+            return False
+        curr_solution[target_agent] = local_solution
+        curr_solution_cost[target_agent] = local_cost
+        return curr_solution, curr_solution_cost
 
 
-class HighLevelNode(object):
-    def __init__(self):
-        self.solution = {}
-        self.constraint_dict = {}
-        self.cost = 0
-
-    def __eq__(self, other):
-        if not isinstance(other, type(self)):
-            return NotImplemented
-        return self.solution == other.solution and self.cost == other.cost
-
-    def __hash__(self):
-        return hash(self.cost)
-
-    def __lt__(self, other):
-        return self.cost < other.cost
-
-
-class ICBS(object):
+class ICBS(CBS):
     def __init__(
         self,
         environment: IEnvironment,
@@ -293,31 +55,67 @@ class ICBS(object):
                            enforced. If exceeded, the search terminates early
                            and returns an empty solution.
         """
+        super().__init__(environment, time_limit, max_iterations, verbose)
         self.env = environment
-        self.verbose = verbose
-        self.open_list = []  # for fast membership checks
-        self.closed_set = set()
-        self.time_limit = time_limit
-        self.max_iterations = max_iterations
-        self.counter = count()
 
-    def conflict_cost(self, P, conflict):
+    def _get_best_conflict(self, P, conflict_list):
+        best_conflict = None
+        best_score = float("inf")
+        best_costs = None
+        best_paths = None
+
+        for conflict in conflict_list:
+            costs, paths = self.get_conflict_cost(P, conflict)
+            c_vals = list(costs.values())
+
+            # Scoring: Cardinal (0), Semi-Cardinal (1), Non-Cardinal (2)
+            if all(c > 0 for c in c_vals): score = 0
+            elif any(c > 0 for c in c_vals): score = 1
+            else: score = 2
+
+            if score < best_score:
+                best_score = score
+                best_conflict = conflict
+                best_costs = costs
+                best_paths = paths
+                if score == 0: break  # Found cardinal, stop
+
+        return best_conflict, best_costs, best_paths, best_score
+
+    def get_conflict_cost(self, P: HighLevelNode, conflict: Conflict):
         constraint_dict = self.env.create_constraints_from_conflict(conflict)
         costs = {}
+        paths = {}
+        
+        # Save original constraint dict to restore after evaluation
+        original_constraint_dict = self.env.constraint_dict
 
         for agent in constraint_dict:
-            temp_constraints = deepcopy(P.constraint_dict)
-            temp_constraints[agent].add_constraint(constraint_dict[agent])
+            # Selective copy: only copy the modified agent's constraints
+            temp_constraints = {}
+            for a in P.constraint_dict.keys():
+                if a == agent:
+                    new_constraints = Constraints()
+                    new_constraints.vertex_constraints = P.constraint_dict[a].vertex_constraints.copy()
+                    new_constraints.edge_constraints = P.constraint_dict[a].edge_constraints.copy()
+                    new_constraints.add_constraint(constraint_dict[agent])
+                    temp_constraints[a] = new_constraints
+                else:
+                    temp_constraints[a] = P.constraint_dict[a]
 
             self.env.constraint_dict = temp_constraints
-            path = self.env.a_star.search(agent)
+            self.env.constraints = self.env.constraint_dict.setdefault(agent, Constraints())
+            path, cost = self.env.a_star.search(agent)
             if not path:
                 costs[agent] = float("inf")
+                paths[agent] = None
             else:
-                temp_solution = P.solution.copy()
-                temp_solution[agent] = path
-                costs[agent] = self.env.compute_solution_cost(temp_solution) - P.cost
-        return costs
+                costs[agent] = cost - P.solution_cost[agent]
+                paths[agent] = path
+        
+        # Restore original constraint dict
+        self.env.constraint_dict = original_constraint_dict
+        return costs, paths
 
     def search(self):
         start = HighLevelNode()
@@ -325,13 +123,13 @@ class ICBS(object):
         for agent in self.env.agent_dict.keys():
             start.constraint_dict[agent] = Constraints()
 
-        start.solution = self.env.compute_solution()
+        start.solution, start.solution_cost = self.env.compute_solution()
         if not start.solution:
             if self.verbose:
                 print("No initial solution found")
             return {}
 
-        start.cost = self.env.compute_solution_cost(start.solution)
+        start.cost = sum(start.solution_cost.values())
 
         # Add start node to heap
         heapq.heappush(self.open_list, (start.cost, next(self.counter), start))
@@ -365,113 +163,76 @@ class ICBS(object):
             self.env.constraint_dict = P.constraint_dict
 
             # First improvement, we check all of the conflicts and grab the cardinal conflicts to solve first
-            conflict_list = self.env.get_conflicts(P.solution)
+            conflict_list = self.env.get_conflicts(P.solution,get_first_conflict=False)
 
             if not conflict_list:
                 if self.verbose:
                     print("solution found")
                 return self.generate_plan(P.solution)
 
-            best_conflict = None
-            best_conflict_score = float("inf")
+            # 1. Prioritize Conflicts (Cardinal, Semi, Non)
+            best_conflict, best_costs, best_paths, score = self._get_best_conflict(P, conflict_list)
 
-            for conflict in conflict_list:
-                costs = self.conflict_cost(P, conflict=conflict)
-                c_vals = list(costs.values())
-
-                if all(c > 0 for c in c_vals):
-                    score = 0  # cardinal, highest priority, no matter what solution is used the cost will increase
-                elif any(c > 0 for c in c_vals):
-                    score = 1  # semi-cardinal, some solutions will cause cost increase but not all
-                else:
-                    score = 2  # non-cardinal, there is no cost to fix this solution
-
-                score += min(c_vals)  # smaller min cost increase is better
-
-                if score < best_conflict_score:
-                    best_conflict_score = score
-                    best_conflict = conflict
-
-            constraint_dict = self.env.create_constraints_from_conflict(best_conflict)
-
-            # Second improvement, grabs the "best" agents (cheapest ones to resolve) and only adds those to heap
-            min_cost = min(costs.values())
-            best_agents = [a for a, c in costs.items() if c == min_cost]
-
-            # print("Costs:", costs)
-            # print("Best agents:", best_agents)
-            # print("Constraint dict:", constraint_dict)
-
-            for agent in best_agents:
-                new_node = HighLevelNode()
-                new_node.solution = P.solution.copy()
-
-                # Selective deep copy only for affected agent's constraints
-                new_node.constraint_dict = {}
-                for a in self.env.agent_dict.keys():
-                    if a == agent:
-                        # Deep copy only the modified agent's constraints
-                        new_constraints = Constraints()
-                        new_constraints.vertex_constraints = P.constraint_dict[
-                            a
-                        ].vertex_constraints.copy()
-                        new_constraints.edge_constraints = P.constraint_dict[
-                            a
-                        ].edge_constraints.copy()
-                        new_constraints.add_constraint(constraint_dict[agent])
-                        new_node.constraint_dict[a] = new_constraints
-                    else:
-                        # Share unchanged constraints
-                        new_node.constraint_dict[a] = P.constraint_dict[a]
-
-                self.env.constraint_dict = new_node.constraint_dict
-
-                new_node.solution = self.env.compute_agent_solution(
-                    target_agent=agent, curr_solution=new_node.solution
-                )
-                if not new_node.solution:
-                    continue
-                new_node.cost = self.env.compute_solution_cost(new_node.solution)
-                heapq.heappush(
-                    self.open_list, (new_node.cost, next(self.counter), new_node)
-                )
+            # 2. BYPASS STRATEGY
+            # If any agent can resolve the conflict with 0 cost increase, check for bypass
+            bypass_found = False
+            for agent, cost_inc in best_costs.items():
+                if cost_inc == 0:
+                    # Attempt bypass: get a same-cost path that avoids this conflict
+                    temp_constraints = self._get_updated_constraints(P, agent, best_conflict)
+                    self.env.constraint_dict = temp_constraints
+                    new_path, _ = self.env.a_star.search(agent, solution=P.solution)
+                    
+                    if new_path:
+                        temp_sol = P.solution.copy()
+                        temp_sol[agent] = new_path
+                        if len(self.env.get_conflicts(temp_sol, False)) < len(conflict_list):
+                            P.solution = temp_sol
+                            heapq.heappush(self.open_list, (P.cost, next(self.counter), P))
+                            bypass_found = True
+                            break
+            
+            if bypass_found:
+                continue
+            
+            # Branching (if no bypass)
+            self._branch(P, best_conflict, best_costs)
             iterations += 1
         return {}
 
-    def _get_state_key(self, node):
-        """Generate a hashable state key for closed set checking."""
-        # Create a frozen representation of the solution
-        solution_tuple = tuple(
-            (agent, tuple((s.time, s.location) for s in path))
-            for agent, path in sorted(node.solution.items())
-        )
-        return solution_tuple
 
-    def generate_plan(self, solution):
-        plan = {}
-        for agent, path in solution.items():
-            path_dict_list = []
-            for state in path:
-                if len(state.location) == 2:
-                    path_dict_list.append(
-                        {
-                            "t": state.time,
-                            "x": state.location[0],
-                            "y": state.location[1],
-                        }
-                    )
-                elif len(state.location) == 3:
-                    path_dict_list.append(
-                        {
-                            "t": state.time,
-                            "x": state.location[0],
-                            "y": state.location[1],
-                            "z": state.location[2],
-                        }
-                    )
-                else:
-                    raise ValueError(
-                        f"Invalid location dimension: {len(state.location)}"
-                    )
-            plan[agent] = path_dict_list
-        return plan
+    def _get_updated_constraints(self, P, agent, conflict):
+        """Helper to create a new constraint dictionary for a specific branch/bypass."""
+        new_constraints_dict = {}
+        conflict_constraints = self.env.create_constraints_from_conflict(conflict)
+        
+        for a in self.env.agent_dict.keys():
+            if a == agent:
+                # Deep copy and add new constraint for the target agent
+                nc = Constraints()
+                nc.vertex_constraints = P.constraint_dict[a].vertex_constraints.copy()
+                nc.edge_constraints = P.constraint_dict[a].edge_constraints.copy()
+                nc.add_constraint(conflict_constraints[agent])
+                new_constraints_dict[a] = nc
+            else:
+                new_constraints_dict[a] = P.constraint_dict[a]
+        return new_constraints_dict
+
+    def _branch(self, P, conflict, costs):
+        """Expands the high-level tree by creating child nodes."""
+        for agent in costs.keys():
+            if costs[agent] == float('inf'): continue # Prune if no path exists
+
+            new_node = HighLevelNode()
+            new_node.solution = P.solution.copy()
+            new_node.solution_cost = P.solution_cost.copy()
+            new_node.constraint_dict = self._get_updated_constraints(P, agent, conflict)
+            
+            self.env.constraint_dict = new_node.constraint_dict
+            # Re-plan only the affected agent
+            res = self.env.compute_agent_solution(agent, new_node.solution, new_node.solution_cost)
+            
+            if res:
+                new_node.solution, new_node.solution_cost = res
+                new_node.cost = sum(new_node.solution_cost.values())
+                heapq.heappush(self.open_list, (new_node.cost, next(self.counter), new_node))

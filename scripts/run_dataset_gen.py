@@ -48,7 +48,7 @@ if __name__ == "__main__":
         help="number of obstacles or obstacle density",
     )
     parser.add_argument(
-        "-p", "--nb_permutations", type=int, default=10, help="number of permutations"
+        "-p", "--nb_permutations", type=int, default=64, help="number of permutations"
     )
     parser.add_argument(
         "-r", "--resolution", type=float, default=1.0, help="resolution of the map"
@@ -63,7 +63,7 @@ if __name__ == "__main__":
         "-w",
         "--num_workers",
         type=int,
-        default=None,
+        default=1,
         help="number of parallel workers for cases (default: auto-detect CPU cores)",
     )
     parser.add_argument(
@@ -81,11 +81,11 @@ if __name__ == "__main__":
         help="max attempts for the solver",
     )
     parser.add_argument(
-        "-i",
-        "--improved",
+        "-central",
+        "--centralized_alg_name",
         type=str,
-        default="no",
-        help="enable icbs? (yes or no)",
+        default="cbs",
+        help="centralized algorithm name (cbs or icbs)",
     )
     args = parser.parse_args()
 
@@ -131,8 +131,7 @@ if __name__ == "__main__":
             "num_workers": num_workers,
             "timeout": args.timeout,
             "max_attempts": args.max_attempts,
-            # "mapf_alg": args.mapf_alg,
-            "improved": args.improved,
+            "centralized_alg_name": args.centralized_alg_name,
         }
     path = create_path_parameter_directory(base_path, config)
     create_solutions(path, args.num_cases, config)
