@@ -112,9 +112,11 @@ def _load_single_graph(files: Tuple[Path, Path]) -> HeteroData:
     node_ndata = data_dict['node_features']
     node_ndata[:,:dims] = node_ndata[:,:dims] / bounds
     node_to_node_edges = data_dict['edge_index'].T
-    node_to_node_edata = data_dict['edge_attr'].reshape(len(data_dict['edge_attr']),-1)/ bounds
+    node_to_node_edata = data_dict['edge_attr'].reshape(len(data_dict['edge_attr']),-1)
+    node_to_node_edata = (node_to_node_edata-node_to_node_edata.min(axis=0,keepdims=True))/node_to_node_edata.max(axis=0,keepdims=True)
     node_approx_node_edges = data_dict['approx_edge_index'].T
-    node_aprox_node_edata = data_dict['approx_edge_attr'].reshape(len(data_dict['approx_edge_attr']),-1)/ bounds
+    node_aprox_node_edata = data_dict['approx_edge_attr'].reshape(len(data_dict['approx_edge_attr']),-1)
+    node_aprox_node_edata = (node_aprox_node_edata-node_aprox_node_edata.min(axis=0,keepdims=True))/node_aprox_node_edata.max(axis=0,keepdims=True)
     binary_id = str(data_dict['binary_id'])
     # Load target
     y: np.ndarray = np.load(target_file)
