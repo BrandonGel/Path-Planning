@@ -1,6 +1,6 @@
 import torch
 from torch import nn
-from torch_geometric.nn import GCNConv, GATConv
+from torch_geometric.nn import GCNConv, GATConv, GATv2Conv
 from torch_geometric.nn import SAGEConv, to_hetero
 import torch.nn.functional as F
 import inspect
@@ -18,6 +18,12 @@ def get_model(model_type:str,**kwargs):
         gat_params.discard('self')  # Remove 'self' from the set
         filtered_kwargs = {k: v for k, v in kwargs.items() if k in gat_params}
         return GAT(**filtered_kwargs)
+    elif model_type == 'gatv2':
+        # Filter kwargs to only include parameters accepted by GATv2
+        gatv2_params = set(inspect.signature(GATv2.__init__).parameters.keys())
+        gatv2_params.discard('self')  # Remove 'self' from the set
+        filtered_kwargs = {k: v for k, v in kwargs.items() if k in gatv2_params}
+        return GATv2(**filtered_kwargs)
     else:
         raise ValueError(f"Invalid model type: {model_type}")
 
@@ -176,7 +182,6 @@ class GCN(GNN):
         return f"GCNConv"
 
 class GAT(GNN):
-
     def __init__(self, 
                     node_in_channels:int=-1, node_out_channels:int=1,
                     num_mlp_start_layers:int=1,node_mlp_start_channels:int=16,
@@ -230,3 +235,40 @@ class GAT(GNN):
 
     def __repr__(self):
         return f"GATConv"
+
+class GATv2(GAT):
+
+    def __init__(self, 
+                    node_in_channels:int=-1, node_out_channels:int=1,
+                    num_mlp_start_layers:int=1,node_mlp_start_channels:int=16,
+                    num_gnn_blocks:int=3,gnn_hidden_channels:int=64,
+                    num_mlp_end_layers:int=2, node_mlp_end_channels:int=16,
+                    edge_in_channels:int=None,edge_use_mlp_start:bool=True,edge_mlp_start_channels:int=16,
+                    num_heads:int=4,concat:bool=True,residual:bool=False,dropout:float=0.0,use_edge_dim:bool=False,
+                    activation_function:str='relu'):
+        super().__init__(node_in_channels=node_in_channels, node_out_channels=node_out_channels,
+                         num_gnn_blocks=num_gnn_blocks,gnn_hidden_channels=gnn_hidden_channels,
+                         num_mlp_start_layers=num_mlp_start_layers,node_mlp_start_channels=node_mlp_start_channels,
+                         num_mlp_end_layers=num_mlp_end_layers,node_mlp_end_channels=node_mlp_end_channels,
+                         edge_in_channels=edge_in_channels,edge_use_mlp_start=edge_use_mlp_start,edge_mlp_start_channels=edge_mlp_start_channels,
+                         use_edge_dim=use_edge_dim,activation_function=activation_function)
+        self.num_gnn_input = self.gnn_hidden_channels*self.num_heads if self.concat else self.gnn_hidden_channels
+        # Build the model structure
+        self.build_model()
+
+    def build_gnn(self):
+        # GNN layers
+        self.gnn = nn.ModuleList()
+        if self.num_gnn_blocks == 1:
+            self.gnn.append(GATv2Conv(self.gnn_hidden_channels, self.gnn_hidden_channels,heads=self.num_heads,concat=self.concat,residual=self.residual,dropout=self.dropout,edge_dim=self.edge_gnn_in_channels))
+        else:
+            self.gnn.append(GATv2Conv(self.gnn_hidden_channels, self.gnn_hidden_channels,heads=self.num_heads,concat=self.concat,residual=self.residual,dropout=self.dropout,edge_dim=self.edge_gnn_in_channels))
+            
+            for _ in range(1,self.num_gnn_blocks-1):
+                self.gnn.append(self.activation_function)
+                self.gnn.append(GATv2Conv(self.num_gnn_input, self.gnn_hidden_channels,heads=self.num_heads,concat=self.concat,residual=self.residual,dropout=self.dropout,edge_dim=self.edge_gnn_in_channels))
+            self.gnn.append(self.activation_function)
+            self.gnn.append(GATv2Conv(self.num_gnn_input, self.gnn_hidden_channels,heads=self.num_heads,concat=self.concat,residual=self.residual,dropout=self.dropout,edge_dim=self.edge_gnn_in_channels))
+            
+    def __repr__(self):
+        return f"GATv2Conv"
