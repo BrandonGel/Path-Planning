@@ -22,6 +22,7 @@ from multiprocessing import cpu_count
 from path_planning.gnn.model import get_model
 from path_planning.gnn.optimizer import get_optimizer
 from path_planning.utils.util import set_global_seed,set_train_config
+import yaml
 
 # Suppress Python warnings
 warnings.filterwarnings('ignore', category=UserWarning, module='torch.fx.experimental.symbolic_shapes')
@@ -66,10 +67,10 @@ def run_train(train_config: dict,num_workers: int = None, use_cuda: bool = True)
 
 
     # instanziate the model
-    train_config['model']['in_channels'] = graph_dataset[0].x_dict['node'].shape[1] 
-    model = get_model(model_type=train_config['model']['type'],**train_config['model'])
-    model_in_channels = model.in_channels
-    model = to_hetero(model,graph_dataset[0].metadata(),aggr=train_config['model']['to_hetero_aggr']).to(device)
+    # train_config['model']['in_channels'] = graph_dataset[0].x_dict['node'].shape[1] 
+    homogeneous_model = get_model(model_type=train_config['model']['type'],**train_config['model'])
+    model_in_channels = homogeneous_model.node_in_channels
+    model = to_hetero(homogeneous_model,graph_dataset[0].metadata(),aggr=train_config['model']['to_hetero_aggr']).to(device)
     
     # Initialize lazy modules before creating optimizer
     if model_in_channels == -1:
@@ -176,24 +177,8 @@ if __name__ == "__main__":
     parser.add_argument("-seed","--seed",type=int, default=42, help="seed")
     args = parser.parse_args()
     
-
-    # Setting the train config    
-    folder_path = [
-        # Path('/home/bho36/Documents/code/Path-Planning/benchmark/train/map32x32_resolution1.0/agents8_obst0.1'),
-        # Path('/home/bho36/Dropbox/Team_Path_Planning/brandon_graph_data/train/map32.0x32.0_resolution1.0/agents1_obst0.1'),
-        # Path('/home/bho36/Dropbox/Team_Path_Planning/brandon_graph_data/train/map32.0x32.0_resolution1.0/agents2_obst0.1'),
-        # Path('/home/bho36/Dropbox/Team_Path_Planning/brandon_graph_data/train/map32.0x32.0_resolution1.0/agents4_obst0.1'),
-        # Path('/home/bho36/Documents/code/Path-Planning/benchmark/train/map32.0x32.0_resolution1.0/agents8_obst0.1'),
-        # Path('/home/bho36/Documents/code/Path-Planning/benchmark/train/map32.0x32.0_resolution1.0/agents16_obst0.1'),
-        # Path('/home/bho36/Documents/code/Path-Planning/benchmark/train/map16.0x16.0_resolution1.0/agents4_obst0.1'),
-        Path('/home/bho36/Dropbox/Team_Path_Planning/brandon_graph_data/train/map32x32_resolution1.0/agents1_obst0.1'),
-        Path('/home/bho36/Dropbox/Team_Path_Planning/brandon_graph_data/train/map32x32_resolution1.0/agents2_obst0.1'),
-        Path('/home/bho36/Dropbox/Team_Path_Planning/brandon_graph_data/train/map32x32_resolution1.0/agents4_obst0.1'),
-    ]
-    import yaml
     with open(args.config_file, 'r') as f:
         train_config = yaml.load(f,Loader=yaml.FullLoader)
-    train_config['dataset']['folder_path'] = folder_path
     train_config = set_train_config(train_config,args)
 
     wandb.login()
