@@ -1,4 +1,3 @@
-from platform import node
 from typing import List, Tuple
 import numpy as np
 from scipy.spatial import KDTree, Delaunay
@@ -624,7 +623,7 @@ class GraphSampler(Grid):
         return point_int
 
     def clear_data(self):
-        self.road_map = {}
+        self.road_map = []
         self.edges = []
         self.edge_indices_dict = {}
         self.edge_weights = []
