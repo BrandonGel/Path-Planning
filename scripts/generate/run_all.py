@@ -31,11 +31,12 @@ from multiprocessing import cpu_count
 from path_planning.data_generation.dataset_ground_truth import create_solutions,create_path_parameter_directory
 from path_planning.data_generation.dataset_label import label_dataset
 from path_planning.data_generation.dataset_generate import generate_graph_samples
-
+from path_planning.utils.util import set_global_seed
 if __name__ == "__main__":
     """Main entry point for dataset generation."""
 
     parser = argparse.ArgumentParser()
+    parser.add_argument("-seed","--seed",type=int, default=42, help="seed")
     parser.add_argument("-s","--path",type=str, default='benchmark/train', help="input file containing map and obstacles")
     parser.add_argument("-b","--bounds",type=float, nargs='+', default=[0,32.0,0,32.0], help="bounds of the map as x_min x_max y_min y_max (e.g., 0 32.0 0 32.0)")
     parser.add_argument("-n","--nb_agents",type=int, default=4, help="number of agents")
@@ -48,6 +49,7 @@ if __name__ == "__main__":
     parser.add_argument("-w","--num_workers",type=int, default=None, help="number of parallel workers for cases (default: auto-detect CPU cores)")
     parser.add_argument("-t","--timeout",type=int, default=60, help="timeout for the solver in seconds")
     parser.add_argument("-m","--max_attempts",type=int, default=10000, help="max attempts for the solver")
+    parser.add_argument("-ca","--centralized_alg_name",type=str, default='cbs', help="centralized algorithm name")
     parser.add_argument("-v","--visualize",action='store_true', help="visualize the density map")
     parser.add_argument("-ds","--use_discrete_space",type=bool, default=False, help="use discrete space")
     parser.add_argument("-ns","--num_samples",type=int, default=1000, help="number of samples")
@@ -85,6 +87,7 @@ if __name__ == "__main__":
             data_gen_config = yaml.load(yaml_file, Loader=yaml.FullLoader)
     else:
         data_gen_config = {
+            "seed": args.seed,
             "bounds": bounds,
             "resolution": args.resolution,
             "nb_agents": args.nb_agents,
@@ -92,6 +95,7 @@ if __name__ == "__main__":
             "nb_permutations": args.nb_permutations,
             "timeout": args.timeout,
             "max_attempts": args.max_attempts,
+            "centralized_alg_name": args.centralized_alg_name,
         }
     path = create_path_parameter_directory(base_path, data_gen_config)
     create_solutions(path, args.num_cases, data_gen_config,num_workers=num_workers)
@@ -99,6 +103,7 @@ if __name__ == "__main__":
 
 
     target_gen_config = {
+            "seed": args.seed,
             "use_discrete_space": args.use_discrete_space,
             "num_samples": args.num_samples,
             "num_neighbors": args.num_neighbors,

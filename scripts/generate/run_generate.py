@@ -31,6 +31,7 @@ if __name__ == "__main__":
     """Main entry point for dataset generation."""
 
     parser = argparse.ArgumentParser()
+    parser.add_argument("-seed","--seed",type=int, default=42, help="seed")
     parser.add_argument("-s","--path",type=str, nargs='+', default=['benchmark/train/map32.0x32.0_resolution1.0/agents4_obst0.1'], help="input file containing map and obstacles")
     parser.add_argument("-ds","--use_discrete_space",type=bool, default=False, help="use discrete space")
     parser.add_argument("-ns","--num_samples",type=int, default=1000, help="number of samples")
@@ -51,6 +52,7 @@ if __name__ == "__main__":
     folder_path = [Path(p) for p in args.path]
     num_workers = args.num_workers if args.num_workers is not None else cpu_count()
     config = {
+            "seed": args.seed,
             "use_discrete_space": args.use_discrete_space,
             "num_samples": args.num_samples,
             "num_neighbors": args.num_neighbors,
@@ -65,7 +67,4 @@ if __name__ == "__main__":
             "samp_from_prob_map_ratio": args.samp_from_prob_map_ratio,
         }
     for file_path in folder_path:
-        try:
-            generate_graph_samples(file_path,config,num_workers=num_workers)
-        except Exception as e:
-            print(f"Error generating graph samples for {file_path}: {e}")
+        generate_graph_samples(file_path,config,num_workers=num_workers)

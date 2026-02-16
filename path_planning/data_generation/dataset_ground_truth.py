@@ -14,7 +14,7 @@ import numpy as np
 from typing import Any, Dict, List, Tuple, Optional
 from path_planning.multi_agent_planner.centralized.get_centralized import get_centralized
 from path_planning.common.environment.map.graph_sampler import GraphSampler
-from python_motion_planning.common import TYPES
+from path_planning.utils.util import set_global_seed
 import math
 import time
 from tqdm import tqdm
@@ -35,7 +35,6 @@ def shuffle_agents_goals(inpt: Dict, agent_goal_index: List[int]) -> Dict:
         agents[i]["goal"] = start_goals[agent_goal_index[i + len(agents)]]
     return agents
 
-
 def gen_input(
     bounds: List[List[float]],
     nb_obstacles: int,
@@ -55,7 +54,6 @@ def gen_input(
     Returns:
         Dictionary with agent and map configuration, or None if generation fails
     """
-
     map_ = GraphSampler(bounds=bounds, resolution=resolution, start=[], goal=[])
     dimensions = list(map_.shape)
     input_dict = {
@@ -145,7 +143,6 @@ def gen_input(
 
     return input_dict
 
-
 def process_single_permutation(args: Tuple) -> Tuple[bool, int]:
     """
     Process a single permutation in parallel.
@@ -161,14 +158,10 @@ def process_single_permutation(args: Tuple) -> Tuple[bool, int]:
         agent_goal_index,
         case_path,
         perm_id,
-        seed,
         timeout,
         max_attempts,
         centralized_alg_name,
     ) = args
-
-    # Set random seed for this worker process
-    np.random.seed(seed)
 
     # Shuffle agents/goals
     agents = shuffle_agents_goals(inpt, agent_goal_index)
@@ -190,6 +183,81 @@ def process_single_permutation(args: Tuple) -> Tuple[bool, int]:
 
     return success, perm_id
 
+def data_gen(
+    input_dict: Dict,
+    output_path: Path,
+    centralized_alg_name: str = 'cbs',
+    timeout: int = 60,
+    max_attempts: int = 10000,
+    ) -> bool:
+    """
+    Generate solution for given MAPF instance.
+
+    Args:
+        input_dict: MAPF instance configuration
+        output_path: Path to save solution
+
+    Returns:
+        True if solution found, False otherwise
+    """
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    param = input_dict
+    obstacles = np.array(param["map"]["obstacles"])
+    bounds = param["map"]["bounds"]
+    resolution = param["map"]["resolution"]
+    agents = param["agents"]
+    map_ = GraphSampler(
+        bounds=bounds, resolution=resolution, start=[], goal=[], use_discrete_space=True
+    )
+    map_.set_obstacle_map(obstacles)
+
+    map_.inflate_obstacles(radius=0)
+    map_.set_parameters(sample_num=0, num_neighbors=4.0, min_edge_len=1e-10, max_edge_len=1.1)
+
+    start = [agent["start"] for agent in agents]
+    goal = [agent["goal"] for agent in agents]
+    map_.set_start(start)
+    map_.set_goal(goal)
+    nodes = map_.generateRandomNodes(generate_grid_nodes=True)
+    road_map = map_.generate_roadmap(nodes)
+
+    start = [s.current for s in map_.get_start_nodes()]
+    goal = [g.current for g in map_.get_goal_nodes()]
+    agents = [
+        {"start": start[i], "name": agent["name"], "goal": goal[i]}
+        for i, agent in enumerate(agents)
+    ]
+
+    CBS,Environment = get_centralized(centralized_alg_name)
+    env = Environment(map_, agents,radius=0,velocity=0)
+    cbs = CBS(env, time_limit=timeout, max_iterations=max_attempts)
+    start_time = time.time()
+    solution = cbs.search()
+    runtime = time.time() - start_time
+
+
+    if not solution:
+        print(f"No solution found for case {output_path.name}")
+        return False
+
+    # Write solution file
+    output = {
+        "schedule": solution,
+        "cost": env.compute_solution_cost(solution),
+        "runtime": runtime,
+    }
+
+    solution_file = output_path / "solution.yaml"
+    with open(solution_file, "w") as f:
+        yaml.safe_dump(output, f)
+
+    # Write input parameters file
+    parameters_file = output_path / "input.yaml"
+    with open(parameters_file, "w") as f:
+        yaml.safe_dump(param, f)
+
+    return True
 
 def process_single_case(args: Tuple) -> Tuple[float, float, int]:
     """
@@ -201,10 +269,7 @@ def process_single_case(args: Tuple) -> Tuple[float, float, int]:
     Returns:
         Tuple of (successful_ratio, failed_ratio, case_id)
     """
-    case_id, path, config, seed = args
-
-    # Set random seed for this worker process
-    np.random.seed(seed)
+    case_id, path, config = args
 
     # Generate random instance
     inpt = gen_input(
@@ -215,6 +280,7 @@ def process_single_case(args: Tuple) -> Tuple[float, float, int]:
     )
     timeout = config["timeout"]
     max_attempts = config["max_attempts"]
+    centralized_alg_name = config["centralized_alg_name"]
     if inpt is None:
         return 0.0, 1.0, case_id
     
@@ -302,11 +368,10 @@ def process_single_case(args: Tuple) -> Tuple[float, float, int]:
         # Try to generate solution for this permutation
         inpt_copy = inpt.copy()
         inpt_copy["agents"] = agents_shuffled
-        perm_seed = np.random.randint(0, 2**31)
         
         if len(perm_ids_unfinished) > 0:
             perm_id = perm_ids_unfinished[0]
-        task = (inpt_copy, start_goal_index.copy(), case_path, perm_id, perm_seed, timeout, max_attempts)
+        task = (inpt_copy, start_goal_index.copy(), case_path, perm_id, timeout, max_attempts,centralized_alg_name)
         success, _ = process_single_permutation(task)
         
         total_attempts += 1
@@ -330,84 +395,6 @@ def process_single_case(args: Tuple) -> Tuple[float, float, int]:
     
     return successful_ratio, failed_ratio, case_id
 
-
-def data_gen(
-    input_dict: Dict,
-    output_path: Path,
-    centralized_alg_name: str = 'cbs',
-    timeout: int = 60,
-    max_attempts: int = 10000,
-) -> bool:
-    """
-    Generate solution for given MAPF instance.
-
-    Args:
-        input_dict: MAPF instance configuration
-        output_path: Path to save solution
-
-    Returns:
-        True if solution found, False otherwise
-    """
-    output_path.mkdir(parents=True, exist_ok=True)
-
-    param = input_dict
-    obstacles = np.array(param["map"]["obstacles"])
-    bounds = param["map"]["bounds"]
-    resolution = param["map"]["resolution"]
-    agents = param["agents"]
-    map_ = GraphSampler(
-        bounds=bounds, resolution=resolution, start=[], goal=[], use_discrete_space=True
-    )
-    map_.set_obstacle_map(obstacles)
-
-    map_.inflate_obstacles(radius=0)
-    map_.set_parameters(sample_num=0, num_neighbors=4.0, min_edge_len=1e-10, max_edge_len=1.1)
-
-    start = [agent["start"] for agent in agents]
-    goal = [agent["goal"] for agent in agents]
-    map_.set_start(start)
-    map_.set_goal(goal)
-    nodes = map_.generateRandomNodes(generate_grid_nodes=True)
-    road_map = map_.generate_roadmap(nodes)
-
-    start = [s.current for s in map_.get_start_nodes()]
-    goal = [g.current for g in map_.get_goal_nodes()]
-    agents = [
-        {"start": start[i], "name": agent["name"], "goal": goal[i]}
-        for i, agent in enumerate(agents)
-    ]
-
-    CBS,Environment = get_centralized(centralized_alg_name)
-    env = Environment(map_, agents,radius=0,velocity=0)
-    cbs = CBS(env, time_limit=timeout, max_iterations=max_attempts)
-    start_time = time.time()
-    solution = cbs.search()
-    runtime = time.time() - start_time
-
-
-    if not solution:
-        print(f"No solution found for case {output_path.name}")
-        return False
-
-    # Write solution file
-    output = {
-        "schedule": solution,
-        "cost": env.compute_solution_cost(solution),
-        "runtime": runtime,
-    }
-
-    solution_file = output_path / "solution.yaml"
-    with open(solution_file, "w") as f:
-        yaml.safe_dump(output, f)
-
-    # Write input parameters file
-    parameters_file = output_path / "input.yaml"
-    with open(parameters_file, "w") as f:
-        yaml.safe_dump(param, f)
-
-    return True
-
-
 def create_solutions(path: Path, num_cases: int, config: Dict,num_workers: int = cpu_count()):
     """
     Create multiple MAPF instances and their solutions with parallel processing.
@@ -419,14 +406,14 @@ def create_solutions(path: Path, num_cases: int, config: Dict,num_workers: int =
     """
     path = Path(path)
     path.mkdir(parents=True, exist_ok=True)
-    
     print(f"Generating solutions for {num_cases} cases")
+
+    set_global_seed(config.get("seed", 42))
     
     # Prepare case tasks
     case_tasks = []
     for i in range(0, num_cases):
-        seed = np.random.randint(0, 2**31)
-        task = (i, path, config, seed)
+        task = (i, path, config)
         case_tasks.append(task)
 
     # Process cases in parallel

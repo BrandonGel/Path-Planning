@@ -11,6 +11,7 @@ from typing import List, Tuple
 from scipy.interpolate import RegularGridInterpolator
 from multiprocessing import Pool, cpu_count
 from scipy.ndimage import generic_filter,generate_binary_structure
+from path_planning.utils.util import set_global_seed
 
 def weighted_max_op(window, weights,ignore_value = -1):
     # 'window' is passed as a 1D array by scipy
@@ -345,6 +346,7 @@ def generate_graph_samples(path: Path, config: dict, num_workers: int | None = N
         config: Configuration dict for graph generation
         num_workers: Number of parallel workers (default: auto-detect CPU cores)
     """
+    set_global_seed(config.get("seed", 42))
     path = Path(path)
     cases = sorted([d for d in path.iterdir() if d.is_dir() and d.name.startswith("case_")])
     if not cases:
