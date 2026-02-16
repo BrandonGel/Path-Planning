@@ -12,8 +12,7 @@ from pathlib import Path
 import yaml
 import numpy as np
 from typing import Any, Dict, List, Tuple, Optional
-from path_planning.multi_agent_planner.centralized.cbs.cbs import Environment, CBS
-from path_planning.multi_agent_planner.centralized.icbs.icbs import IEnvironment, ICBS
+from path_planning.multi_agent_planner.centralized.get_centralized import get_centralized
 from path_planning.common.environment.map.graph_sampler import GraphSampler
 from python_motion_planning.common import TYPES
 import math
@@ -165,7 +164,7 @@ def process_single_permutation(args: Tuple) -> Tuple[bool, int]:
         seed,
         timeout,
         max_attempts,
-        improved,
+        centralized_alg_name,
     ) = args
 
     # Set random seed for this worker process
@@ -181,7 +180,7 @@ def process_single_permutation(args: Tuple) -> Tuple[bool, int]:
     success = data_gen(
         inpt_copy,
         perm_path,
-        improved=improved,
+        centralized_alg_name=centralized_alg_name,
         timeout=timeout,
         max_attempts=max_attempts,
     )
@@ -235,7 +234,7 @@ def process_single_case(args: Tuple) -> Tuple[float, float, int]:
         nb_permutations = max_permutations
 
     # Check for cbs vs. icbs
-    improved = config["improved"]
+    centralized_alg_name = config["centralized_alg_name"]
 
     # Generate all unique permutations
     for perm_id in range(nb_permutations):
@@ -256,7 +255,7 @@ def process_single_case(args: Tuple) -> Tuple[float, float, int]:
             perm_seed,
             timeout,
             max_attempts,
-            improved,
+            centralized_alg_name,
         )
         permutation_tasks.append(task)
         agent_goal_index = np.random.permutation(agent_goal_index)
@@ -283,7 +282,7 @@ def process_single_case(args: Tuple) -> Tuple[float, float, int]:
 def data_gen(
     input_dict: Dict,
     output_path: Path,
-    improved: str,
+    centralized_alg_name: str = 'cbs',
     timeout: int = 60,
     max_attempts: int = 10000,
 ) -> bool:
@@ -328,20 +327,13 @@ def data_gen(
         for i, agent in enumerate(agents)
     ]
 
-    if improved == "no":
-        # Search for solution and measure runtime using cbs
-        env = Environment(map_, agents)
-        cbs = CBS(env, time_limit=timeout, max_iterations=max_attempts)
-        start_time = time.time()
-        solution = cbs.search()
-        runtime = time.time() - start_time
-    else:
-        # Search for solution and measure runtime using icbs
-        env = IEnvironment(map_, agents)
-        icbs = ICBS(env, time_limit=timeout, max_iterations=max_attempts)
-        start_time = time.time()
-        solution = icbs.search()
-        runtime = time.time() - start_time
+    CBS,Environment = get_centralized(centralized_alg_name)
+    env = Environment(map_, agents)
+    cbs = CBS(env, time_limit=timeout, max_iterations=max_attempts)
+    start_time = time.time()
+    solution = cbs.search()
+    runtime = time.time() - start_time
+
 
     if not solution:
         print(f"No solution found for case {output_path.name}")

@@ -1,8 +1,9 @@
 import heapq
 from itertools import count
+from path_planning.multi_agent_planner.centralized.cbs.cbs import Environment
 
 class AStar():
-    def __init__(self, env, max_iterations=-1,radius=0.0):
+    def __init__(self, env:Environment, max_iterations=-1,radius=0.0):
         self.env = env # Access to get_conflicts logic
         self.agent_dict = env.agent_dict
         self.admissible_heuristic = env.admissible_heuristic
@@ -79,21 +80,20 @@ class AStar():
     def _count_conflicts(self, agent_name, neighbor, current, solution):
         """Helper to check if this move conflicts with any other agent's current path."""
         count = 0
-        for other_agent, path in solution.items():
-            if other_agent == agent_name: continue
-            
-            # Check vertex conflict at neighbor.time
-            other_state = self.env.get_state(other_agent, solution, neighbor.time)
-            if self.radius == 0:
+        if self.radius == 0:
+            for other_agent, path in solution.items():
+                if other_agent == agent_name: continue
+                
+                # Check vertex conflict at neighbor.time
+                other_state = self.env.get_state(other_agent, solution, neighbor.time)
                 if neighbor.location == other_state.location:
                     count += 1
                 
-            # Check edge conflict
-            prev_other = self.env.get_state(other_agent, solution, current.time)
-            if self.radius == 0:
+                # Check edge conflict
+                prev_other = self.env.get_state(other_agent, solution, current.time)
                 if neighbor.location == prev_other.location and current.location == other_state.location:
                     count += 1
-            else:
-                if not self.env.transition_valid(neighbor, other_state):
-                    count += 1
+        else:
+            if not self.env.transition_valid(current, neighbor):
+                count += 1
         return count
