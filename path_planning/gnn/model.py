@@ -32,36 +32,72 @@ ACTIVATION_FUNCTIONS = {
 }
 
 
-class GNN(torch.nn.Module):
-    def __init__(self, in_channels=-1, hidden_channels=64, out_channels=1,num_blocks:int=3,num_start_layers:int=1,num_mlp_layers:int=2,activation_function:str='relu'):
+class GNN(nn.Module):
+    def __init__(self, 
+                    node_in_channels:int=-1, node_out_channels:int=1,
+                    num_mlp_start_layers:int=1,node_mlp_start_channels:int=16,
+                    num_gnn_blocks:int=3,gnn_hidden_channels:int=64,
+                    num_mlp_end_layers:int=2, node_mlp_end_channels:int=16,
+                    edge_in_channels:int=None,edge_use_mlp_start:bool=True,edge_mlp_start_channels:int=16,use_edge_dim:bool=False,
+                    activation_function:str='relu'):
         super().__init__()
         
+        self.node_in_channels = node_in_channels
+        self.node_out_channels = node_out_channels
+        self.num_mlp_start_layers = num_mlp_start_layers
+        self.node_mlp_start_channels = node_mlp_start_channels
+        self.num_gnn_blocks = num_gnn_blocks
+        self.gnn_hidden_channels = gnn_hidden_channels
+        self.num_mlp_end_layers = num_mlp_end_layers
+        self.node_mlp_end_channels = node_mlp_end_channels
+        self.edge_in_channels = edge_in_channels
+        self.edge_use_mlp_start = edge_use_mlp_start
+        self.edge_mlp_start_channels = edge_mlp_start_channels
+        self.use_edge_dim = use_edge_dim
+        self.edge_gnn_in_channels = (self.edge_mlp_start_channels if self.edge_use_mlp_start else self.edge_in_channels) if self.use_edge_dim else None
         self.activation_function = ACTIVATION_FUNCTIONS[activation_function]
-        self.in_channels = in_channels
-        self.hidden_channels = hidden_channels
-        self.out_channels = out_channels
-        self.num_blocks = num_blocks
-        self.num_start_layers = num_start_layers
-        self.num_mlp_layers = num_mlp_layers
-
         self.start_linear = nn.ModuleList()
+        self.edge_linear = nn.ModuleList()
         self.gnn = nn.ModuleList()
         self.last_linear = nn.ModuleList()
-        
-        # Build the model structure
-        self.build_start_linear()
-        self.build_last_linear()
     
+
+    def build_model(self):
+        self.build_start_linear()
+        self.build_edge_linear()
+        self.build_gnn()
+        self.build_last_linear()
+
     def build_start_linear(self):
-        # start linear layers
+        # start linear layers: output must be gnn_hidden_channels so first GNN layer gets correct input dim
         self.start_linear = nn.ModuleList()
-        if self.in_channels != -1:
-            self.start_linear.append(torch.nn.Linear(self.in_channels, self.hidden_channels))
+        if self.num_mlp_start_layers  == 1:
+            if self.node_in_channels != -1:
+                self.start_linear.append(nn.Linear(self.node_in_channels, self.gnn_hidden_channels ))
+            else:
+                self.start_linear.append(nn.LazyLinear(self.gnn_hidden_channels ))
         else:
-            self.start_linear.append(nn.LazyLinear(self.hidden_channels))
-        for _ in range(1,self.num_start_layers):
+            if self.node_in_channels != -1:
+                self.start_linear.append(nn.Linear(self.node_in_channels, self.node_mlp_start_channels))
+            else:
+                self.start_linear.append(nn.LazyLinear(self.node_mlp_start_channels))
             self.start_linear.append(self.activation_function)
-            self.start_linear.append(nn.Linear(self.hidden_channels, self.hidden_channels))
+            for _ in range(1, self.num_mlp_start_layers - 1):
+                self.start_linear.append(nn.Linear(self.node_mlp_start_channels, self.node_mlp_start_channels))
+                self.start_linear.append(self.activation_function)
+            self.start_linear.append(nn.Linear(self.node_mlp_start_channels, self.gnn_hidden_channels ))
+
+    def build_edge_linear(self):
+        # edge linear layers
+        self.edge_linear = nn.ModuleList()
+        if self.edge_use_mlp_start and self.use_edge_dim:
+            if self.edge_in_channels != -1:
+                self.edge_linear.append(nn.Linear(self.edge_in_channels, self.gnn_hidden_channels))
+            else:
+                self.edge_linear.append(nn.LazyLinear(self.gnn_hidden_channels))
+            for _ in range(1,self.num_start_layers):
+                self.edge_linear.append(self.activation_function)
+                self.edge_linear.append(nn.Linear(self.gnn_hidden_channels, self.gnn_hidden_channels))
 
     def build_gnn(self):
         pass # to be implemented
@@ -69,19 +105,25 @@ class GNN(torch.nn.Module):
     def build_last_linear(self):
         # last linear layers
         self.last_linear = nn.ModuleList()
-        if self.num_mlp_layers == 1:
-            self.last_linear.append(nn.Linear(self.hidden_channels, self.out_channels))
+        if self.num_mlp_end_layers == 1:
+            self.last_linear.append(nn.Linear(self.gnn_hidden_channels, self.node_out_channels))
         else:
-            self.last_linear.append(nn.Linear(self.hidden_channels, self.hidden_channels))
+            self.last_linear.append(nn.Linear(self.gnn_hidden_channels, self.node_mlp_end_channels))
             self.last_linear.append(self.activation_function)            
-            for _ in range(1,self.num_mlp_layers-1):
-                self.last_linear.append(nn.Linear(self.hidden_channels, self.hidden_channels))
+            for _ in range(1,self.num_mlp_end_layers-1):
+                self.last_linear.append(nn.Linear(self.node_mlp_end_channels, self.node_mlp_end_channels))
                 self.last_linear.append(self.activation_function)            
-            self.last_linear.append(nn.Linear(self.hidden_channels, self.out_channels))
+            self.last_linear.append(nn.Linear(self.node_mlp_end_channels, self.node_out_channels))
 
     def forward(self, x, edge_index,edge_attr=None):
         for linear in self.start_linear:
             x = linear(x)
+        if edge_attr is not None:
+            if self.edge_gnn_in_channels is not None:
+                for linear in self.edge_linear:
+                    edge_attr = linear(edge_attr)
+            else:
+                edge_attr = None
         for gnn in self.gnn:
             # Check if it's an activation function (only takes x) or a GNN layer (takes x, edge_index, edge_attr)
             if gnn is self.activation_function or isinstance(gnn, (nn.ReLU, nn.Tanh, nn.Sigmoid, nn.ELU, nn.LeakyReLU, nn.PReLU, nn.SELU)):
@@ -100,54 +142,91 @@ class GNN(torch.nn.Module):
         return self.__repr__()
 
 class GCN(GNN):
-    def __init__(self, in_channels=-1, hidden_channels=64, out_channels=1,num_blocks:int=3,num_start_layers:int=1,num_mlp_layers:int=2,activation_function:str='relu'):
-        super().__init__(in_channels=in_channels, hidden_channels=hidden_channels, out_channels=out_channels,num_blocks=num_blocks,num_start_layers=num_start_layers,num_mlp_layers=num_mlp_layers,activation_function=activation_function)
-        self.build_gnn()
+    def __init__(self, 
+                    node_in_channels:int=-1, node_out_channels:int=1,
+                    num_mlp_start_layers:int=1,node_mlp_start_channels:int=16,
+                    num_gnn_blocks:int=3,gnn_hidden_channels:int=64,
+                    num_mlp_end_layers:int=2, node_mlp_end_channels:int=16,
+                    edge_in_channels:int=None,edge_use_mlp_start:bool=True,edge_mlp_start_channels:int=16,use_edge_dim:bool=False,
+                    activation_function:str='relu'):
+        super().__init__(node_in_channels=node_in_channels, node_out_channels=node_out_channels,
+                         gnn_hidden_channels=gnn_hidden_channels,
+                         num_gnn_blocks=num_gnn_blocks,
+                         num_mlp_start_layers=num_mlp_start_layers,node_mlp_start_channels=node_mlp_start_channels,
+                         num_mlp_end_layers=num_mlp_end_layers,node_mlp_end_channels=node_mlp_end_channels,
+                         edge_in_channels=edge_in_channels,edge_use_mlp_start=edge_use_mlp_start,edge_mlp_start_channels=edge_mlp_start_channels,
+                         use_edge_dim=use_edge_dim,activation_function=activation_function)
+         # Build the model structure
+        self.build_model()
         
     def build_gnn(self):
         # GNN layers
         self.gnn = nn.ModuleList()
-        self.gnn.append(GCNConv(self.hidden_channels, self.hidden_channels,normalize=False))
-        for _ in range(1,self.num_blocks):
-            self.gnn.append(GCNConv(self.hidden_channels,self.hidden_channels,normalize=False))
+        if self.num_gnn_blocks == 1:
+            self.gnn.append(GCNConv(self.gnn_hidden_channels, self.gnn_hidden_channels,normalize=False))
+        else:
+            self.gnn.append(GCNConv(self.gnn_hidden_channels, self.gnn_hidden_channels,normalize=False))
+            for _ in range(1,self.num_gnn_blocks-1):
+                self.gnn.append(self.activation_function)
+                self.gnn.append(GCNConv(self.gnn_hidden_channels,self.gnn_hidden_channels,normalize=False))
             self.gnn.append(self.activation_function)
+            self.gnn.append(GCNConv(self.gnn_hidden_channels,self.gnn_hidden_channels,normalize=False))
             
     def __repr__(self):
         return f"GCNConv"
 
 class GAT(GNN):
-    def __init__(self, in_channels=-1, hidden_channels=64, out_channels=1,num_heads=4,edge_dim=None,concat:bool=True,residual:bool=False,dropout:float=0.0,num_blocks:int=3,num_start_layers:int=1,num_mlp_layers:int=2,activation_function:str='relu'):
+
+    def __init__(self, 
+                    node_in_channels:int=-1, node_out_channels:int=1,
+                    num_mlp_start_layers:int=1,node_mlp_start_channels:int=16,
+                    num_gnn_blocks:int=3,gnn_hidden_channels:int=64,
+                    num_mlp_end_layers:int=2, node_mlp_end_channels:int=16,
+                    edge_in_channels:int=None,edge_use_mlp_start:bool=True,edge_mlp_start_channels:int=16,
+                    num_heads:int=4,concat:bool=True,residual:bool=False,dropout:float=0.0,use_edge_dim:bool=False,
+                    activation_function:str='relu'):
         # Set GAT-specific attributes before calling super().__init__() 
         # because build_last_linear() (called in super) needs them
         self.num_heads = num_heads
-        self.edge_dim = edge_dim
         self.concat = concat
         self.residual = residual
         self.dropout = dropout
-        super().__init__(in_channels=in_channels, hidden_channels=hidden_channels, out_channels=out_channels,num_blocks=num_blocks,num_start_layers=num_start_layers,num_mlp_layers=num_mlp_layers,activation_function=activation_function)
-        # Build GNN layers (last_linear already built in super().__init__() via build_last_linear())
-        self.build_gnn()
+        super().__init__(node_in_channels=node_in_channels, node_out_channels=node_out_channels,
+                         num_gnn_blocks=num_gnn_blocks,gnn_hidden_channels=gnn_hidden_channels,
+                         num_mlp_start_layers=num_mlp_start_layers,node_mlp_start_channels=node_mlp_start_channels,
+                         num_mlp_end_layers=num_mlp_end_layers,node_mlp_end_channels=node_mlp_end_channels,
+                         edge_in_channels=edge_in_channels,edge_use_mlp_start=edge_use_mlp_start,edge_mlp_start_channels=edge_mlp_start_channels,
+                         use_edge_dim=use_edge_dim,activation_function=activation_function)
+        self.num_gnn_input = self.gnn_hidden_channels*self.num_heads if self.concat else self.gnn_hidden_channels
+        # Build the model structure
+        self.build_model()
 
     def build_gnn(self):
         # GNN layers
         self.gnn = nn.ModuleList()
-        self.gnn.append(GATConv(self.hidden_channels, self.hidden_channels,heads=self.num_heads,concat=self.concat,edge_dim=self.edge_dim,residual=self.residual,dropout=self.dropout))
-        for _ in range(1,self.num_blocks):
-            self.gnn.append(GATConv(self.hidden_channels*self.num_heads if self.concat else self.hidden_channels, self.hidden_channels,heads=self.num_heads,concat=self.concat,edge_dim=self.edge_dim,residual=self.residual,dropout=self.dropout))
+        if self.num_gnn_blocks == 1:
+            self.gnn.append(GATConv(self.gnn_hidden_channels, self.gnn_hidden_channels,heads=self.num_heads,concat=self.concat,residual=self.residual,dropout=self.dropout,edge_dim=self.edge_gnn_in_channels))
+        else:
+            self.gnn.append(GATConv(self.gnn_hidden_channels, self.gnn_hidden_channels,heads=self.num_heads,concat=self.concat,residual=self.residual,dropout=self.dropout,edge_dim=self.edge_gnn_in_channels))
+            
+            for _ in range(1,self.num_gnn_blocks-1):
+                self.gnn.append(self.activation_function)
+                self.gnn.append(GATConv(self.num_gnn_input, self.gnn_hidden_channels,heads=self.num_heads,concat=self.concat,residual=self.residual,dropout=self.dropout,edge_dim=self.edge_gnn_in_channels))
             self.gnn.append(self.activation_function)
+            self.gnn.append(GATConv(self.num_gnn_input, self.gnn_hidden_channels,heads=self.num_heads,concat=self.concat,residual=self.residual,dropout=self.dropout,edge_dim=self.edge_gnn_in_channels))
             
     def build_last_linear(self):
         # last linear layers
         self.last_linear = nn.ModuleList()
-        if self.num_mlp_layers == 1:
-            self.last_linear.append(nn.Linear(self.hidden_channels*self.num_heads if self.concat else self.hidden_channels, self.out_channels))
+        if self.num_mlp_end_layers == 1:
+            self.last_linear.append(nn.Linear(self.num_gnn_input, self.node_out_channels))
         else:
-            self.last_linear.append(nn.Linear(self.hidden_channels*self.num_heads if self.concat else self.hidden_channels, self.hidden_channels))
+            self.last_linear.append(nn.Linear(self.num_gnn_input, self.node_mlp_end_channels))
             self.last_linear.append(self.activation_function)            
-            for _ in range(1,self.num_mlp_layers-1):
-                self.last_linear.append(nn.Linear(self.hidden_channels, self.hidden_channels))
+            for _ in range(1,self.num_mlp_end_layers-1):
+                self.last_linear.append(nn.Linear(self.node_mlp_end_channels, self.node_mlp_end_channels))
                 self.last_linear.append(self.activation_function)            
-            self.last_linear.append(nn.Linear(self.hidden_channels, self.out_channels))
+            self.last_linear.append(nn.Linear(self.node_mlp_end_channels, self.node_out_channels))
 
     def __repr__(self):
         return f"GATConv"
