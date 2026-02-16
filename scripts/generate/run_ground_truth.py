@@ -38,6 +38,7 @@ if __name__ == "__main__":
     """Main entry point for dataset generation."""
 
     parser = argparse.ArgumentParser()
+    parser.add_argument("-seed","--seed",type=int, default=42, help="seed")
     parser.add_argument("-s","--path",type=str, default='benchmark/train', help="input file containing map and obstacles")
     parser.add_argument("-b","--bounds",type=float, nargs='+', default=[0,32.0,0,32.0], help="bounds of the map as x_min x_max y_min y_max (e.g., 0 32.0 0 32.0)")
     parser.add_argument("-n","--nb_agents",type=int, default=4, help="number of agents")
@@ -82,6 +83,7 @@ if __name__ == "__main__":
             config = yaml.load(yaml_file, Loader=yaml.FullLoader)
     else:
         config = {
+            "seed": args.seed,
             "bounds": bounds,
             "resolution": args.resolution,
             "nb_agents": args.nb_agents,
