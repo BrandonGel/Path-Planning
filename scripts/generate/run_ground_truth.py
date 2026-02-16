@@ -25,6 +25,12 @@ import argparse
 from pathlib import Path
 import yaml
 from multiprocessing import cpu_count
+import random
+import numpy as np
+
+# Set seeding so that randomness is deterministic
+random.seed(0)
+np.random.seed(0)
 
 
 
@@ -44,8 +50,9 @@ if __name__ == "__main__":
     parser.add_argument("-w","--num_workers",type=int, default=None, help="number of parallel workers for cases (default: auto-detect CPU cores)")
     parser.add_argument("-t","--timeout",type=int, default=60, help="timeout for the solver in seconds")
     parser.add_argument("-m","--max_attempts",type=int, default=10000, help="max attempts for the solver")
+    parser.add_argument("-ca","--centralized_alg_name",type=str, default='cbs', help="centralized algorithm name")
     args = parser.parse_args()
-    
+
     # Convert bounds from flat list to nested list format
     if isinstance(args.bounds, list):
         if len(args.bounds) == 2:
@@ -53,18 +60,25 @@ if __name__ == "__main__":
         elif len(args.bounds) == 3:
             bounds = [[0, args.bounds[1]], [0, args.bounds[0]], [0, args.bounds[2]]]
         elif len(args.bounds) == 4:
-            bounds = [[args.bounds[0], args.bounds[1]], [args.bounds[2], args.bounds[3]]]
+            bounds = [
+                [args.bounds[0], args.bounds[1]],
+                [args.bounds[2], args.bounds[3]],
+            ]
         elif len(args.bounds) == 6:
-            bounds = [[args.bounds[0], args.bounds[1]], [args.bounds[2], args.bounds[3]], [args.bounds[4], args.bounds[5]]]
+            bounds = [
+                [args.bounds[0], args.bounds[1]],
+                [args.bounds[2], args.bounds[3]],
+                [args.bounds[4], args.bounds[5]],
+            ]
         else:
             raise ValueError(f"Invalid bounds: {args.bounds}")
     else:
         bounds = args.bounds  # Use default or from config
     base_path = Path(args.path)
     num_workers = args.num_workers if args.num_workers is not None else cpu_count()
-    
-    if args.config != '':
-        with open(args.config, 'r') as yaml_file:
+
+    if args.config != "":
+        with open(args.config, "r") as yaml_file:
             config = yaml.load(yaml_file, Loader=yaml.FullLoader)
     else:
         config = {
@@ -75,7 +89,7 @@ if __name__ == "__main__":
             "nb_permutations": args.nb_permutations,
             "timeout": args.timeout,
             "max_attempts": args.max_attempts,
+            "centralized_alg_name": args.centralized_alg_name,
         }
     path = create_path_parameter_directory(base_path, config)
     create_solutions(path, args.num_cases, config,num_workers=num_workers)
-
