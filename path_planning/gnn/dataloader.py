@@ -290,6 +290,7 @@ class GraphDataset(InMemoryDataset):
     def save(self):
         torch.save((self._data, self.slices), self.save_file)
 
+
 def get_graph_dataset_file_paths(paths:List[Path],config:dict, max_cases:list[int]=None,max_graphs:list[int]=None):
     data_files = []
 

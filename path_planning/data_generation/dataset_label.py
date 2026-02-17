@@ -43,7 +43,6 @@ def get_trajectory_map(schedule,map_,discrete: bool = True):
     
     return trajectory_map
 
-
 def process_single_case_trajectories(args: Tuple) -> Tuple[bool, Path]:
     """
     Process trajectories for a single case.
