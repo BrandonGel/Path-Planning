@@ -46,6 +46,10 @@ class GraphSampler(Grid):
     def __str__(self) -> str:
         return "Graph Sampler"
 
+    @property
+    def size(self) -> int:
+        return int(np.prod(self.type_map.shape))
+
     def set_parameters(self, sample_num, num_neighbors, min_edge_len, max_edge_len):
         self.sample_num = sample_num
         self.num_neighbors = num_neighbors
