@@ -292,7 +292,12 @@ class Environment(object):
             travel_cost = dist_travel.sum()
             wait_cost = (dist_travel == 0).sum()
             cost += travel_cost + wait_cost
-        return cost.item()
+        if isinstance(cost, np.ndarray):
+            return cost.item()
+        elif isinstance(cost, float) or isinstance(cost, int):
+            return cost
+        else:
+            raise ValueError(f"Invalid cost type: {type(cost)}")
 
 class HighLevelNode(object):
     def __init__(self):
