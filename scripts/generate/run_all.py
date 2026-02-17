@@ -16,6 +16,16 @@ python scripts/generate/run_all.py -s benchmark/train -b 0 32.0 0 32.0 -n 4 -o 0
 Generate & Visualize a dataset of MAPF instances and their solutions for 4 agents in a 32x32 grid with 0.1 obstacles and 64 permutations.
 python scripts/generate/run_all.py -s benchmark/train -b 0 32.0 0 32.0 -n 4 -o 0.1 -p 64 -r 1.0 -c 1 -v
 
+Generate a dataset of MAPF instances with default settings using timeout (120 seconds) or max attempts (20000).
+python scripts/generate/run_all.py -s benchmark/train -t 120 
+python scripts/generate/run_all.py -s benchmark/train -m 20000 
+
+Generate a dataset of MAPF instances with default settings using cbs/icbs/lacam/lacam_random algorithm.
+python scripts/generate/run_all.py -s benchmark/train -mapf cbs
+python scripts/generate/run_all.py -s benchmark/train -mapf icbs
+python scripts/generate/run_all.py -s benchmark/train -mapf lacam
+python scripts/generate/run_all.py -s benchmark/train -mapf lacam_random
+
 Generate & Target a dataset of MAPF instances and their solutions for 4 agents in a 32x32 grid with 0.1 obstacles and 64 permutations.
 python scripts/generate/run_all.py -s benchmark/train -b 0 32.0 0 32.0 -n 4 -o 0.1 -p 64 -r 1.0 -c 100 -ds True -ns 1000 -nn 13.0 -min_el 1e-10 -max_el 5.0000001 -ngs 1 -rmt prm -ts convolution_binary -gn True -isg True -ws True -spfr 0.5
 

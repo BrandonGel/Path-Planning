@@ -18,6 +18,19 @@ python scripts/generate/run_ground_truth.py -s benchmark/train
 
 Generate a dataset of MAPF instances and their solutions for 8 agents in a 32x32x32 grid with 0.1 obstacles and 64 permutations.
 python scripts/generate/run_ground_truth.py -s benchmark/train -b 0 32.0 0 32.0 0 32.0 -n 8 -o 0.1 -p 64 -r 1.0 -c 100
+
+Generate a dataset of MAPF instances and their solutions for 8 agents in a 32x32x32 grid with 0.1 obstacles and 64 permutations.
+python scripts/generate/run_ground_truth.py -s benchmark/train -b 0 32.0 0 32.0 0 32.0 -n 8 -o 0.1 -p 64 -r 1.0 -c 100 -w 1
+
+Generate a dataset of MAPF instances with default settings using timeout (120 seconds) or max attempts (20000).
+python scripts/generate/run_ground_truth.py -s benchmark/train -t 120 
+python scripts/generate/run_ground_truth.py -s benchmark/train -m 20000 
+
+Generate a dataset of MAPF instances with default settings using cbs/icbs/lacam/lacam_random algorithm.
+python scripts/generate/run_ground_truth.py -s benchmark/train -mapf cbs
+python scripts/generate/run_ground_truth.py -s benchmark/train -mapf icbs
+python scripts/generate/run_ground_truth.py -s benchmark/train -mapf lacam
+python scripts/generate/run_ground_truth.py -s benchmark/train -mapf lacam_random
 '''
 
 from path_planning.data_generation.dataset_ground_truth import create_solutions,create_path_parameter_directory
