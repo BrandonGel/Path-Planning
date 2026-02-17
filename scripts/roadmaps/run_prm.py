@@ -1,20 +1,16 @@
-import random
-
-random.seed(0)
-
-import numpy as np
-
-np.random.seed(0)
-
+from path_planning.utils.util import set_global_seed
 from path_planning.global_planner.sample_search.prm import PRM
 from path_planning.utils.util import read_grid_from_yaml
 from python_motion_planning.common import *
 from python_motion_planning.path_planner import *
 from python_motion_planning.controller import *
+from path_planning.utils.util import set_global_seed
 
 if __name__ == "__main__":
-    os.makedirs("figs/prm", exist_ok=True)
+    set_global_seed(42)
 
+    os.makedirs("figs/prm", exist_ok=True)
+    
     map_ = read_grid_from_yaml("path_planning/maps/2d/2d.yaml")
     map_.inflate_obstacles(radius=3)
     start = (5, 5)
@@ -24,7 +20,6 @@ if __name__ == "__main__":
 
     planner = PRM(map_=map_, start=start, goal=goal, sample_num=1000, min_edge_len=1)
     path, path_info = planner.plan()
-    print(path_info)
 
     vis = Visualizer2D()
     vis.plot_grid_map(map_)
@@ -52,3 +47,4 @@ if __name__ == "__main__":
     # Call show() first to initialize the renderer, then save
     vis.show()
     vis.savefig("figs/prm/prm_3d.png")
+    vis.close()

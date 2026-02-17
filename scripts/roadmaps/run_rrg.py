@@ -9,16 +9,7 @@ Usage:
     python scripts/run_rrg.py
 """
 
-# TODO: Implement RRG with grid map
-
-import random
-
-random.seed(0)
-
-import numpy as np
-
-np.random.seed(0)
-
+from path_planning.utils.util import set_global_seed
 from path_planning.global_planner.sample_search.rrg import RRG
 from path_planning.utils.util import read_grid_from_yaml
 from python_motion_planning.common import *
@@ -26,6 +17,7 @@ from python_motion_planning.path_planner import *
 from python_motion_planning.controller import *
 
 if __name__ == "__main__":
+    set_global_seed(42)
     os.makedirs("figs/rrg", exist_ok=True)
 
     # Simple Example: 2D map (uncomment to run)
@@ -104,7 +96,7 @@ if __name__ == "__main__":
     vis_3d.plot_path(path3d[0])
     vis_3d.show()
     vis_3d.savefig('figs/rrg/rrg_3d.png')
-    
+    vis_3d.close()
 
     # Example 3: Multiple start/goal positions (multi-query)
     print("\nRunning RRG with multiple start/goal positions...")
@@ -142,5 +134,5 @@ if __name__ == "__main__":
         vis_multi.plot_path(path)
     vis_multi.savefig("figs/rrg/rrg_multi.png")
     vis_multi.show()
-
+    vis_multi.close()
     print("\nRRG examples completed!")

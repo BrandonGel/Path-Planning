@@ -1,11 +1,10 @@
 from python_motion_planning.common import Grid, TYPES
 from path_planning.utils.util import convert_grid_to_yaml
-import random
-random.seed(0)
+from path_planning.utils.util import set_global_seed
 import numpy as np
-np.random.seed(0)
 
 def make_grid2d_map(filename: str = "path_planning/maps/2d/2d.yaml"):
+    set_global_seed(42)
     # Create environment with custom obstacles
     map_ = Grid(bounds=[[0, 51], [0, 31]])
     map_.fill_boundary_with_obstacles()
@@ -30,6 +29,7 @@ def make_grid2d_map(filename: str = "path_planning/maps/2d/2d.yaml"):
     convert_grid_to_yaml(map_,agents,filename)
 
 def make_grid3d_map(filename: str = "path_planning/maps/3d/3d.yaml"):
+    set_global_seed(42)
     # Create environment with custom obstacles
     map_ = Grid(bounds=[[0, 31], [0, 31], [0, 31]], resolution=1.0)
     for i in range(75):     # 75 random obstacles

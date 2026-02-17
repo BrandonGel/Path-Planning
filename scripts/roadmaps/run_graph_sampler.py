@@ -1,17 +1,13 @@
-import random
-random.seed(0)
-
-import numpy as np
-np.random.seed(0)
-
 from path_planning.common.visualizer.visualizer_2d import Visualizer2D
 from path_planning.common.visualizer.visualizer_3d import Visualizer3D
 from path_planning.utils.util import read_graph_sampler_from_yaml
+from path_planning.utils.util import set_global_seed
 from python_motion_planning.common import TYPES
 import os
 import time
 
 def run_graph_sampler(graph_sampler,start,goal,generate_grid_nodes = True,sample_num = 1000,num_neighbors = 4.0,min_edge_len = 0.5,max_edge_len = 5.0):
+    set_global_seed(42)
     for s in start:
         graph_sampler.type_map[graph_sampler.world_to_map(s,discrete=True)] = TYPES.START
     for g in goal:
@@ -48,15 +44,15 @@ if __name__ == "__main__":
     vis = Visualizer2D()
     vis.plot_grid_map(map_)
     vis.plot_road_map(map_,nodes,road_map)
-    vis.show()
     vis.savefig('figs/graph_sampler/graph_sampler_2d_roadmap_discrete_space.png')
+    vis.show()
     vis.close()
 
     vis = Visualizer2D()
     vis.plot_grid_map(map_)
     vis.plot_road_map(map_,nodes,planar_map)
-    vis.show()
     vis.savefig('figs/graph_sampler/graph_sampler_2d_planarmap_discrete_space.png')
+    vis.show()
     vis.close()
 
     map_ =read_graph_sampler_from_yaml('path_planning/maps/2d/2d.yaml',use_discrete_space=False)
@@ -68,15 +64,15 @@ if __name__ == "__main__":
     vis = Visualizer2D()
     vis.plot_grid_map(map_)
     vis.plot_road_map(map_,nodes,road_map,map_frame=False)
-    vis.show()
     vis.savefig('figs/graph_sampler/graph_sampler_2d_roadmap.png')
+    vis.show()
     vis.close()
 
     vis = Visualizer2D()
     vis.plot_grid_map(map_)
     vis.plot_road_map(map_,nodes,planar_map,map_frame=False)
-    vis.show()
     vis.savefig('figs/graph_sampler/graph_sampler_2d_planarmap.png')
+    vis.show()
     vis.close()
     
 
