@@ -11,46 +11,7 @@ from path_planning.common.environment.map.graph_sampler import GraphSampler
 from path_planning.multi_agent_planner.centralized.lacam.utility import Coord,is_valid_coord,get_neighbors,Config,Deadline,Configs
 from path_planning.multi_agent_planner.centralized.lacam.dist_table import DistTable
 from path_planning.multi_agent_planner.centralized.lacam.pibt import PIBT
-
-NO_AGENT: int = np.iinfo(np.int32).max
-"""Sentinel value indicating no agent occupies a location."""
-
-NO_LOCATION: Coord = (np.iinfo(np.int32).max, np.iinfo(np.int32).max)
-"""Sentinel coordinate indicating an unassigned location."""
-
-@dataclass
-class LowLevelNode:
-    who: list[int] = field(default_factory=lambda: [])
-    where: list[Coord] = field(default_factory=lambda: [])
-    depth: int = 0
-
-    def get_child(self, who: int, where: Coord) -> LowLevelNode:
-        return LowLevelNode(
-            who=self.who + [who],
-            where=self.where + [where],
-            depth=self.depth + 1,
-        )
-
-
-@dataclass
-class HighLevelNode:
-    Q: Config
-    order: list[int]
-    parent: HighLevelNode | None = None
-    tree: deque[LowLevelNode] = field(default_factory=lambda: deque([LowLevelNode()]))
-    g: int = 0
-    h: int = 0
-    f: int = g + h
-    neighbors: set[HighLevelNode] = field(default_factory=lambda: set())
-
-    def __eq__(self, other) -> bool:
-        if isinstance(other, HighLevelNode):
-            return self.Q == other.Q
-        return False
-
-    def __hash__(self) -> int:
-        return self.Q.__hash__()
-
+from path_planning.multi_agent_planner.centralized.lacam.lacam_random import NO_AGENT, NO_LOCATION, LowLevelNode, HighLevelNode
 
 class LaCAM:
     def __init__(self) -> None:
@@ -184,7 +145,7 @@ class LaCAM:
                 OPEN.appendleft(N_known)  # typically helpful
                 # rewrite, Dijkstra update
                 D = deque([N])
-                while len(D) > 0 and self.flg_star:
+                while len(D) > 0:
                     N_from = D.popleft()
                     for N_to in N_from.neighbors:
                         g = N_from.g + self.get_edge_cost(N_from.Q, N_to.Q)
@@ -299,3 +260,13 @@ class LaCAM:
                 else:
                     raise ValueError(f"Invalid dimension: {self.graph_map.dim}")
         return solution_dict
+    
+    def compute_solution_cost(self, solution: dict) -> int:
+        cost = 0
+        for agent, path in solution.items():
+            path_array = np.array([[point['x'], point['y']] for point in path])
+            dist_travel = np.linalg.norm(path_array[1:] - path_array[:-1], axis=1)
+            travel_cost = dist_travel.sum()
+            wait_cost = (dist_travel == 0).sum()
+            cost += travel_cost + wait_cost
+        return cost
