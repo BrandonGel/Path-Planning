@@ -99,7 +99,7 @@ class Constraints(object):
             "EC: " + str([str(ec) for ec in self.edge_constraints])
 
 class Environment(object):
-    def __init__(self, graph_map, agents, astar_max_iterations=-1, radius = 1.0, velocity = 0.0, use_constraint_sweep=True):
+    def __init__(self, graph_map, agents, astar_max_iterations=-1, radius = 0.0, velocity = 0.0, use_constraint_sweep=True):
         self.graph_map = graph_map
         if radius > 0:
             self.graph_map.set_constraint_sweep()
@@ -292,13 +292,13 @@ class Environment(object):
             travel_cost = dist_travel.sum()
             wait_cost = (dist_travel == 0).sum()
             cost += travel_cost + wait_cost
-        if isinstance(cost, np.ndarray):
+        if isinstance(cost, np.float64) or isinstance(cost, np.float32) or isinstance(cost, np.int64) or isinstance(cost, np.int32):
             return cost.item()
         elif isinstance(cost, float) or isinstance(cost, int):
             return cost
         else:
             raise ValueError(f"Invalid cost type: {type(cost)}")
-
+            
 class HighLevelNode(object):
     def __init__(self):
         self.solution = {}
