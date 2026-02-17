@@ -1,3 +1,9 @@
+"""
+Run CBS for MAPF algorithms with different agent radii (0.0, 1.0, 2.0).
+python scripts/mapf/run_cbs.py 
+"""
+
+import argparse
 from path_planning.utils.util import set_global_seed
 from path_planning.common.visualizer.visualizer_2d import Visualizer2D
 from path_planning.common.visualizer.visualizer_3d import Visualizer3D

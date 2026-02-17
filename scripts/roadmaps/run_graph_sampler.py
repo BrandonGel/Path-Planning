@@ -1,3 +1,8 @@
+"""
+Run graph sampler for 2D and 3D maps.
+python scripts/roadmaps/run_graph_sampler.py
+"""
+
 from path_planning.common.visualizer.visualizer_2d import Visualizer2D
 from path_planning.common.visualizer.visualizer_3d import Visualizer3D
 from path_planning.utils.util import read_graph_sampler_from_yaml

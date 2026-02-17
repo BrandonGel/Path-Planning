@@ -1,3 +1,8 @@
+"""
+Run ICBS for MAPF algorithms with different agent radii (0.0, 1.0, 2.0).
+python scripts/mapf/run_icbs.py 
+"""
+
 from path_planning.common.visualizer.visualizer_2d import Visualizer2D
 from path_planning.common.visualizer.visualizer_3d import Visualizer3D
 from path_planning.utils.util import write_to_yaml, set_global_seed

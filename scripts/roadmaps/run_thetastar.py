@@ -1,15 +1,16 @@
-import random
-random.seed(0)
-
-import numpy as np
-np.random.seed(0)
+"""
+Run Theta* for 2D and 3D maps.
+python scripts/roadmaps/run_thetastar.py
+"""
 
 from path_planning.utils.util import read_grid_from_yaml
 from python_motion_planning.common import *
 from python_motion_planning.path_planner import *
 from python_motion_planning.controller import *
+from path_planning.utils.util import set_global_seed
 
 if __name__ == "__main__":
+    set_global_seed(42)
     os.makedirs('figs/thetastar',exist_ok=True)
 
     map_ =read_grid_from_yaml('path_planning/maps/2d/2d.yaml')

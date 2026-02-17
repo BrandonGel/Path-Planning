@@ -13,7 +13,6 @@ Note: The benchmarks are stored in the benchmark/solutions folder.
 Note: This will take a while to run.
 """
 
-
 from path_planning.utils.util import write_to_yaml
 from path_planning.utils.util import read_graph_sampler_from_yaml, read_agents_from_yaml
 from path_planning.multi_agent_planner.centralized.get_centralized import get_centralized
