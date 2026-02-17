@@ -2,10 +2,9 @@
 import numpy as np
 from torch_geometric.data import HeteroData as HeteroDataBase
 from typing import Any, Optional, Callable
-from torch_geometric.data import InMemoryDataset,Data
-from torch_geometric.transforms import NormalizeFeatures, AddSelfLoops, RemoveDuplicatedEdges
-from torch_geometric.utils import subgraph, coalesce, add_self_loops
-from torch_geometric.utils import k_hop_subgraph
+from torch_geometric.data import InMemoryDataset
+from torch_geometric.transforms import AddSelfLoops, RemoveDuplicatedEdges
+from torch_geometric.utils import k_hop_subgraph,coalesce
 from pathlib import Path
 from tqdm import tqdm
 from typing import List,Tuple
@@ -290,8 +289,6 @@ class GraphDataset(InMemoryDataset):
 
     def save(self):
         torch.save((self._data, self.slices), self.save_file)
-
-
 
 def get_graph_dataset_file_paths(paths:List[Path],config:dict, max_cases:list[int]=None,max_graphs:list[int]=None):
     data_files = []
