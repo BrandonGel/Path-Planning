@@ -51,7 +51,7 @@ if __name__ == "__main__":
     parser.add_argument("-w","--num_workers",type=int, default=None, help="number of parallel workers for cases (default: auto-detect CPU cores)")
     parser.add_argument("-t","--timeout",type=int, default=60, help="timeout for the solver in seconds")
     parser.add_argument("-m","--max_attempts",type=int, default=10000, help="max attempts for the solver")
-    parser.add_argument("-mapf","--mapf_solver",type=str, default='lacam', choices=['cbs', 'icbs', 'lacam', 'lacam_random'], help="MAPF solver to use")
+    parser.add_argument("-mapf","--mapf_solver_name",type=str, default='lacam', choices=['cbs', 'icbs', 'lacam', 'lacam_random'], help="MAPF solver to use")
     args = parser.parse_args()
 
     # Convert bounds from flat list to nested list format
@@ -91,7 +91,7 @@ if __name__ == "__main__":
             "nb_permutations": args.nb_permutations,
             "timeout": args.timeout,
             "max_attempts": args.max_attempts,
-            "mapf_solver": args.mapf_solver,
+            "mapf_solver_name": args.mapf_solver_name,
         }
     path = create_path_parameter_directory(base_path, config)
     create_solutions(path, args.num_cases, config,num_workers=num_workers)

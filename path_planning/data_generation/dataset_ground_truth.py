@@ -11,16 +11,11 @@ import os
 from pathlib import Path
 import yaml
 import numpy as np
-from typing import Any, Dict, List, Tuple, Optional
-from path_planning.multi_agent_planner.centralized.cbs.cbs import Environment, CBS
-from path_planning.multi_agent_planner.centralized.lacam.lacam import LaCAM
-from path_planning.multi_agent_planner.centralized.lacam.lacam_random import LaCAM as LaCAM_random
-from path_planning.multi_agent_planner.centralized.lacam.utility import set_starts_goals_config, validate_mapf_solution
-from path_planning.multi_agent_planner.centralized.get_centralized import get_centralized
+from typing import Dict, List, Tuple, Optional
+from path_planning.multi_agent_planner.mapf_solver import solve_mapf
 from path_planning.common.environment.map.graph_sampler import GraphSampler
 from path_planning.utils.util import set_global_seed
 import math
-import time
 from tqdm import tqdm
 from multiprocessing import Pool, cpu_count
 import shutil
@@ -44,8 +39,9 @@ def gen_input(
     nb_obstacles: int,
     nb_agents: int,
     resolution: float = 1.0,
-    mapf_solver: str = "cbs",
-    max_attempts: int = 10000
+    mapf_solver_name: str = "cbs",
+    max_attempts: int = 10000,
+    timeout: int = 60,
     ) -> Optional[Dict]:
     """
     Generate random MAPF instance with agents and obstacles.
@@ -68,8 +64,10 @@ def gen_input(
             "resolution": resolution,
             "obstacles": [],
         },
-        "agents": [],
-        "mapf_solver": mapf_solver
+        "agents": [],        
+        "timeout": timeout,
+        "max_attempts": max_attempts,
+        "mapf_solver_name": mapf_solver_name,
     }
 
     total_cells = dimensions[0] * dimensions[1]
@@ -166,7 +164,7 @@ def process_single_permutation(args: Tuple) -> Tuple[bool, int]:
         perm_id,
         timeout,
         max_attempts,
-        mapf_solver,
+        mapf_solver_name,
     ) = args
 
     # Shuffle agents/goals
@@ -179,7 +177,7 @@ def process_single_permutation(args: Tuple) -> Tuple[bool, int]:
     success = data_gen(
         inpt_copy,
         perm_path,
-        mapf_solver=mapf_solver,
+        mapf_solver_name=mapf_solver_name,
         timeout=timeout,
         max_attempts=max_attempts,
     )
@@ -192,7 +190,7 @@ def process_single_permutation(args: Tuple) -> Tuple[bool, int]:
 def data_gen(
     input_dict: Dict,
     output_path: Path,
-    mapf_solver: str = 'cbs',
+    mapf_solver_name: str = 'cbs',
     timeout: int = 60,
     max_attempts: int = 10000,
     ) -> bool:
@@ -235,22 +233,12 @@ def data_gen(
         for i, agent in enumerate(agents)
     ]
 
-    CBS,Environment = get_centralized(mapf_solver)
-    env = Environment(map_, agents,radius=0,velocity=0)
-    cbs = CBS(env, time_limit=timeout, max_iterations=max_attempts)
-    start_time = time.time()
-    solution = cbs.search()
-    runtime = time.time() - start_time
-
-
-    if not solution:
-        print(f"No solution found for case {output_path.name}")
-        return False
+    solution, runtime, cost = solve_mapf(map_, agents, mapf_solver_name, timeout, max_attempts)
 
     # Write solution file
     output = {
         "schedule": solution,
-        "cost": env.compute_solution_cost(solution),
+        "cost": cost,
         "runtime": runtime,
     }
 
@@ -279,14 +267,17 @@ def process_single_case(args: Tuple) -> Tuple[float, float, int]:
 
     # Generate random instance
     inpt = gen_input(
-        config["bounds"],
-        config["nb_obstacles"],
-        config["nb_agents"],
-        config["resolution"],
+        bounds=config["bounds"],
+        nb_obstacles=config["nb_obstacles"],
+        nb_agents=config["nb_agents"],
+        resolution=config["resolution"],
+        mapf_solver_name=config["mapf_solver_name"],
+        max_attempts=config["max_attempts"],
+        timeout=config["timeout"],
     )
     timeout = config["timeout"]
     max_attempts = config["max_attempts"]
-    mapf_solver = config["mapf_solver"]
+    mapf_solver_name = config["mapf_solver_name"]
     if inpt is None:
         return 0.0, 1.0, case_id
     
@@ -377,7 +368,7 @@ def process_single_case(args: Tuple) -> Tuple[float, float, int]:
         
         if len(perm_ids_unfinished) > 0:
             perm_id = perm_ids_unfinished[0]
-        task = (inpt_copy, start_goal_index.copy(), case_path, perm_id, timeout, max_attempts,mapf_solver)
+        task = (inpt_copy, start_goal_index.copy(), case_path, perm_id, timeout, max_attempts,mapf_solver_name)
         success, _ = process_single_permutation(task)
         
         total_attempts += 1
