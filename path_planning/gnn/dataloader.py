@@ -10,7 +10,7 @@ from pathlib import Path
 from tqdm import tqdm
 from typing import List,Tuple
 from multiprocessing import Pool, cpu_count
-from path_planning.data_generation.target_gen import generate_roadmap,generate_target_space
+from path_planning.data_generation.dataset_generate import generate_roadmap,generate_target_space
 import os
 import torch
 import torch_geometric
