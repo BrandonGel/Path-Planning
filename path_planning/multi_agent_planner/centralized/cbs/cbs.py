@@ -404,7 +404,6 @@ class CBS(object):
             iterations += 1
         return {}
 
-
     def _get_state_key(self, node):
         """Generate a hashable state key for closed set checking."""
         # Create a frozen representation of the solution
