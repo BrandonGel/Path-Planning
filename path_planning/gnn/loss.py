@@ -55,7 +55,7 @@ def dice_loss(y_logits, y_true,smooth=1):
     dice = (2 * intersection + smooth) / (union + smooth)  
     return 1 - dice
 
-def laplacian_loss(y_logits, edge_index,edge_weight=None,edge_types:List[Tuple[str,str,str]]=[('node','to','node')],p = 2,use_edge_weight=True):
+def laplacian_loss(y_logits, edge_index,edge_weight=None,edge_types:List[Tuple[str,str,str]]=[('node','to','node')],use_edge_weight=False):
     y_pred = torch.sigmoid(y_logits)
     loss =0
     if isinstance(edge_types, tuple):
@@ -65,7 +65,7 @@ def laplacian_loss(y_logits, edge_index,edge_weight=None,edge_types:List[Tuple[s
         y_pred_diff = y_pred[e_index[0]]-y_pred[e_index[1]]
         diff_norm = y_pred_diff.abs().squeeze(-1)**2
         e_weight = 1
-        if use_edge_weight and edge_weight is not None:
+        if use_edge_weight and edge_weight is not None and edge_type in edge_weight:
             e_weight = edge_weight[edge_type].squeeze(-1).reshape(-1)
             loss += torch.dot(diff_norm, e_weight)  
         else:

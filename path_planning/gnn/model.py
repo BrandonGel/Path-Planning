@@ -106,7 +106,7 @@ class GNN(nn.Module):
                 self.edge_linear.append(nn.Linear(self.edge_in_channels, self.gnn_hidden_channels))
             else:
                 self.edge_linear.append(nn.LazyLinear(self.gnn_hidden_channels))
-            for _ in range(1,self.num_start_layers):
+            for _ in range(1,self.num_mlp_start_layers):
                 self.edge_linear.append(self.activation_function)
                 self.edge_linear.append(nn.Linear(self.gnn_hidden_channels, self.gnn_hidden_channels))
 
