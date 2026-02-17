@@ -317,7 +317,7 @@ class Visualizer2D(BaseVisualizer2D):
             dpi=200)
         self.set_fig_size(self.figsize[0], self.figsize[1])
 
-    def plot_density_map(self, density_map: np.ndarray, grid_map: Grid=None, equal: bool = False, alpha: float = 0.6,masked_map = None,interpolation: str = 'bilinear') -> None:
+    def plot_density_map(self, density_map: np.ndarray, grid_map: Grid=None, equal: bool = False, alpha: float = 0.6,masked_map = None,interpolation: str = 'bilinear',use_fig_colorbar: bool = True) -> None:
         '''
         Plot density map as a heatmap that can be superimposed on other visualizations.
 
@@ -357,9 +357,11 @@ class Visualizer2D(BaseVisualizer2D):
         pos = self.ax.get_position()
         self.ax.set_position([pos.x0, pos.y0, pos.width * 0.92, pos.height])
         # Create a colorbar that matches the height of the plot
-        divider = make_axes_locatable(self.ax)
-        cax = divider.append_axes("right", size="5%", pad=0.05)
-        self.fig.colorbar(im, cax=cax, orientation='vertical', label="Frequency")
+        
+        if use_fig_colorbar:
+            divider = make_axes_locatable(self.ax)
+            cax = divider.append_axes("right", size="5%", pad=0.05)
+            self.fig.colorbar(im, cax=cax, orientation='vertical', label="Frequency")
             
         if equal: 
             plt.axis("equal")

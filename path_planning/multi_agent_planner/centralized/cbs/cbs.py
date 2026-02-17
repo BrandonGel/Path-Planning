@@ -12,7 +12,7 @@ import heapq
 import time
 from math import fabs
 from itertools import count,combinations
-from copy import deepcopy
+import numpy as np
 
 class Location(object):
     def __init__(self, point:tuple = None):
@@ -101,6 +101,8 @@ class Constraints(object):
 class Environment(object):
     def __init__(self, graph_map, agents, astar_max_iterations=-1, radius = 0.0, velocity = 0.0, use_constraint_sweep=True):
         self.graph_map = graph_map
+        if radius > 0:
+            self.graph_map.set_constraint_sweep()
         self.agents = agents
         self.agent_dict = {}
 
@@ -132,10 +134,10 @@ class Environment(object):
                 neighbors.append(n)
         return neighbors
 
-
-    def get_first_conflict(self, solution):
+    def get_conflicts(self, solution,get_first_conflict: bool = True):
         max_t = max([len(plan) for plan in solution.values()])
         result = Conflict()
+        conflicts = []
         for t in range(max_t):
             if self.radius == 0:
                 for agent_1, agent_2 in combinations(solution.keys(), 2):
@@ -149,7 +151,9 @@ class Environment(object):
                         result.location_1 = state_1.location
                         result.agent_1 = agent_1
                         result.agent_2 = agent_2
-                        return result
+                        if get_first_conflict:
+                            return result
+                        conflicts.append(result)
 
             for agent_1, agent_2 in combinations(solution.keys(), 2):
                 state_1a = self.get_state(agent_1, solution, t)
@@ -167,7 +171,9 @@ class Environment(object):
                         result.agent_2 = agent_2
                         result.location_1 = state_1a.location
                         result.location_2 = state_1b.location
-                        return result
+                        if get_first_conflict:
+                            return result
+                        conflicts.append(result)
                     continue
 
                 # Edge conflict check (use constraint sweep)
@@ -189,8 +195,10 @@ class Environment(object):
                     result.agent_2 = agent_2
                     result.location_1 = state_1a.location
                     result.location_2 = state_1b.location
-                    return result
-        return False
+                    conflicts.append(result)
+                    if get_first_conflict:
+                        return result
+        return conflicts
 
     def create_constraints_from_conflict(self, conflict):
         constraint_dict = {}
@@ -238,7 +246,6 @@ class Environment(object):
         goal = self.agent_dict[agent_name]["goal"]
         return sum([fabs(state.location[i] - goal.location[i]) for i in range(len(state.location))])
 
-
     def is_at_goal(self, state, agent_name):
         goal_state = self.agent_dict[agent_name]["goal"]
         return state.is_equal_except_time(goal_state)
@@ -266,23 +273,36 @@ class Environment(object):
 
     def compute_solution(self):
         # Clear caches for fresh solution attempt
-        self._constraint_sweep_cache.clear()
-        self._constraint_segment_cache.clear()
         solution = {}
+        solution_cost = {}
         for agent in self.agent_dict.keys():
             self.constraints = self.constraint_dict.setdefault(agent, Constraints())
-            local_solution = self.a_star.search(agent)
+            local_solution, local_cost = self.a_star.search(agent)
             if not local_solution:
-                return False
+                return False, float('inf')
             solution.update({agent:local_solution})
-        return solution
+            solution_cost[agent] = local_cost
+        return solution, solution_cost
 
     def compute_solution_cost(self, solution):
-        return sum([len(path) for path in solution.values()])
+        cost = 0
+        for agent, path in solution.items():
+            path_array = np.array([list(p.values())[1:] for p in path])
+            dist_travel = np.linalg.norm(path_array[1:] - path_array[:-1], axis=1)
+            travel_cost = dist_travel.sum()
+            wait_cost = (dist_travel == 0).sum()
+            cost += travel_cost + wait_cost
+        if isinstance(cost, np.ndarray):
+            return cost.item()
+        elif isinstance(cost, float) or isinstance(cost, int):
+            return cost
+        else:
+            raise ValueError(f"Invalid cost type: {type(cost)}")
 
 class HighLevelNode(object):
     def __init__(self):
         self.solution = {}
+        self.solution_cost = {}
         self.constraint_dict = {}
         self.cost = 0
 
@@ -297,7 +317,7 @@ class HighLevelNode(object):
         return self.cost < other.cost
 
 class CBS(object):
-    def __init__(self, environment, time_limit: float | None = None, max_iterations: int | None = None,verbose: bool = False):
+    def __init__(self, environment: Environment, time_limit: float | None = None, max_iterations: int | None = None,verbose: bool = False):
         """
         :param environment: Environment instance
         :param time_limit: Optional wall-clock time limit (in seconds) for the
@@ -319,13 +339,13 @@ class CBS(object):
         for agent in self.env.agent_dict.keys():
             start.constraint_dict[agent] = Constraints()
 
-        start.solution = self.env.compute_solution()
+        start.solution, start.solution_cost = self.env.compute_solution()
         if not start.solution:
             if self.verbose:
                 print("No initial solution found")
             return {}
 
-        start.cost = self.env.compute_solution_cost(start.solution)
+        start.cost = sum(start.solution_cost.values())
 
         # Add start node to heap
         heapq.heappush(self.open_list, (start.cost, next(self.counter), start))
@@ -355,7 +375,7 @@ class CBS(object):
             self.closed_set.add(state_key)
 
             self.env.constraint_dict = P.constraint_dict
-            conflict_dict = self.env.get_first_conflict(P.solution)
+            conflict_dict = self.env.get_conflicts(P.solution)
             if not conflict_dict:
                 if self.verbose:
                     print("solution found")
@@ -364,6 +384,7 @@ class CBS(object):
             for agent in constraint_dict.keys():
                 new_node = HighLevelNode()
                 new_node.solution = P.solution.copy()
+                new_node.solution_cost = P.solution_cost.copy()
 
                 # Selective deep copy only for affected agent's constraints
                 new_node.constraint_dict = {}
@@ -380,14 +401,13 @@ class CBS(object):
                         new_node.constraint_dict[a] = P.constraint_dict[a]
 
                 self.env.constraint_dict = new_node.constraint_dict
-                new_node.solution = self.env.compute_solution()
+                new_node.solution, new_node.solution_cost = self.env.compute_solution()
                 if not new_node.solution:
                     continue
-                new_node.cost = self.env.compute_solution_cost(new_node.solution)
+                new_node.cost = sum(new_node.solution_cost.values())
                 heapq.heappush(self.open_list, (new_node.cost, next(self.counter), new_node))
             iterations += 1
         return {}
-
 
     def _get_state_key(self, node):
         """Generate a hashable state key for closed set checking."""
