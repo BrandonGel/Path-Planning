@@ -1,3 +1,8 @@
+"""
+Run make environments for 2D and 3D maps.
+python scripts/roadmaps/run_make_environments.py
+"""
+
 from python_motion_planning.common import Grid, TYPES
 from path_planning.utils.util import convert_grid_to_yaml
 from path_planning.utils.util import set_global_seed
