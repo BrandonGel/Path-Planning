@@ -101,7 +101,7 @@ class GraphSampler(Grid):
             return self.start_to_all_edges_dict
         if len(self.edges) > 0:
             u_indices = [self.start_nodes_index[node] for node in self.get_start_nodes()]
-            self.start_to_all_edges_dict = {u_index : [(v_index,self.edge_weights[self.edge_indices_dict[(u_index,v_index.item())]]) for v_index in self.road_map[u_index]] for u_index in u_indices}
+            self.start_to_all_edges_dict = {u_index : [(v_index,self.edge_weights[self.edge_indices_dict[(u_index,v_index)]]) for v_index in self.road_map[u_index]] for u_index in u_indices}
             return self.start_to_all_edges_dict
         raise ValueError("Edges have not been generated yet. Please generate the roadmap first.")
 
@@ -110,7 +110,7 @@ class GraphSampler(Grid):
             return self.goal_to_all_edges_dict
         if len(self.edges) > 0:
             u_indices = [self.goal_nodes_index[node] for node in self.get_goal_nodes()]
-            self.goal_to_all_edges_dict = {u_index : [(v_index,self.edge_weights[self.edge_indices_dict[(u_index,v_index.item())]]) for v_index in self.road_map[u_index]] for u_index in u_indices}
+            self.goal_to_all_edges_dict = {u_index : [(v_index,self.edge_weights[self.edge_indices_dict[(u_index,v_index)]]) for v_index in self.road_map[u_index]] for u_index in u_indices}
             return self.goal_to_all_edges_dict
         raise ValueError("Edges have not been generated yet. Please generate the roadmap first.")
 
