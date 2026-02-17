@@ -11,11 +11,11 @@ from path_planning.common.environment.map.graph_sampler import GraphSampler
 from path_planning.multi_agent_planner.centralized.lacam.utility import Coord,is_valid_coord,get_neighbors,Config,Deadline,Configs
 from path_planning.multi_agent_planner.centralized.lacam.dist_table import DistTable
 from path_planning.multi_agent_planner.centralized.lacam.pibt import PIBT
-from path_planning.multi_agent_planner.centralized.lacam.lacam_random import NO_AGENT, NO_LOCATION, LowLevelNode, HighLevelNode
+from path_planning.multi_agent_planner.centralized.lacam.lacam_random import NO_AGENT, NO_LOCATION, LowLevelNode, HighLevelNode, LaCAM as LaCAM_random
 
-class LaCAM:
+class LaCAM(LaCAM_random):
     def __init__(self) -> None:
-        pass
+        super().__init__()
 
     def solve(
         self,
@@ -134,7 +134,7 @@ class LaCAM:
                     N.tree.append(C.get_child(i, u))
 
             # generate the next configuration
-            Q_to = self.configuration_generaotr(N, C)
+            Q_to = self.configuration_generator(N, C)
             if Q_to is None:
                 # invalid configuration
                 continue
@@ -186,24 +186,6 @@ class LaCAM:
             self.cost = float('inf')
         return self.backtrack(N_goal)
 
-    @staticmethod
-    def backtrack(_N: HighLevelNode | None) -> Configs:
-        configs: Configs = []
-        N = _N
-        while N is not None:
-            configs.append(N.Q)
-            N = N.parent
-        configs.reverse()
-        return configs
-
-    def get_edge_cost(self, Q_from: Config, Q_to: Config) -> int:
-        # e.g., \sum_i | not (Q_from[i] == Q_to[k] == g_i) |
-        cost = 0
-        for i in range(self.num_agents):
-            if not (self.goals[i] == Q_from[i] == Q_to[i]):
-                cost += 1
-        return cost
-
     def get_h_value(self, Q: Config) -> int:
         # e.g., \sum_i dist(Q[i], g_i)
         cost = 0
@@ -214,15 +196,7 @@ class LaCAM:
             cost += c
         return cost
 
-    def get_order(self, Q: Config) -> list[int]:
-        # e.g., by descending order of dist(Q[i], g_i)
-        # Note that this is not an effective PIBT prioritization scheme
-        order = list(range(self.num_agents))
-        self.rng.shuffle(order)
-        order.sort(key=lambda i: self.dist_tables[i].get(Q[i]), reverse=True)
-        return order
-
-    def configuration_generaotr(
+    def configuration_generator(
         self, N: HighLevelNode, C: LowLevelNode
     ) -> Config | None:
         # setup next configuration
@@ -233,40 +207,3 @@ class LaCAM:
         # apply PIBT
         success = self.pibt.step(N.Q, Q_to, N.order)
         return Q_to if success else None
-
-    def info(self, level: int, msg: str) -> None:
-        if self.verbose < level:
-            return
-        logger.debug(f"{int(self.deadline.elapsed):4d}ms  {msg}")
-
-    def get_solution_dict(self, solution: Configs) -> dict:
-        solution_dict = {}
-        for i in range(self.num_agents):
-            solution_dict.update({f'agent_{i}': []})
-            for j in range(len(solution)):
-                if self.graph_map.dim == 2:
-                    solution_dict[f'agent_{i}'].append({
-                        't': j,
-                        'x': solution[j][i][0],
-                        'y': solution[j][i][1]
-                    })
-                elif self.graph_map.dim == 3:
-                    solution_dict[f'agent_{i}'].append({
-                        't': j,
-                        'x': solution[j][i][0],
-                        'y': solution[j][i][1],
-                        'z': solution[j][i][2]
-                    })
-                else:
-                    raise ValueError(f"Invalid dimension: {self.graph_map.dim}")
-        return solution_dict
-    
-    def compute_solution_cost(self, solution: dict) -> int:
-        cost = 0
-        for agent, path in solution.items():
-            path_array = np.array([[point['x'], point['y']] for point in path])
-            dist_travel = np.linalg.norm(path_array[1:] - path_array[:-1], axis=1)
-            travel_cost = dist_travel.sum()
-            wait_cost = (dist_travel == 0).sum()
-            cost += travel_cost + wait_cost
-        return cost

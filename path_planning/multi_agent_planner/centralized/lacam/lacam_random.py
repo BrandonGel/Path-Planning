@@ -282,12 +282,16 @@ class LaCAM:
         # categorize result
         if N_goal is not None and len(OPEN) == 0:
             self.info(1, f"reach optimal solution, cost={N_goal.g}")
+            self.cost = N_goal.g
         elif N_goal is not None:
             self.info(1, f"suboptimal solution, cost={N_goal.g}")
+            self.cost = N_goal.g
         elif len(OPEN) == 0:
             self.info(1, "detected unsolvable instance")
+            self.cost = float('inf')
         else:
             self.info(1, "failure due to timeout")
+            self.cost = float('inf')
         return self.backtrack(N_goal)
 
     @staticmethod
@@ -467,4 +471,10 @@ class LaCAM:
             travel_cost = dist_travel.sum()
             wait_cost = (dist_travel == 0).sum()
             cost += travel_cost + wait_cost
-        return cost
+
+        if isinstance(cost, np.float64) or isinstance(cost, np.float32) or isinstance(cost, np.int64) or isinstance(cost, np.int32):
+            return cost.item()
+        elif isinstance(cost, float) or isinstance(cost, int):
+            return cost
+        else:
+            raise ValueError(f"Invalid cost type: {type(cost)}")
