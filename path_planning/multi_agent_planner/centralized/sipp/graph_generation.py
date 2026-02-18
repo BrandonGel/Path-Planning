@@ -3,7 +3,8 @@ import yaml
 from bisect import bisect
 from path_planning.common.environment.map.graph_sampler import GraphSampler
 from path_planning.common.environment.node import Node
-from typing import Any
+from typing import Any, List
+from collections import deque
 
 class State(object):
     def __init__(self, position=(-1,-1), t=0, interval=(0,float('inf'))):
@@ -127,6 +128,40 @@ class SippGraph(object):
                     t2 = t1 + 1 if not last_t else float('inf')
                     self.sipp_graph[position].split_interval(t1, t2,1)
 
+        # Update the intervals of the SIPP graph based on the agent's plan (treated as dynamic obstacles)
+   
+    def update_intervals(self,plans: List[List[State]] | List[State] | State):
+        if not plans or len(plans) == 0: return
+        for plan in plans:
+            # for location in schedule:
+            for i in range(len(plan)):
+                location = plan[i]
+                position = location.position
+                t = location.time
+                last_t = i == len(plan)-1
+
+                if self.radius > 0:
+                    if last_t:
+                        overlapping_vertices,overlapping_edges = self._get_constraint_sweep_cached(position, position,self.velocity, self.radius)
+                    else:
+                        next_location = plan[i+1]
+                        next_position = next_location.position
+                        overlapping_vertices,overlapping_edges = self._get_constraint_sweep_cached(position, next_position,self.velocity, self.radius)
+                    for vertex_pos, vertex_interval in overlapping_vertices.items():
+                        t_start,t_end = vertex_interval
+                        t1 = t+t_start
+                        t2 = t+t_end 
+                        self.sipp_graph[vertex_pos].split_interval(t1, t2,0)
+                    for edge_pos, edge_interval in overlapping_edges.items():
+                        t_start,t_end = edge_interval
+                        t1 = t+t_start
+                        t2 = t+t_end 
+                        self.sipp_graph[edge_pos].split_interval(t1, t2,0)
+                else:
+                    t1 = t
+                    t2 = t1 + 1 if not last_t else float('inf')
+                    self.sipp_graph[position].split_interval(t1, t2,1)
+
     def is_valid_position(self, position):
         return not self.graph_map.in_collision_point(position)
 
@@ -147,3 +182,16 @@ class SippGraph(object):
         if key not in self._constraint_sweep_cache:
             self._constraint_sweep_cache[key] = self.graph_map.get_constraint_sweep(p1, p2,v, r, use_interval=True)
         return self._constraint_sweep_cache[key]
+
+    def clear_sipp_graph_values(self,no_clear_interval: bool = False):
+        for node in self.sipp_graph.values():
+            node.g = float('inf')
+            node.f = float('inf')
+            node.parent_state = State()
+            if not no_clear_interval:
+                node.interval_list = [(0, float('inf'))]
+        if not no_clear_interval:
+            for edge in self.sipp_graph.values():
+                edge.interval_list = [(0, float('inf'))]
+
+    

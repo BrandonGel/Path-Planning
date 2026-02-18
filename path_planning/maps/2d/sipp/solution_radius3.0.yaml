@@ -1,5 +1,5 @@
 schedule:
-  agent_0:
+  agent0:
   - x: 5
     y: 15
     t: 0
@@ -180,7 +180,7 @@ schedule:
   - x: 44
     y: 19
     t: 59.0
-  agent_1:
+  agent1:
   - x: 44
     y: 15
     t: 0
@@ -371,4 +371,4 @@ schedule:
     y: 25
     t: 62.0
 cost: 121.0
-runtime: 1.1334993839263916
+runtime: 0.7496688365936279

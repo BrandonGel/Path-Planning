@@ -8,21 +8,22 @@ See the article: DOI: 10.1109/ICRA.2011.5980306
 
 """
 
-import argparse
-import yaml
 from math import fabs
 from path_planning.multi_agent_planner.centralized.sipp.graph_generation import SippGraph, State
 from path_planning.common.environment.map.graph_sampler import GraphSampler
 from path_planning.common.environment.node import Node
+from collections import deque
+import random
 
 class SippPlanner(SippGraph):
-    def __init__(self, graph_map: GraphSampler,dynamic_obstacles:dict = {},start:tuple = None,goal:tuple = None,name:str = None,radius:float = 0.0,velocity:float = 0.0,use_constraint_sweep:bool = True,verbose:bool = False):
+    def __init__(self, graph_map: GraphSampler,dynamic_obstacles:dict = {},agents:list = [],radius:float = 0.0,velocity:float = 0.0,use_constraint_sweep:bool = True,verbose:bool = False):
         SippGraph.__init__(self, graph_map, dynamic_obstacles,radius,velocity,use_constraint_sweep)
-        self.open = []
-        self.start = tuple(start)
-        self.goal = tuple(goal)
-        self.name = name
+        self.agents = agents
         self.verbose = verbose
+        self.plan = {}
+        self.plan_cost = {}
+        self.cost = 0
+        random.shuffle(self.agents)
 
     def get_mtime(self, position1, position2):
         m_cost = float(self.graph_map.get_cost(Node(tuple(position1)), Node(tuple(position2))))
@@ -91,67 +92,76 @@ class SippPlanner(SippGraph):
                 costs.append(m_time)
         return successors, costs
 
-    def get_heuristic(self, position):
-        dist =  fabs(position[0] - self.goal[0]) + fabs(position[1]-self.goal[1])
+    def get_heuristic(self, position,goal):
+        dist =  fabs(position[0] - goal[0]) + fabs(position[1]-goal[1])
         return dist if self.velocity == 0 else dist / self.velocity
 
     def compute_plan(self):
-        self.open = []
-        goal_reached = False
+        self.cost = 0
+        for ii,agent in enumerate(self.agents):
+            start = tuple(agent["start"])
+            goal = tuple(agent["goal"])
+            OPEN = []
+            goal_reached = False
+            s_start = State(start, 0) 
 
-        s_start = State(self.start, 0) 
+            self.sipp_graph[start].g = 0.
+            f_start = self.get_heuristic(start,goal)
+            self.sipp_graph[start].f = f_start
 
-        self.sipp_graph[self.start].g = 0.
-        f_start = self.get_heuristic(self.start)
-        self.sipp_graph[self.start].f = f_start
+            OPEN.append((f_start, s_start))
 
-        self.open.append((f_start, s_start))
+            while (not goal_reached):
+                if not OPEN: 
+                    # Plan not found
+                    return {}
+                s = OPEN.pop(0)[1]
+                successors, costs = self.get_successors(s)
+        
+                for cost, successor in zip(costs, successors):
+                    if self.sipp_graph[successor.position].g > self.sipp_graph[s.position].g + cost:
+                        self.sipp_graph[successor.position].g = self.sipp_graph[s.position].g + cost
+                        self.sipp_graph[successor.position].parent_state = s
 
-        while (not goal_reached):
-            if not self.open: 
-                # Plan not found
-                return 0
-            s = self.open.pop(0)[1]
-            successors, costs = self.get_successors(s)
-    
-            for cost, successor in zip(costs, successors):
-                if self.sipp_graph[successor.position].g > self.sipp_graph[s.position].g + cost:
-                    self.sipp_graph[successor.position].g = self.sipp_graph[s.position].g + cost
-                    self.sipp_graph[successor.position].parent_state = s
+                        if successor.position == goal:
+                            if self.verbose:
+                                print("Plan successfully calculated!!")
+                            goal_reached = True
+                            break
 
-                    if successor.position == self.goal:
-                        if self.verbose:
-                            print("Plan successfully calculated!!")
-                        goal_reached = True
-                        break
+                        self.sipp_graph[successor.position].f = self.sipp_graph[successor.position].g + self.get_heuristic(successor.position,goal)
+                        OPEN.append((self.sipp_graph[successor.position].f, successor))
 
-                    self.sipp_graph[successor.position].f = self.sipp_graph[successor.position].g + self.get_heuristic(successor.position)
-                    self.open.append((self.sipp_graph[successor.position].f, successor))
-
-        # Tracking back
-        start_reached = False
-        self.plan = []
-        current = successor
-        while not start_reached:
-            self.plan.insert(0,current)
-            if current.position == self.start:
-                start_reached = True
-            current = self.sipp_graph[current.position].parent_state
-        return 1
+            # Tracking back
+            start_reached = False
+            plan = deque()
+            current = successor
+            while not start_reached:
+                plan.appendleft(current)
+                if current.position == start:
+                    start_reached = True
+                current = self.sipp_graph[current.position].parent_state
+            self.plan[agent["name"]] = plan
+            self.plan_cost[agent["name"]] = self.sipp_graph[successor.position].g 
+            self.clear_sipp_graph_values(no_clear_interval=True)
+            self.update_intervals([plan])
+        self.cost = sum(self.plan_cost.values())
+        return self.get_plan()
             
     def get_plan(self):
-        path_list = []
+        solution = {}
+        for agent, plan in self.plan.items():
+            path_list = []
+            for state in plan:
+                temp_dict = {"x":state.position[0], "y":state.position[1], "t":state.time}
+                path_list.append(temp_dict)
+            solution[agent] = path_list
+        return solution
 
-        for i in range(len(self.plan)):
-            setpoint = self.plan[i]
-            temp_dict = {"x":setpoint.position[0], "y":setpoint.position[1], "t":setpoint.time}
-            path_list.append(temp_dict)
-
-        data = {self.name:path_list}
-        return data
-
-    def get_cost(self):
+    def compute_solution_cost(self, solution = None):
+        if solution is None:
+            return self.cost
         cost = 0
-        for i in range(len(self.plan)-1):
-            cost += self.get_mtime(self.plan[i].position, self.plan[i+1].position)
+        for agent, path in solution.items():
+            cost += float(path[-1]["t"]) - float(path[0]["t"])
         return cost
