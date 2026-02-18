@@ -1,0 +1,72 @@
+seed: 42
+loss:
+  type:
+    # - mse
+    # - bce
+    # - dice
+    # - kld
+    - focal
+    - laplacian
+    # - graphsage_unsupervised
+  weights:
+    # - 1.0
+    # - 0.5
+    # - 0.5
+    # - 1.0
+    - 1.0
+    - 0.01
+    # - 0.01
+  args:
+    # - null
+    # - weight: null
+    #   pos_weight: False
+    # - null
+    # - null
+    - alpha: 0.25
+      gamma: 2
+    - edge_types: 
+      - !!python/tuple [node, to, node]
+      p: 2
+    # - edge_types: 
+    #   - !!python/tuple [node, to, node]
+    #   p: 2
+model:
+  type: gat
+  num_blocks: 3
+  hidden_channels: 16
+  in_channels: -1
+  out_channels: 1
+  num_heads: 8
+  edge_dim: 1
+  concat: true
+  residual: true
+  dropout: 0.2
+  num_start_layers: 1
+  num_mlp_layers: 2
+  activation_function: relu
+  to_hetero_aggr: sum
+  compile: false
+  compile_dynamic: true
+optimizer:
+  type: adamw
+  lr: 0.0001
+  weight_decay: 0.0005
+train:
+  batch_size: 128
+  test_size: 0.1
+  num_epochs: 2500
+  resume_epoch: 0
+  save_epoch: 100
+  verbose_epoch: 10
+  save_folder: 'logs'
+  load_folder: 'logs'
+  gradient_clip_val: 5.0
+  num_workers: 19
+dataset:
+  folder_path: null
+  load_file: null
+  save_file: null
+  config:
+    use_discrete_space: false
+    road_map_type: 'prm'
+    target_space: 'convolution_binary'

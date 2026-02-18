@@ -1,6 +1,0 @@
-schedule:
-  agent0:
-  - t: 0
-    x: 1.5
-    y: 2.5
-cost: 1
