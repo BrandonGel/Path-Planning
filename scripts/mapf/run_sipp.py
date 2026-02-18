@@ -1,108 +1,163 @@
 """
-Run CBS for MAPF algorithms with different agent radii (0.0, 1.0, 2.0).
-python scripts/mapf/run_cbs.py 
+
+SIPP implementation  
+
+author: Ashwin Bose (@atb033)
+
+See the article: DOI: 10.1109/ICRA.2011.5980306
+
 """
 
 import argparse
-from path_planning.utils.util import set_global_seed
-from path_planning.common.visualizer.visualizer_2d import Visualizer2D
-from path_planning.common.visualizer.visualizer_3d import Visualizer3D
-from path_planning.utils.util import write_to_yaml
-from path_planning.utils.util import read_graph_sampler_from_yaml, read_agents_from_yaml
-from path_planning.multi_agent_planner.centralized.cbs.cbs import Environment, CBS
-from path_planning.multi_agent_planner.centralized.sipp.sipp import SippPlanner
-import time
-import numpy as np
-import os
-from copy import deepcopy
+import yaml
+from math import fabs
+from path_planning.multi_agent_planner.centralized.sipp.graph_generation import SippGraph, State
+from path_planning.common.environment.map.graph_sampler import GraphSampler
+from path_planning.common.environment.node import Node
 
-if __name__ == "__main__":
-    os.makedirs("figs/sipp", exist_ok=True)
-    os.makedirs("path_planning/maps/2d/sipp", exist_ok=True)
+class SippPlanner(SippGraph):
+    def __init__(self, graph_map: GraphSampler,dynamic_obstacles:dict = {},agents:list = [],radius:float = 0.0,velocity:float = 0.0,use_constraint_sweep:bool = True,verbose:bool = False):
+        SippGraph.__init__(self, graph_map, dynamic_obstacles,radius,velocity,use_constraint_sweep)
+        self.agents = agents
+        self.verbose = verbose
+        self.plan = {}
 
-    set_global_seed(42)
-    for agent_radius in [0.0,1.0, 2.0,3.0]:
-        map_ = read_graph_sampler_from_yaml("path_planning/maps/2d/2d.yaml")
-        agents = read_agents_from_yaml("path_planning/maps/2d/2d.yaml")
-        map_.inflate_obstacles(radius=agent_radius+np.sqrt(2)/2)
-        map_.set_parameters(
-            sample_num=0, num_neighbors=4.0, min_edge_len=0.0, max_edge_len=1.1
-        )
+    def get_mtime(self, position1, position2):
+        m_cost = float(self.graph_map.get_cost(Node(tuple(position1)), Node(tuple(position2))))
+        if self.velocity > 0:
+            m_time = m_cost / self.velocity
+        else:
+            m_time = 1.0
+        return m_time
 
-        start = [agent["start"] for agent in agents]
-        goal = [agent["goal"] for agent in agents]
-        map_.set_start(start)
-        map_.set_goal(goal)
-        nodes = map_.generateRandomNodes(generate_grid_nodes=True)
-        road_map = map_.generate_roadmap(nodes)
+    def get_earliest_no_collision_arrival_time(self, start_t, interval,start_pos,neighbour):
+        t = max(start_t, interval[0]) 
 
-        start = [s.current for s in map_.get_start_nodes()]
-        goal = [g.current for g in map_.get_goal_nodes()]
-        agents = [
-            {"start": start[i], "name": agent["name"], "goal": goal[i]}
-            for i, agent in enumerate(agents)
-        ]
+        # Check for edge conflicts for point agents
+        if self.radius == 0:
+            if t == interval[0]:
+                collision = False
+                for _,obstacle in self.dyn_obstacles.items():
+                    for location in obstacle:   
+                        if location["x"] == neighbour[0] and location["y"] == neighbour[1] and location["t"] == t-1:
+                            collision = True
+                            break
+                    if collision:
+                        t = None
+                        break
+            return t
 
-        map_.set_constraint_sweep()
+        if t >= interval[0] and t <= interval[1]:
+            overlapping_vertices,overlapping_edges = self._get_constraint_sweep_cached(start_pos,neighbour,self.velocity,self.radius)
+            vertex_indicies = [ index for index in overlapping_vertices.keys() if index != start_pos and index != neighbour]
+            edge_indicies = [ index for index in overlapping_edges.keys() if index[0] != start_pos and index[1] != neighbour]
+            for vertex_index in vertex_indicies:
+                if not self.sipp_graph[vertex_index].is_in_safe_interval(t):
+                    return None
+            for edge_index in edge_indicies:
+                if not self.sipp_graph[edge_index].is_in_safe_interval(t):
+                    return None
+            return t
+        return None
+
+    def get_successors(self, state):
+        successors = []
+        costs = []
+        neighbour_list = self.get_valid_neighbours(state.position)
+        for neighbour_pos in neighbour_list:
+            m_time = self.get_mtime(state.position, neighbour_pos)
+            start_pos = state.position
+            start_t = state.time + m_time  # Earliest possible arrival time
+            end_t = state.interval[1] + m_time #Latest possible arrival time
+            edge_position = (start_pos, neighbour_pos)
+            self.sipp_graph[edge_position]
+            
+            
+            for i in self.sipp_graph[neighbour_pos].interval_list:
+                # If the interval is outside the possible arrival time, skip the interval
+                if i[0] > end_t or i[1] < start_t:
+                    continue
+
+                # Get the earliest no collision arrival time
+                t = self.get_earliest_no_collision_arrival_time(start_t, i,start_pos, neighbour_pos)
+                if t is None: # Any collision, skip the interval
+                    continue
+                
+                # Create the successor state
+                s = State(neighbour_pos, t, i)
+                successors.append(s)
+                costs.append(m_time)
+        return successors, costs
+
+    def get_heuristic(self, position):
+        dist =  fabs(position[0] - self.goal[0]) + fabs(position[1]-self.goal[1])
+        return dist if self.velocity == 0 else dist / self.velocity
+
+    def compute_plan(self):
+        for ii,agent in enumerate(self.agents):
+            start = tuple(agent["start"])
+            goal = tuple(agent["goal"])
+            OPEN = []
+            goal_reached = False
+            s_start = State(start, 0) 
+
+            self.sipp_graph[start].g = 0.
+            f_start = self.get_heuristic(start)
+            self.sipp_graph[self.start].f = f_start
+
+            OPEN.append((f_start, s_start))
+
+            while (not goal_reached):
+                if not OPEN: 
+                    # Plan not found
+                    return 0
+                s = OPEN.pop(0)[1]
+                successors, costs = self.get_successors(s)
         
-        # Output file
-        output = dict()
-        solution = dict()
-        dynamic_obstacles = dict()
-        cost = 0
+                for cost, successor in zip(costs, successors):
+                    if self.sipp_graph[successor.position].g > self.sipp_graph[s.position].g + cost:
+                        self.sipp_graph[successor.position].g = self.sipp_graph[s.position].g + cost
+                        self.sipp_graph[successor.position].parent_state = s
 
-        #Searching
-        st = time.time()
-        for i in range(len(agents)):
-            name = f'agent_{i}'
-            start = agents[i]["start"]
-            goal = agents[i]["goal"]
-            sipp_planner = SippPlanner(map_,dynamic_obstacles,start,goal,name,agent_radius,0.0)
+                        if successor.position == self.goal:
+                            if self.verbose:
+                                print("Plan successfully calculated!!")
+                            goal_reached = True
+                            break
 
-            if sipp_planner.compute_plan():
-                plan = sipp_planner.get_plan()
-                cost += sipp_planner.get_cost()
-                solution.update(plan)
-                dynamic_obstacles.update(plan)
+                        self.sipp_graph[successor.position].f = self.sipp_graph[successor.position].g + self.get_heuristic(successor.position)
+                        OPEN.append((self.sipp_graph[successor.position].f, successor))
 
-            else: 
-                print("Plan not found")
-        ft = time.time()
-        print(f"Time taken to search with radius {agent_radius}: {ft - st} seconds")
-        # # Write to output file
-        output = dict()
-        output["schedule"] = solution
-        output["cost"] = cost
-        output["runtime"] = ft - st
-        write_to_yaml(output, f"path_planning/maps/2d/sipp/solution_radius{agent_radius}.yaml")
+            # Tracking back
+            start_reached = False
+            plan = []
+            current = successor
+            while not start_reached:
+                plan.insert(current)
+                if current.position == self.start:
+                    start_reached = True
+                current = self.sipp_graph[current.position].parent_state
+            self.plan[agent["name"]] = reversed(plan)
 
-        vis = Visualizer2D()
-        vis.plot_grid_map(map_)
-        vis.plot_road_map(map_, nodes, road_map)
+            self.clear_sipp_graph_values()
+            if ii < len(self.agents)-1:
+                self.agents[ii+1]["start"] = self.plan[-1].position
 
-        # Plot each agent's path
-        for agent_name, trajectory in solution.items():
-            path = np.array([([point["x"], point["y"]]) for point in trajectory])
-            vis.plot_path(path)
-        vis.savefig(f"figs/sipp/sipp_2d_radius{agent_radius}.png")
-        # vis.show()
-        vis.close()
+        return 1
+            
+    def clear_sipp_graph_values(self):
+        for node in self.sipp_graph.values():
+            node.g = float('inf')
+            node.f = float('inf')
+            node.parent_state = State()
+            
+    def get_plan(self):
+        path_list = []
 
-        # Create animation
-        schedule = {"schedule": deepcopy(solution)}
-        gif_filename = f"figs/sipp/sipp_2d_radius{agent_radius}.gif"
-        vis = Visualizer2D()
-        vis.animate(
-            gif_filename,
-            map_,
-            schedule,
-            road_map=road_map,
-            skip_frames=1,
-            intermediate_frames=3,
-            speed=3,
-            radius=agent_radius,
-            map_frame=True,
-        )
-        print(f"Animation saved to: {gif_filename}")
-        # vis.show()
-        vis.close()
+        for i in range(len(self.plan)):
+            setpoint = self.plan[i]
+            temp_dict = {"x":setpoint.position[0], "y":setpoint.position[1], "t":setpoint.time}
+            path_list.append(temp_dict)
+
+        data = {self.name:path_list}
+        return data
