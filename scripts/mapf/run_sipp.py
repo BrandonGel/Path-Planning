@@ -51,51 +51,51 @@ if __name__ == "__main__":
         dynamic_obstacles = dict()
         cost = 0
 
-        # #Searching
-        # st = time.time()
-        # sipp_planner = SippPlanner(map_,dynamic_obstacles,agents,agent_radius,0.0)
-        # if sipp_planner.compute_plan():
-        #     solution = sipp_planner.get_plan()
-        #     cost = sipp_planner.compute_solution_cost()
-        # else:
-        #     print("Plan not found")
-        #     continue
-        # ft = time.time()
-        # print(f"Time taken to search with radius {agent_radius}: {ft - st} seconds")
-        # # Write to output file
-        # output = dict()
-        # output["schedule"] = solution
-        # output["cost"] = cost
-        # output["runtime"] = ft - st
-        # write_to_yaml(output, f"path_planning/maps/2d/sipp/solution_radius{agent_radius}.yaml")
+        #Searching
+        st = time.time()
+        sipp_planner = SippPlanner(map_,dynamic_obstacles,agents,agent_radius,0.0)
+        if sipp_planner.compute_plan():
+            solution = sipp_planner.get_plan()
+            cost = sipp_planner.compute_solution_cost()
+        else:
+            print("Plan not found")
+            continue
+        ft = time.time()
+        print(f"Time taken to search with radius {agent_radius}: {ft - st} seconds")
+        # Write to output file
+        output = dict()
+        output["schedule"] = solution
+        output["cost"] = cost
+        output["runtime"] = ft - st
+        write_to_yaml(output, f"path_planning/maps/2d/sipp/solution_radius{agent_radius}.yaml")
 
-        # vis = Visualizer2D()
-        # vis.plot_grid_map(map_)
-        # vis.plot_road_map(map_, nodes, road_map)
+        vis = Visualizer2D()
+        vis.plot_grid_map(map_)
+        vis.plot_road_map(map_, nodes, road_map)
 
-        # # Plot each agent's path
-        # for agent_name, trajectory in solution.items():
-        #     path = np.array([([point["x"], point["y"]]) for point in trajectory])
-        #     vis.plot_path(path)
-        # vis.savefig(f"figs/sipp/sipp_2d_radius{agent_radius}.png")
-        # # vis.show()
-        # vis.close()
+        # Plot each agent's path
+        for agent_name, trajectory in solution.items():
+            path = np.array([([point["x"], point["y"]]) for point in trajectory])
+            vis.plot_path(path)
+        vis.savefig(f"figs/sipp/sipp_2d_radius{agent_radius}.png")
+        # vis.show()
+        vis.close()
 
-        # # Create animation
-        # schedule = {"schedule": deepcopy(solution)}
-        # gif_filename = f"figs/sipp/sipp_2d_radius{agent_radius}.gif"
-        # vis = Visualizer2D()
-        # vis.animate(
-        #     gif_filename,
-        #     map_,
-        #     schedule,
-        #     road_map=road_map,
-        #     skip_frames=1,
-        #     intermediate_frames=3,
-        #     speed=3,
-        #     radius=agent_radius,
-        #     map_frame=True,
-        # )
-        # print(f"Animation saved to: {gif_filename}")
-        # # vis.show()
-        # vis.close()
+        # Create animation
+        schedule = {"schedule": deepcopy(solution)}
+        gif_filename = f"figs/sipp/sipp_2d_radius{agent_radius}.gif"
+        vis = Visualizer2D()
+        vis.animate(
+            gif_filename,
+            map_,
+            schedule,
+            road_map=road_map,
+            skip_frames=1,
+            intermediate_frames=3,
+            speed=3,
+            radius=agent_radius,
+            map_frame=True,
+        )
+        print(f"Animation saved to: {gif_filename}")
+        # vis.show()
+        vis.close()
