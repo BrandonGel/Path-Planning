@@ -257,7 +257,7 @@ def set_train_config(train_config: dict = None,args: argparse.Namespace = None):
     if 'load_folder' not in train_config['train']:
         train_config['train']['load_folder'] = None
     resume_epoch = train_config['train']['resume_epoch']
-    model_load_folder = train_config['train']
+    model_load_folder = train_config['train']['load_folder']
     if resume_epoch > 0:
         assert model_load_folder is not None, "Load folder must be provided if resume epoch is greater than 0"
         assert os.path.exists(model_load_folder), "Load folder must exist"

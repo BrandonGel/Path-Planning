@@ -181,14 +181,19 @@ class ICBS(CBS):
                     # Attempt bypass: get a same-cost path that avoids this conflict
                     temp_constraints = self._get_updated_constraints(P, agent, best_conflict)
                     self.env.constraint_dict = temp_constraints
+                    self.env.constraints = self.env.constraint_dict.setdefault(agent, Constraints())
                     new_path, _ = self.env.a_star.search(agent, solution=P.solution)
                     
                     if new_path:
-                        temp_sol = P.solution.copy()
-                        temp_sol[agent] = new_path
-                        if len(self.env.get_conflicts(temp_sol, False)) < len(conflict_list):
-                            P.solution = temp_sol
-                            heapq.heappush(self.open_list, (P.cost, next(self.counter), P))
+                        new_node = HighLevelNode()
+                        new_node.solution = P.solution.copy()
+                        new_node.solution_cost = P.solution_cost.copy()
+                        new_node.solution[agent] = new_path                        
+                        new_node.cost = P.cost
+                        new_node.constraint_dict = temp_constraints
+                        
+                        if len(self.env.get_conflicts(new_node.solution, False)) < len(conflict_list):
+                            heapq.heappush(self.open_list, (new_node.cost, next(self.counter), new_node))
                             bypass_found = True
                             break
             
