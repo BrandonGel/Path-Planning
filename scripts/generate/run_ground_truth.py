@@ -18,6 +18,19 @@ python scripts/generate/run_ground_truth.py -s benchmark/train
 
 Generate a dataset of MAPF instances and their solutions for 8 agents in a 32x32x32 grid with 0.1 obstacles and 64 permutations.
 python scripts/generate/run_ground_truth.py -s benchmark/train -b 0 32.0 0 32.0 0 32.0 -n 8 -o 0.1 -p 64 -r 1.0 -c 100
+
+Generate a dataset of MAPF instances and their solutions for 8 agents in a 32x32x32 grid with 0.1 obstacles and 64 permutations.
+python scripts/generate/run_ground_truth.py -s benchmark/train -b 0 32.0 0 32.0 0 32.0 -n 8 -o 0.1 -p 64 -r 1.0 -c 100 -w 1
+
+Generate a dataset of MAPF instances with default settings using timeout (120 seconds) or max attempts (20000).
+python scripts/generate/run_ground_truth.py -s benchmark/train -t 120 
+python scripts/generate/run_ground_truth.py -s benchmark/train -m 20000 
+
+Generate a dataset of MAPF instances with default settings using cbs/icbs/lacam/lacam_random algorithm.
+python scripts/generate/run_ground_truth.py -s benchmark/train -mapf cbs
+python scripts/generate/run_ground_truth.py -s benchmark/train -mapf icbs
+python scripts/generate/run_ground_truth.py -s benchmark/train -mapf lacam
+python scripts/generate/run_ground_truth.py -s benchmark/train -mapf lacam_random
 '''
 
 from path_planning.data_generation.dataset_ground_truth import create_solutions,create_path_parameter_directory
@@ -51,7 +64,7 @@ if __name__ == "__main__":
     parser.add_argument("-w","--num_workers",type=int, default=None, help="number of parallel workers for cases (default: auto-detect CPU cores)")
     parser.add_argument("-t","--timeout",type=int, default=60, help="timeout for the solver in seconds")
     parser.add_argument("-m","--max_attempts",type=int, default=10000, help="max attempts for the solver")
-    parser.add_argument("-ca","--centralized_alg_name",type=str, default='cbs', help="centralized algorithm name")
+    parser.add_argument("-mapf","--mapf_solver_name",type=str, default='lacam', choices=['cbs', 'icbs', 'lacam', 'lacam_random'], help="MAPF solver to use")
     args = parser.parse_args()
 
     # Convert bounds from flat list to nested list format
@@ -91,7 +104,7 @@ if __name__ == "__main__":
             "nb_permutations": args.nb_permutations,
             "timeout": args.timeout,
             "max_attempts": args.max_attempts,
-            "centralized_alg_name": args.centralized_alg_name,
+            "mapf_solver_name": args.mapf_solver_name,
         }
     path = create_path_parameter_directory(base_path, config)
     create_solutions(path, args.num_cases, config,num_workers=num_workers)

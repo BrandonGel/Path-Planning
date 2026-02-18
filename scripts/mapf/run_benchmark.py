@@ -15,7 +15,7 @@ Note: This will take a while to run.
 
 from path_planning.utils.util import write_to_yaml
 from path_planning.utils.util import read_graph_sampler_from_yaml, read_agents_from_yaml
-from path_planning.multi_agent_planner.centralized.get_centralized import get_centralized
+from path_planning.multi_agent_planner.mapf_solver import solve_mapf
 from path_planning.utils.util import write_to_yaml, set_global_seed
 import os
 import time
@@ -70,14 +70,7 @@ def run_single_benchmark(args):
         }
         for i, agent in enumerate(agents)
     ]
-    CBS,Environment = get_centralized(centralized_alg_name)
-
-    env = Environment(map_, agents, astar_max_iterations=-1)
-    st = time.time()
-    cbs = CBS(env, time_limit=time_limit)
-    solution = cbs.search()
-    ft = time.time()
-    runtime = ft - st
+    solution, runtime, cost = solve_mapf(map_, agents, centralized_alg_name, time_limit)
 
     out_dir = f"benchmark/solutions/{centralized_alg_name}/{map_folder}"
     os.makedirs(out_dir, exist_ok=True)
@@ -85,7 +78,7 @@ def run_single_benchmark(args):
 
     output = dict()
     output["schedule"] = solution if solution else {}
-    output["cost"] = env.compute_solution_cost(solution) if solution else None
+    output["cost"] = cost if solution else None
     output["runtime"] = runtime
     write_to_yaml(output, out_path)
 
