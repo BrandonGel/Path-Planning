@@ -4,6 +4,7 @@ from bisect import bisect
 from path_planning.common.environment.map.graph_sampler import GraphSampler
 from path_planning.common.environment.node import Node
 from typing import Any, List
+import numpy as np
 from collections import deque
 
 class State(object):
@@ -24,7 +25,7 @@ class SippNode(object):
         """
         Function to generate safe-intervals
         """
-        for interval in self.interval_list:
+        for interval in list(self.interval_list):
             if t2 == float('inf'):
                 if t1<=interval[0]:
                     self.interval_list.remove(interval)
@@ -57,6 +58,14 @@ class SippNode(object):
 class SippEdge(SippNode):
     def __init__(self):
         super().__init__()
+        self.overlapping_collision_list = []
+        self.overlapping_being_used = []
+
+    def is_in_safe_interval(self, t1, t2):
+        for interval in self.interval_list:
+            if t1 >= interval[0] and t2 <= interval[1]:
+                return True
+        return False
 
 class SippGraph(object):
     def __init__(self, graph_map: GraphSampler,dynamic_obstacles:dict = {},radius:float = 0.0,velocity:float = 0.0,use_constraint_sweep:bool = True):
@@ -80,20 +89,16 @@ class SippGraph(object):
 
         # Initialize SIPP edges keyed by endpoint positions (p1, p2),
         # to match the keys returned by GraphSampler.get_constraint_sweep.
+        # Both directions share the same SippEdge instance so constraints
+        # apply to traversal in either direction.
         for edge in self.graph_map.edges:
             src_idx, tgt_idx = edge
             src_pos = self.graph_map.nodes[src_idx].current
             tgt_pos = self.graph_map.nodes[tgt_idx].current
-            edge_key = (src_pos, tgt_pos)
-            edge_sipp_dict = {edge_key: SippEdge()}
-            self.sipp_graph.update(edge_sipp_dict)
+            self.sipp_graph[(src_pos, tgt_pos)] = SippEdge()
+            self.sipp_graph[(tgt_pos, src_pos)] = SippEdge()
 
-    def get_cost(self, position1, position2):
-        cost = 1
-        if self.velocity > 0:
-            cost = self.graph_map.get_cost(Node(tuple(position1)), Node(tuple(position2)))
-            cost = cost / self.velocity
-        return cost
+
 
     def init_intervals(self):
         if not self.dyn_obstacles or len(self.dyn_obstacles) == 0: return
@@ -152,6 +157,7 @@ class SippGraph(object):
                         t1 = t+t_start
                         t2 = t+t_end 
                         self.sipp_graph[vertex_pos].split_interval(t1, t2,0)
+                        # print("Vertex: ", vertex_pos, t1,t2)
                     for edge_pos, edge_interval in overlapping_edges.items():
                         t_start,t_end = edge_interval
                         t1 = t+t_start
