@@ -1,6 +1,6 @@
 import numpy as np
 
-def check_time_anomaly(solution):
+def check_time_anomaly(solution,verbose: bool = True):
     agents = {agent:np.array([[p['t'],p['x'], p['y']] for p in path] ) for agent,path in solution.items()}
     no_anomaly = True
     for agent, path in agents.items():
@@ -9,12 +9,12 @@ def check_time_anomaly(solution):
             t_ind = np.where(t_diff < 0)[0][0]
             print(f"Agent {agent} has negative time difference at t={path[t_ind]['t']:.3f}")
             no_anomaly = False
-    if no_anomaly:
+    if no_anomaly and verbose:
         print("No time anomaly detected")
         
 
 
-def check_velocity_anomaly(solution,is_using_non_constant_speed: bool = False):
+def check_velocity_anomaly(solution,is_using_constant_speed: bool = False,verbose: bool = True  ):
     agents = {agent:np.array([[p['t'],p['x'], p['y']] for p in path] ) for agent,path in solution.items()}
     no_anomaly = True
     for agent, path in agents.items():
@@ -23,14 +23,14 @@ def check_velocity_anomaly(solution,is_using_non_constant_speed: bool = False):
         v_diff = diff / t_diff.reshape(-1,1)
         speed = np.linalg.norm(v_diff, axis=1)
 
-        if is_using_non_constant_speed and np.any(speed-speed[0]) > 1e-9:
+        if is_using_constant_speed and np.any(speed-speed[0]> 1e-9) :
             print(f"Agent {agent} has non-constant velocity")
             no_anomaly = False
-    if no_anomaly:
+    if no_anomaly and verbose:
         print("No velocity anomaly detected")
 
 
-def check_collision(solution, r):
+def check_collision(solution, r, verbose: bool = True):
     """
     Check for collisions between all pairs of agents in a solution.
 
@@ -111,14 +111,14 @@ def check_collision(solution, r):
 
                 min_dist_sq = a * (t_check ** 2) + b * t_check + c
 
-                if min_dist_sq <= collision_radius_sq:
+                if min_dist_sq < collision_radius_sq:
                     t_collide = t_start + t_check
                     print(
                         f"Agents {name_i} and {name_j} collided at "
                         f"t={t_collide:.3f} (distance={np.sqrt(min_dist_sq):.3f})"
                     )
                     no_collision = False
-    if no_collision:
+    if no_collision and verbose:
         print("No collision detected")
 
 
