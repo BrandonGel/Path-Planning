@@ -16,9 +16,6 @@ class State(object):
 class SippNode(object):
     def __init__(self):
         self.interval_list = [(0, float('inf'))]
-        self.f = float('inf')
-        self.g = float('inf')
-        self.parent_state = State()
 
     # Split the safety interval with the agent depature time, and agent arrival time
     def split_interval(self, t1,t2,t_buffer=1):
@@ -70,7 +67,7 @@ class SippEdge(SippNode):
 class SippGraph(object):
     def __init__(self, graph_map: GraphSampler,dynamic_obstacles:dict = {},radius:float = 0.0,velocity:float = 0.0,use_constraint_sweep:bool = True):
         self.graph_map = graph_map 
-        self.dyn_obstacles = dynamic_obstacles
+        self.dyn_obstacles = {}
         self.sipp_graph = {}
         if radius > 0:
             self.graph_map.set_constraint_sweep()
@@ -80,7 +77,7 @@ class SippGraph(object):
         self._constraint_sweep_cache = {}  # (p1, p2, r) -> (nodes, edges, start_nodes)
         self._constraint_segment_cache = {}  # (p1a, p1b, p2a, p2b, v1, v2, r1, r2) -> bool
         self.init_graph()
-        self.init_intervals()
+        self.init_intervals(dynamic_obstacles)
 
     def init_graph(self):
         for node in self.graph_map.nodes:
@@ -89,8 +86,6 @@ class SippGraph(object):
 
         # Initialize SIPP edges keyed by endpoint positions (p1, p2),
         # to match the keys returned by GraphSampler.get_constraint_sweep.
-        # Both directions share the same SippEdge instance so constraints
-        # apply to traversal in either direction.
         for edge in self.graph_map.edges:
             src_idx, tgt_idx = edge
             src_pos = self.graph_map.nodes[src_idx].current
@@ -100,9 +95,10 @@ class SippGraph(object):
 
 
 
-    def init_intervals(self):
-        if not self.dyn_obstacles or len(self.dyn_obstacles) == 0: return
-        for schedule in self.dyn_obstacles.values():
+    def init_intervals(self,dyn_obstacles:dict = {}):
+        if not dyn_obstacles or len(dyn_obstacles) == 0: return
+        for dyn_name, schedule in dyn_obstacles.items():
+            self.dyn_obstacles[dyn_name] = np.array([State(position=(location["x"],location["y"]), t=location["t"]) for location in schedule])
             # for location in schedule:
             for i in range(len(schedule)):
                 location = schedule[i]
@@ -135,9 +131,10 @@ class SippGraph(object):
 
         # Update the intervals of the SIPP graph based on the agent's plan (treated as dynamic obstacles)
    
-    def update_intervals(self,plans: List[List[State]] | List[State] | State):
+    def update_intervals(self,plans: List[List[State]] | List[State] | State,dyn_names: List[str]):
         if not plans or len(plans) == 0: return
-        for plan in plans:
+        for plan,dyn_name in zip(plans,dyn_names):
+            self.dyn_obstacles[dyn_name] = np.array([State(position=s.position, t=s.time) for s in plan])
             # for location in schedule:
             for i in range(len(plan)):
                 location = plan[i]
@@ -188,16 +185,4 @@ class SippGraph(object):
         if key not in self._constraint_sweep_cache:
             self._constraint_sweep_cache[key] = self.graph_map.get_constraint_sweep(p1, p2,v, r, use_interval=True)
         return self._constraint_sweep_cache[key]
-
-    def clear_sipp_graph_values(self,no_clear_interval: bool = False):
-        for node in self.sipp_graph.values():
-            node.g = float('inf')
-            node.f = float('inf')
-            node.parent_state = State()
-            if not no_clear_interval:
-                node.interval_list = [(0, float('inf'))]
-        if not no_clear_interval:
-            for edge in self.sipp_graph.values():
-                edge.interval_list = [(0, float('inf'))]
-
     

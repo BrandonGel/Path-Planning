@@ -25,6 +25,7 @@ class SippPlanner(SippGraph):
         self.verbose = verbose
         self.plan = {}
         self.plan_cost = {}
+        self.action_cost = {}
         self.cost = 0
         random.shuffle(self.agents)
 
@@ -44,8 +45,15 @@ class SippPlanner(SippGraph):
             if t == interval[0]:
                 collision = False
                 for _,obstacle in self.dyn_obstacles.items():
-                    for location in obstacle:   
-                        if location["x"] == neighbour[0] and location["y"] == neighbour[1] and location["t"] == t-1:
+                    for idx in range(len(obstacle)-1):   
+                        obs_state = obstacle[idx]
+                        obs_t,obs_position = obs_state.time,obs_state.position
+                        obs_next_state = obstacle[idx+1]
+                        obs_next_t,obs_next_position = obs_next_state.time,obs_next_state.position
+                        edge_conflict = (obs_position[0] == neighbour[0] and obs_position[1] == neighbour[1] and
+                            start_pos[0] == obs_next_position[0] and start_pos[1] == obs_next_position[1] and
+                            obs_t == t-1 and obs_next_t == t)
+                        if edge_conflict:
                             collision = True
                             break
                     if collision:
@@ -76,6 +84,7 @@ class SippPlanner(SippGraph):
     def get_successors(self, state):
         successors = []
         costs = []
+        time_taken = []
         neighbour_list = self.get_valid_neighbours(state.position)
         for neighbour_pos in neighbour_list:
             m_time = self.get_mtime(state.position, neighbour_pos)
@@ -93,11 +102,16 @@ class SippPlanner(SippGraph):
                 if t is None: # Any collision, skip the interval
                     continue
                 
+                #Get total cost & wait cost for the successor
+                cost = t - state.time 
+                w_cost = cost - m_time
+
                 # Create the successor state
                 s = State(neighbour_pos, t, i)
                 successors.append(s)
-                costs.append(m_time)
-        return successors, costs
+                costs.append(cost)
+                time_taken.append((w_cost, m_time))
+        return successors, costs, time_taken
 
     def get_heuristic(self, position,goal):
         dist =  fabs(position[0] - goal[0]) + fabs(position[1]-goal[1])
@@ -108,76 +122,77 @@ class SippPlanner(SippGraph):
         for ii, agent in enumerate(self.agents):
             start = tuple(agent["start"])
             goal = tuple(agent["goal"])
+
             # Min-heap: (f, tie_break, state); tie_break ensures we never compare State objects
             OPEN = []
             tie_break = 0
-            goal_reached = False
-            goal_state = None
             closed = set()  # (position, interval) already expanded
-            s_start = State(start, 0)
-
-            self.sipp_graph[start].g = 0.0
+            g_values  = {}      # (position, interval) -> g
+            parents   = {}      # (position, interval) -> State
+            action_cost = {}    # (position, interval) -> (wait_cost, move_cost)
+            
+            s_start = State(start, 0, self.sipp_graph[start].interval_list[0])
+            start_key = (start, self.sipp_graph[start].interval_list[0])
+            g_values[start_key] = 0.0
             f_start = self.get_heuristic(start, goal)
-            self.sipp_graph[start].f = f_start
             heapq.heappush(OPEN, (f_start, tie_break, s_start))
             tie_break += 1
 
+            goal_reached = False
+            goal_state   = None
+            goal_cost = float('inf')
             while OPEN and not goal_reached:
                 _, _, s = heapq.heappop(OPEN)
                 state_key = (s.position, s.interval)
                 if state_key in closed:
                     continue
                 closed.add(state_key)
-                if self.sipp_graph[s.position].g  == 12:
-                    pass
 
-                successors, costs = self.get_successors(s)
+                successors, costs, time_takens = self.get_successors(s)
 
-                for cost, successor in zip(costs, successors):
-                    if (successor.position, successor.interval) in closed:
+                for cost, time_taken, successor in zip(costs, time_takens, successors):
+                    succ_key = (successor.position, successor.interval)
+                    if succ_key in closed:
                         continue
-                    if self.sipp_graph[successor.position].g > self.sipp_graph[s.position].g + cost:
-                        self.sipp_graph[successor.position].g = self.sipp_graph[s.position].g + cost
-                        self.sipp_graph[successor.position].parent_state = s
 
+                    new_g = g_values.get(state_key, float('inf')) + cost
+                    if new_g < g_values.get(succ_key, float('inf')):
+                        g_values[succ_key] = new_g
+                        parents[succ_key]  = s
+                        action_cost[succ_key] = time_taken
                         if successor.position == goal:
                             if self.verbose:
                                 print("Plan successfully calculated!!")
                             goal_reached = True
                             goal_state = successor
+                            goal_cost = successor.time
                             break
 
-                        self.sipp_graph[successor.position].f = (
-                            self.sipp_graph[successor.position].g
-                            + self.get_heuristic(successor.position, goal)
-                        )
-                        heapq.heappush(
-                            OPEN,
-                            (self.sipp_graph[successor.position].f, tie_break, successor),
-                        )
+                        f = new_g + self.get_heuristic(successor.position, goal)
+                        heapq.heappush(OPEN, (f, tie_break, successor))
                         tie_break += 1
 
             if not goal_reached or goal_state is None:
                 return {}
 
-            # Tracking back from goal_state
-            start_reached = False
+            # Backtrack using (position, interval) keys
             plan = deque()
+            plan_action_cost = deque()
             current = goal_state
-            pos = (float(current.position[0]), float(current.position[1]))
-            # print(pos, current.interval)
-            while not start_reached:
+            current_action_cost = (0,0)
+            while True:
                 plan.appendleft(current)
-                if current.position == start:
-                    start_reached = True
-                else:
-                    current = self.sipp_graph[current.position].parent_state
-                    pos = (float(current.position[0]), float(current.position[1]))
-                    # print(pos, current.interval)
+                plan_action_cost.appendleft(current_action_cost)
+                if current.position == start and current.time == 0:
+                    break
+                key = (current.position, current.interval)
+                
+                current = parents[key]
+                current_action_cost = action_cost[key]
             self.plan[agent["name"]] = plan
-            self.plan_cost[agent["name"]] = self.sipp_graph[goal_state.position].g
-            self.clear_sipp_graph_values(no_clear_interval=True)
-            self.update_intervals([plan])
+            self.plan_cost[agent["name"]] = goal_cost
+            self.action_cost[agent["name"]] = plan_action_cost
+            self.update_intervals([plan],[agent["name"]])
         self.cost = sum(self.plan_cost.values())
         return self.get_plan()
             
@@ -185,10 +200,33 @@ class SippPlanner(SippGraph):
         solution = {}
         for agent in self.agent_names:
             plan = self.plan[agent]
+            action_cost = self.action_cost[agent]
             path_list = []
-            for state in plan:
-                temp_dict = {"x":state.position[0], "y":state.position[1], "t":state.time}
+            if self.radius == 0:
+                setpoint = plan[0]
+                temp_dict = {"x":setpoint.position[0], "y":setpoint.position[1], "t":setpoint.time}
                 path_list.append(temp_dict)
+
+                for i in range(len(plan)-1):
+                    for j in range(int(plan[i+1].time - plan[i].time-1)):
+                        x = plan[i].position[0]
+                        y = plan[i].position[1]
+                        t = plan[i].time
+                        setpoint = plan[i]
+                        temp_dict = {"x":x, "y":y, "t":t+j+1}
+                        path_list.append(temp_dict)
+                    setpoint = plan[i+1]
+                    temp_dict = {"x":setpoint.position[0], "y":setpoint.position[1], "t":setpoint.time}
+                    path_list.append(temp_dict)
+            else:
+                for action,state in zip(action_cost,plan):
+                    temp_dict = {"x":state.position[0], "y":state.position[1], "t":state.time}
+                    path_list.append(temp_dict)
+
+                    action_wait_cost, action_move_cost = action
+                    if action_wait_cost > 1e-10:
+                        temp_dict = {"x":state.position[0], "y":state.position[1], "t":state.time+action_wait_cost}
+                        path_list.append(temp_dict)
             solution[agent] = path_list
         return solution
 
@@ -199,3 +237,4 @@ class SippPlanner(SippGraph):
         for agent, path in solution.items():
             cost += float(path[-1]["t"]) - float(path[0]["t"])
         return cost
+        
