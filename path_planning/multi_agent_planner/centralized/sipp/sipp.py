@@ -123,42 +123,42 @@ class SippPlanner(SippGraph):
             start = tuple(agent["start"])
             goal = tuple(agent["goal"])
 
-            # Min-heap: (f, tie_break, state); tie_break ensures we never compare State objects
-            OPEN = []
-            tie_break = 0
-            closed = set()  # (position, interval) already expanded
-            g_values  = {}      # (position, interval) -> g
-            parents   = {}      # (position, interval) -> State
+            initial_state = State(start, 0, self.sipp_graph[start].interval_list[0])
+            initial_state_key = (start, self.sipp_graph[start].interval_list[0])
+
+            # Min-heap: (f, counter, state); counter ensures we never compare State objects
+            open_heap = []
+            counter = 0
+            closed_set = set()  # (position, interval) already expanded
+            g_score  = {initial_state_key:0.0}      # (position, interval) -> g
+            came_from   = {}      # (position, interval) -> State
             action_cost = {}    # (position, interval) -> (wait_cost, move_cost)
             
-            s_start = State(start, 0, self.sipp_graph[start].interval_list[0])
-            start_key = (start, self.sipp_graph[start].interval_list[0])
-            g_values[start_key] = 0.0
             f_start = self.get_heuristic(start, goal)
-            heapq.heappush(OPEN, (f_start, tie_break, s_start))
-            tie_break += 1
+            heapq.heappush(open_heap, (f_start, counter, initial_state))
+            counter += 1
 
             goal_reached = False
             goal_state   = None
             goal_cost = float('inf')
-            while OPEN and not goal_reached:
-                _, _, s = heapq.heappop(OPEN)
-                state_key = (s.position, s.interval)
-                if state_key in closed:
+            while open_heap and not goal_reached:
+                _, _, current = heapq.heappop(open_heap)
+                current_state_key = (current.position, current.interval)
+                if current_state_key in closed_set:
                     continue
-                closed.add(state_key)
+                closed_set.add(current_state_key)
 
-                successors, costs, time_takens = self.get_successors(s)
+                successors, costs, time_takens = self.get_successors(current)
 
                 for cost, time_taken, successor in zip(costs, time_takens, successors):
                     succ_key = (successor.position, successor.interval)
-                    if succ_key in closed:
+                    if succ_key in closed_set:
                         continue
 
-                    new_g = g_values.get(state_key, float('inf')) + cost
-                    if new_g < g_values.get(succ_key, float('inf')):
-                        g_values[succ_key] = new_g
-                        parents[succ_key]  = s
+                    tentative_g_score = g_score.get(current_state_key, float('inf')) + cost
+                    if tentative_g_score < g_score.get(succ_key, float('inf')):
+                        came_from[succ_key]  = current
+                        g_score[succ_key] = tentative_g_score
                         action_cost[succ_key] = time_taken
                         if successor.position == goal:
                             if self.verbose:
@@ -168,33 +168,33 @@ class SippPlanner(SippGraph):
                             goal_cost = successor.time
                             break
 
-                        f = new_g + self.get_heuristic(successor.position, goal)
-                        heapq.heappush(OPEN, (f, tie_break, successor))
-                        tie_break += 1
+                        f_score = g_score[succ_key] + self.get_heuristic(successor.position, goal)
+                        heapq.heappush(open_heap, (f_score, counter, successor))
+                        counter += 1
 
             if not goal_reached or goal_state is None:
                 return {}
 
             # Backtrack using (position, interval) keys
-            plan = deque()
-            plan_action_cost = deque()
-            current = goal_state
-            current_action_cost = (0,0)
-            while True:
-                plan.appendleft(current)
-                plan_action_cost.appendleft(current_action_cost)
-                if current.position == start and current.time == 0:
-                    break
-                key = (current.position, current.interval)
-                
-                current = parents[key]
-                current_action_cost = action_cost[key]
+            plan,plan_action_cost = self.reconstruct_path(came_from,action_cost,goal_state)
             self.plan[agent["name"]] = plan
             self.plan_cost[agent["name"]] = goal_cost
             self.action_cost[agent["name"]] = plan_action_cost
             self.update_intervals([plan],[agent["name"]])
         self.cost = sum(self.plan_cost.values())
         return self.get_plan()
+            
+    def reconstruct_path(self, came_from,came_from_action_cost, current):
+        total_path = [current]
+        total_path_action_cost = [(0,0)]
+        key = (current.position, current.interval)
+        while key in came_from.keys():
+            current = came_from[key]
+            current_action_cost = came_from_action_cost[key]
+            total_path.append(current)
+            total_path_action_cost.append(current_action_cost)
+            key = (current.position, current.interval)
+        return total_path[::-1], total_path_action_cost[::-1]
             
     def get_plan(self):
         solution = {}
