@@ -26,15 +26,19 @@ class SippPlanner(SippGraph):
         self.plan = {}
         self.plan_cost = {}
         self.action_cost = {}
+        self._mtime_cache = {}
         self.cost = 0
         random.shuffle(self.agents)
 
     def get_mtime(self, position1, position2):
+        if (position1, position2) in self._mtime_cache:
+            return self._mtime_cache[(position1, position2)]
         m_cost = float(self.graph_map.get_cost(Node(tuple(position1)), Node(tuple(position2))))
         if self.velocity > 0:
             m_time = m_cost / self.velocity
         else:
             m_time = 1.0
+        self._mtime_cache[(position1, position2)] = m_time
         return m_time
 
     def get_earliest_no_collision_arrival_time(self, start_t, interval, start_pos, neighbour, m_time):
@@ -63,21 +67,14 @@ class SippPlanner(SippGraph):
 
         if t >= interval[0] and t <= interval[1]:
             # Departure time for edge traversal (agent may have waited at start_pos)
-            depart_t = t - m_time
-            overlapping_vertices,overlapping_edges = self._get_constraint_sweep_cached(start_pos,neighbour,self.velocity,self.radius)
-            vertex_indicies = [ index for index in overlapping_vertices.keys() if index != start_pos and index != neighbour]
-            # Exclude only the direct edge from start_pos to neighbour; all other
-            # overlapping edges must be safe during the traversal.
-            edge_indicies = [ index for index in overlapping_edges.keys()
-                              if not (index[0] == start_pos and index[1] == neighbour)]
-            for vertex_index in vertex_indicies:
-                if not self.sipp_graph[vertex_index].is_in_safe_interval(t):
-                    return None
-            for edge_index in edge_indicies:
-                # Check safety at departure time; the traversal interval
-                # [depart_t, t] must lie within a safe edge interval.
-                if not self.sipp_graph[edge_index].is_in_safe_interval(depart_t, t):
-                    return None
+            depart_t = t - m_time + 1e-10
+            # overlapping_vertices,overlapping_edges = self._get_constraint_sweep_cached(start_pos,neighbour,self.velocity,2*self.radius)
+
+            if not self.sipp_graph[start_pos].is_in_safe_interval(depart_t):
+                return None
+
+            if not self.sipp_graph[(start_pos,neighbour)].is_in_safe_interval(depart_t):
+                return None
             return t
         return None
 
@@ -180,22 +177,21 @@ class SippPlanner(SippGraph):
             self.plan[agent["name"]] = plan
             self.plan_cost[agent["name"]] = goal_cost
             self.action_cost[agent["name"]] = plan_action_cost
-            self.update_intervals([plan],[agent["name"]])
+            self.update_intervals([plan],[plan_action_cost],[agent["name"]])
         self.cost = sum(self.plan_cost.values())
         return self.get_plan()
             
-    def reconstruct_path(self, came_from,came_from_action_cost, current):
-        total_path = [current]
-        total_path_action_cost = [(0,0)]
+    def reconstruct_path(self, came_from, came_from_action_cost, current):
+        total_path = deque([current])
+        total_path_action_cost = deque([(0, 0)])
         key = (current.position, current.interval)
-        while key in came_from.keys():
+        while key in came_from:
             current = came_from[key]
-            current_action_cost = came_from_action_cost[key]
-            total_path.append(current)
-            total_path_action_cost.append(current_action_cost)
+            total_path.appendleft(current)
+            total_path_action_cost.appendleft(came_from_action_cost[key])
             key = (current.position, current.interval)
-        return total_path[::-1], total_path_action_cost[::-1]
-            
+        return list(total_path), list(total_path_action_cost)
+                
     def get_plan(self):
         solution = {}
         for agent in self.agent_names:

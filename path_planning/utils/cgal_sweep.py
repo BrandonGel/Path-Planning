@@ -16,9 +16,6 @@ class CGAL_Sweep:
         self.vertices = []
         # Precomputed numpy representations
         self.vertex_positions = None
-        self.edge_src_np = None   # (E, d) array of edge source positions
-        self.edge_tgt_np = None   # (E, d) array of edge target positions
-        self.edge_vec_np = None   # (E, d) array of edge direction vectors
         self.edges = []
         self.edge_indices = {}
         self.overlapping_sweep = {}
@@ -40,7 +37,7 @@ class CGAL_Sweep:
         elif dim == 3:
             self.Point_type = Point_3
             self.Segment_type = Segment_3
-            self.Zero_Vector = Vector_3(0.0,0.0)
+            self.Zero_Vector = Vector_3(0.0,0.0,0.0)
         for vertex in vertices:
             p_pt = self.Point_type(*vertex)
             self.vertices.append(p_pt)
@@ -66,14 +63,7 @@ class CGAL_Sweep:
             bbox_max = np.maximum(v1, v2)
             self.edge_aabbs.append((bbox_min, bbox_max, edge_idx))
 
-        # Precompute edge endpoint and direction arrays for fast numeric operations
-        if self.edges:
-            src_indices = np.array([self.edge_indices[i][0] for i in range(len(self.edges))], dtype=int)
-            tgt_indices = np.array([self.edge_indices[i][1] for i in range(len(self.edges))], dtype=int)
-            self.edge_src_np = self.vertex_positions[src_indices]
-            self.edge_tgt_np = self.vertex_positions[tgt_indices]
-            self.edge_vec_np = self.edge_tgt_np - self.edge_src_np
-        
+
         # Build R-tree for efficient spatial edge queries
         # R-tree stores bounding boxes and allows O(log E + k) queries instead of O(E)
         p = index.Property()
@@ -231,18 +221,17 @@ class CGAL_Sweep:
             disc = b**2 - 4.0 * a * c           # (N,)
 
             t1 = np.zeros_like(b, dtype=float)
+            t2 = np.zeros_like(b, dtype=float)
             tdur_arr = np.broadcast_to(tdur, b.shape).astype(float)
-            t2 = tdur_arr.copy()
 
             if a > 0.0:
                 valid = disc >= 0.0
                 if np.any(valid):
                     sqrt_disc = np.sqrt(disc[valid])
                     t1_raw = (-b[valid] - sqrt_disc) / (2.0 * a)
-                    t2_raw = (-b[valid] + sqrt_disc) / (2.0 * a)
+                    t2_raw = (-b[valid] + sqrt_disc) / (2.0 * a) + 1e-9
                     t1[valid] = np.clip(t1_raw, 0.0, tdur_arr[valid])
                     t2[valid] = np.clip(t2_raw, 0.0, tdur_arr[valid])
-
             # For a == 0, we keep the default [0, tdur] interval.
 
         # Case 2: per-row velocity and duration
@@ -252,24 +241,22 @@ class CGAL_Sweep:
 
             a = np.einsum('ij,ij->i', vel, vel)  # (N,)
             b = 2.0 * np.einsum('ij,ij->i', vel, r0)
-            c = np.einsum('ij,ij->i', r0, r0) - r**2 
+            c = np.einsum('ij,ij->i', r0, r0) - r**2 + 1e-10 
 
             disc = b**2 - 4.0 * a * c
 
             t1 = np.zeros_like(a, dtype=float)
+            t2 = np.zeros_like(a, dtype=float)
             tdur_arr = np.broadcast_to(tdur, a.shape).astype(float)
-            t2 = tdur_arr.copy()
 
             moving = a > 0.0
             valid = moving & (disc >= 0.0)
             if np.any(valid):
                 sqrt_disc = np.sqrt(disc[valid])
                 t1_raw = (-b[valid] - sqrt_disc) / (2.0 * a[valid])
-                t2_raw = (-b[valid] + sqrt_disc) / (2.0 * a[valid])
+                t2_raw = (-b[valid] + sqrt_disc) / (2.0 * a[valid]) + 1e-9
                 t1[valid] = np.clip(t1_raw, 0.0, tdur_arr[valid])
                 t2[valid] = np.clip(t2_raw, 0.0, tdur_arr[valid])
-
-            # For a == 0 or discriminant < 0, we keep [0, tdur] as the interval.
 
         else:
             raise ValueError("vel must be either a 1D or 2D array.")
@@ -339,7 +326,7 @@ class CGAL_Sweep:
             if velocity > 0.0:
                 vel_norm = np.linalg.norm(vel_vec)
                 vel_vec = velocity * vel_vec / vel_norm if vel_norm > 0.0 else np.zeros_like(vel_vec)
-                tdur = vel_norm / velocity if velocity > 0.0 else 1.0
+                tdur = vel_norm / velocity 
             else:
                 tdur = 1.0
             t1, t2 = self.get_interval_from_quadratic_equation(r0, vel_vec, r, tdur)
@@ -443,7 +430,15 @@ class CGAL_Sweep:
                 for local_i, global_i in enumerate(kept_idx):
                     edge_idx = candidate_edge_indices[global_i]
                     edge_key = self.edge_indices[edge_idx]
-                    overlapping_edges[edge_key] = (float(t1[local_i]), float(t2[local_i]))
+                    lower_t1 = t1[local_i]
+                    upper_t2 = t2[local_i]  
+                    if lower_t1 == upper_t2:
+                        if  np.linalg.norm(ro1_kept[local_i]) >= r:
+                            continue
+                        lower_t1 = 0.0
+                        upper_t2 = tdur_kept[local_i]
+                    overlapping_edges[edge_key] = (float(lower_t1), float(upper_t2))
+
 
         # Caller expects overlapping_vertices as dict (vertex_index -> interval)
         if self.record_sweep:
