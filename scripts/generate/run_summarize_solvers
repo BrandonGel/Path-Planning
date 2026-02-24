@@ -2,12 +2,24 @@ import os
 import yaml
 from pathlib import Path
 import numpy as np
+import argparse
+
+parser = argparse.ArgumentParser()
+parser.add_argument(
+    "-s",
+    "--path",
+    type=str,
+    default="benchmark/all",
+    help="file path with the results from run_all_solvers.py",
+)
+args = parser.parse_args()
+base_path = Path(args.path)
 
 raw_data = {}
 
 # Loop through the two-level config folder structure
-for config1 in os.listdir(Path("benchmark/train")):
-    config1_path = os.path.join("benchmark/train", config1)
+for config1 in os.listdir(base_path):
+    config1_path = os.path.join(base_path, config1)
     if not os.path.isdir(config1_path):
         continue
 

@@ -58,7 +58,7 @@ if __name__ == "__main__":
         "-s",
         "--path",
         type=str,
-        default="benchmark/train",
+        default="benchmark/all",
         help="input file containing map and obstacles",
     )
     parser.add_argument(
