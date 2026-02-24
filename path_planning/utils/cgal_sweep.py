@@ -263,7 +263,7 @@ class CGAL_Sweep:
 
         return t1, t2
 
-    def overlapping_interval_cgal(self, u: tuple[float,float], v: tuple[float,float],velocity: float = 0.0, r: float = 0.5):
+    def overlapping_interval_cgal(self, u: tuple[float,float], v: tuple[float,float],velocity: float = 0.0, r: float = 0.5,get_time_interval: bool = False):
         if self.record_sweep and (u,v,velocity,r) in self.overlapping_interval_sweep:
             overlapping_vertices,overlapping_edges = self.overlapping_interval_sweep[u,v,velocity,r]
             return overlapping_vertices,overlapping_edges
@@ -359,6 +359,43 @@ class CGAL_Sweep:
 
         if not candidate_edge_indices:
             overlapping_edges = {}
+        elif not get_time_interval:
+            # Only run expensive CGAL check on candidates
+            overlapping_edges = {}
+            for edge_idx in candidate_edge_indices:
+                overlapping_edges[self.edge_indices[edge_idx]] = (0, float('inf'))
+            crossing_edges = set()
+            for edge in overlapping_edges:
+                src,tgt = edge
+                if src not in overlapping_vertices:
+                    crossing_edges.add(edge)
+                if tgt not in overlapping_vertices:
+                    crossing_edges.add(edge)
+
+            remove_edges = set()
+            
+            for edge in crossing_edges:
+                src,tgt = edge
+                a_pt = self.vertices[src]
+                b_pt = self.vertices[tgt]
+
+                u_to_v = v_pt-u_pt
+                a_to_b = b_pt-a_pt
+
+                 # --- Edge 1 ---
+                # a -> b and u -> v Z
+                ro1 = a_pt-u_pt
+                if velocity == 0.0:
+                    vel = a_to_b-u_to_v
+                    tdur = 1.0
+                else:
+                    dist = np.linalg.norm(a_to_b-u_to_v)
+                    vel = velocity*(a_to_b-u_to_v)/dist if dist > 0.0 else np.zeros(dim)
+                    tdur = np.linalg.norm(a_to_b-u_to_v)/velocity
+                tmin = np.clip(-np.dot(ro1,vel)/(np.dot(vel,vel)+1e-10),0.0,tdur)
+                vec = ro1 + vel*tmin
+                if np.linalg.norm(vec) > r:
+                    overlapping_edges.pop(edge,None)
         else:
             candidate_edge_indices = np.array(candidate_edge_indices, dtype=int)
             # Map to vertex indices

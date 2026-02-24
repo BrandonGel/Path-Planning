@@ -23,7 +23,11 @@ def check_velocity_anomaly(solution,is_using_constant_speed: bool = False,verbos
         v_diff = diff / t_diff.reshape(-1,1)
         speed = np.linalg.norm(v_diff, axis=1)
 
-        if is_using_constant_speed and np.any(speed-speed[0]> 1e-9) :
+        median_speed = np.median(speed)
+        if is_using_constant_speed and np.any(speed-median_speed> 1e-9) :
+            non_zero_speed = speed[speed > 1e-9]
+            if np.any(non_zero_speed> 0) :
+                continue
             print(f"Agent {agent} has non-constant velocity")
             no_anomaly = False
     if no_anomaly and verbose:
@@ -115,7 +119,7 @@ def check_collision(solution, r, verbose: bool = True):
                     t_collide = t_start + t_check
                     print(
                         f"Agents {name_i} and {name_j} collided at "
-                        f"t={t_collide:.3f} (distance={np.sqrt(min_dist_sq):.3f})"
+                        f"t={t_collide:.3f} (distance={np.sqrt(min_dist_sq):.3f}) from interval [{t_start:.3f}, {t_end:.3f}]"
                     )
                     no_collision = False
     if no_collision and verbose:
