@@ -212,3 +212,4 @@ benchmark/train
 benchmark/solutions/
 logs/
 wandb/
+benchmark/

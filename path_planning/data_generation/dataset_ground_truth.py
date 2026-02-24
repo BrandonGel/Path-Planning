@@ -453,12 +453,14 @@ def create_path_parameter_directory(base_path: Path, config: Dict,dump_config: b
     nb_agents = config["nb_agents"]
     nb_obstacles = config["nb_obstacles"]
     resolution = config["resolution"]
+    solver = config["mapf_solver_name"]
     str_bounds = ""
     for b in bounds:
         str_bounds += f"{b[1]-b[0]}x"
     str_bounds = str_bounds[:-1]
     path = (
         base_path
+        / f"{solver}"
         / f"map{str_bounds}_resolution{resolution}"
         / f"agents{nb_agents}_obst{nb_obstacles}"
     )
