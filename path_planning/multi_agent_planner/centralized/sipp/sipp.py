@@ -68,8 +68,6 @@ class SippPlanner(SippGraph):
         if t >= interval[0] and t <= interval[1]:
             # Departure time for edge traversal (agent may have waited at start_pos)
             depart_t = t - m_time + 1e-10
-            # overlapping_vertices,overlapping_edges = self._get_constraint_sweep_cached(start_pos,neighbour,self.velocity,2*self.radius)
-
             if not self.sipp_graph[start_pos].is_in_safe_interval(depart_t):
                 return None
 
