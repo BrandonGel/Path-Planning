@@ -1,0 +1,73 @@
+import os
+import yaml
+from pathlib import Path
+import numpy as np
+
+raw_data = {}
+
+# Loop through the two-level config folder structure
+for config1 in os.listdir(Path("benchmark/train")):
+    config1_path = os.path.join("benchmark/train", config1)
+    if not os.path.isdir(config1_path):
+        continue
+
+    for config2 in os.listdir(config1_path):
+        config2_path = os.path.join(config1_path, config2)
+        if not os.path.isdir(config2_path):
+            continue
+
+        config_key = f"{config1}/{config2}"
+        raw_data = {}
+
+        for solver in os.listdir(config2_path):
+            solver_path = os.path.join(config2_path, solver, "case_0", "ground_truth")
+            if not os.path.isdir(solver_path):
+                continue
+
+            raw_data[solver] = []
+
+            # Loop through the 64 permutation folders
+            for perm in sorted(os.listdir(solver_path)):
+                perm_path = os.path.join(solver_path, perm)
+                sol_file = os.path.join(perm_path, "solution.yaml")
+
+                if not os.path.isfile(sol_file):
+                    print(f"Missing solution.yaml: {sol_file}")
+                    continue
+
+                with open(sol_file, "r") as f:
+                    data = yaml.safe_load(f)
+
+                cost = data.get("cost", None)
+                runtime = data.get("runtime", None)
+
+                raw_data[solver].append(
+                    {"perm": perm, "cost": cost, "runtime": runtime}
+                )
+
+        raw_file = os.path.join(config2_path, "raw_data.yaml")
+        with open(raw_file, "w") as f:
+            yaml.safe_dump(raw_data, f, sort_keys=False)
+            print("Output file saved")
+
+        summary = {}
+
+        for solver, entries in raw_data.items():
+            costs = [e["cost"] for e in entries if e["cost"] is not None]
+            runtimes = [e["runtime"] for e in entries if e["runtime"] is not None]
+
+            avg_cost = float(np.mean(costs)) if costs else None
+            avg_runtime = float(np.mean(runtimes)) if runtimes else None
+
+            summary[solver] = {
+                "avg_cost": avg_cost,
+                "avg_runtime": avg_runtime,
+                "num_runs": len(entries),
+                "num_valid_costs": len(costs),
+                "num_valid_runtimes": len(runtimes),
+            }
+
+        summary_file = os.path.join(config2_path, "summary.yaml")
+        with open(summary_file, "w") as f:
+            yaml.safe_dump(summary, f, sort_keys=False)
+            print(f"Summary file saved")

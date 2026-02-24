@@ -460,9 +460,9 @@ def create_path_parameter_directory(base_path: Path, config: Dict,dump_config: b
     str_bounds = str_bounds[:-1]
     path = (
         base_path
-        / f"{solver}"
         / f"map{str_bounds}_resolution{resolution}"
         / f"agents{nb_agents}_obst{nb_obstacles}"
+        / f"{solver}"
     )
     os.makedirs(path, exist_ok=True)
 
