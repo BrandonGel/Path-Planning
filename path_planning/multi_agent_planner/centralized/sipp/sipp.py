@@ -41,12 +41,12 @@ class SippPlanner(SippGraph):
         self._mtime_cache[(position1, position2)] = m_time
         return m_time
 
-    def get_earliest_no_collision_arrival_time(self, start_t, interval, start_pos, neighbour, m_time):
-        t = max(start_t, interval[0]) 
+    def get_earliest_no_collision_arrival_time(self,depart_t, start_t, interval, start_pos, neighbour):
+        arrive_t = max(start_t, interval[0]) 
 
         # Check for edge conflicts for point agents
         if self.radius == 0:
-            if t == interval[0]:
+            if arrive_t == interval[0]:
                 collision = False
                 for _,obstacle in self.dyn_obstacles.items():
                     for idx in range(len(obstacle)-1):   
@@ -56,24 +56,23 @@ class SippPlanner(SippGraph):
                         obs_next_t,obs_next_position = obs_next_state.time,obs_next_state.position
                         edge_conflict = (obs_position[0] == neighbour[0] and obs_position[1] == neighbour[1] and
                             start_pos[0] == obs_next_position[0] and start_pos[1] == obs_next_position[1] and
-                            obs_t == t-1 and obs_next_t == t)
+                            obs_t == arrive_t-1 and obs_next_t == arrive_t)
                         if edge_conflict:
                             collision = True
                             break
                     if collision:
-                        t = None
+                        arrive_t = None
                         break
-            return t
+            return arrive_t
 
-        if t >= interval[0] and t <= interval[1]:
+        if arrive_t >= interval[0] and arrive_t <= interval[1]:
             # Departure time for edge traversal (agent may have waited at start_pos)
-            depart_t = t - m_time + 1e-10
-            if not self.sipp_graph[start_pos].is_in_safe_interval(depart_t):
+            if not self.sipp_graph[start_pos].is_in_safe_interval(depart_t + 1e-10,arrive_t):
                 return None
 
-            if not self.sipp_graph[(start_pos,neighbour)].is_in_safe_interval(depart_t):
+            if not self.sipp_graph[(start_pos,neighbour)].is_in_safe_interval(depart_t + 1e-10,arrive_t):
                 return None
-            return t
+            return arrive_t
         return None
 
     def get_successors(self, state):
@@ -84,6 +83,7 @@ class SippPlanner(SippGraph):
         for neighbour_pos in neighbour_list:
             m_time = self.get_mtime(state.position, neighbour_pos)
             start_pos = state.position
+            depart_t = state.time
             start_t = state.time + m_time  # Earliest possible arrival time
             end_t = state.interval[1] + m_time #Latest possible arrival time
             
@@ -93,7 +93,7 @@ class SippPlanner(SippGraph):
                     continue
 
                 # Get the earliest no collision arrival time
-                t = self.get_earliest_no_collision_arrival_time(start_t, i, start_pos, neighbour_pos, m_time)
+                t = self.get_earliest_no_collision_arrival_time(depart_t, start_t, i, start_pos, neighbour_pos)
                 if t is None: # Any collision, skip the interval
                     continue
                 

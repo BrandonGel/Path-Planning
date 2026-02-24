@@ -55,14 +55,16 @@ class SippNode(object):
                     interval_list.append(interval)
             self.interval_list = sorted(interval_list)
 
-    def is_in_safe_interval(self, t):
+    def is_in_safe_interval(self, depart_t, arrive_t= None):
+        if arrive_t is None:
+            arrive_t = depart_t
         lo, hi = 0, len(self.interval_list) - 1
         while lo <= hi:
             mid = (lo + hi) // 2
             start, end = self.interval_list[mid]
-            if start <= t <= end:
+            if start <= depart_t and arrive_t <= end:
                 return True
-            elif t < start:
+            elif depart_t < start:
                 hi = mid - 1
             else:
                 lo = mid + 1
@@ -186,21 +188,15 @@ class SippGraph(object):
                         overlapping_vertices,overlapping_edges = self._get_constraint_sweep_cached(position, position,self.velocity, 2*self.radius)
                         next_t = float('inf')
                         for vertex_pos, vertex_interval in overlapping_vertices.items():
-                            t_start,t_end = vertex_interval
-                            t1 = t+t_start
-                            t2 = min(t+t_end, next_t)
-                            self.sipp_graph[vertex_pos].split_interval(t1, t2,0)
-                            # print("Vertex: ", vertex_pos, t1,t2)
+                            self.sipp_graph[vertex_pos].split_interval(t, next_t,0)
                         for edge_pos, edge_interval in overlapping_edges.items():
-                            t_start,t_end = edge_interval
-                            t1 = t+t_start
-                            t2 = min(t+t_end, next_t)
-                            self.sipp_graph[edge_pos].split_interval(t1, t2,0)
+                            self.sipp_graph[edge_pos].split_interval(t, next_t,0)
                         continue
 
                     # Intermediate time step between two locations
                     next_location = plan[i+1]
                     next_position = next_location.position
+                    next_t = next_location.time
                     wait_time, move_time = action_cost[i]
                     overlapping_vertices,overlapping_edges = self._get_constraint_sweep_cached(position, next_position,self.velocity, 2*self.radius)
                     if wait_time > 0:
@@ -214,20 +210,9 @@ class SippGraph(object):
                         t0 = t
                     
                     for vertex_pos, vertex_interval in overlapping_vertices.items():
-                        t_start,t_end = vertex_interval
-                        t1 = t0
-                        t2 = t0+move_time
-                        if t1 == t2:
-                            continue
-                        self.sipp_graph[vertex_pos].split_interval(t1, t2,0)
-                        # print("Vertex: ", vertex_pos, t1,t2)
+                        self.sipp_graph[vertex_pos].split_interval(t0, next_t,0)
                     for edge_pos, edge_interval in overlapping_edges.items():
-                        t_start,t_end = edge_interval
-                        t1 = t0
-                        t2 = t0+move_time
-                        if t1 == t2:
-                            continue
-                        self.sipp_graph[edge_pos].split_interval(t1, t2,0)
+                        self.sipp_graph[edge_pos].split_interval(t0, next_t,0)
                     
                 else:
                     t1 = t
@@ -255,6 +240,6 @@ class SippGraph(object):
         """Cached wrapper for get_constraint_sweep to avoid duplicate queries."""
         key = (p1, p2, v, r)
         if key not in self._constraint_sweep_cache:
-            self._constraint_sweep_cache[key] = self.graph_map.get_constraint_sweep(p1, p2,v, r, use_interval=True)
+            self._constraint_sweep_cache[key] = self.graph_map.get_constraint_sweep(p1, p2,v, r, use_interval=True,get_time_interval=False)
         return self._constraint_sweep_cache[key]
     
