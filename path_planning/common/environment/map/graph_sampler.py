@@ -172,7 +172,7 @@ class GraphSampler(Grid):
             return []
         neighbors =  [self.nodes[i] for i in self.road_map[self.node_index_dict[node]]]
         if self.track_with_link:
-            neighbors = [node.link(neighbor) for neighbor in neighbors]
+            neighbors = [neighbor.link(node) for neighbor in neighbors]
         return neighbors
 
 
@@ -351,36 +351,6 @@ class GraphSampler(Grid):
                 if not self.is_expandable(tile_tuple):
                     return True  # Found collision, terminate early
 
-            # tied_dims = np.where(np.abs(tMax - tMax[min_dim]) < 1e-10)[0]
-
-            # # Step in ALL tied dimensions
-            # for min_dim in tied_dims:
-            #     # Step in that dimension
-            #     new_tile = current_tile.copy()
-            #     new_tile[min_dim] += step[min_dim]
-
-            #     # Update tMax
-            #     if tDelta[min_dim] != float('inf'):
-            #         tMax[min_dim] += tDelta[min_dim]
-                
-            #     # Check collision immediately (early termination)
-            #     tile_tuple = tuple(new_tile)
-            #     if tile_tuple not in seen:
-            #         seen.add(tile_tuple)
-            #         if not self.is_expandable(tile_tuple):
-            #             return True  # Found collision, terminate early
-
-            #  # Step in ALL tied dimensions
-            # for min_dim in tied_dims:
-            #     # Step in that dimension
-            #     current_tile[min_dim] += step[min_dim]
-                
-            # # Check collision immediately (early termination)
-            # tile_tuple = tuple(current_tile)
-            # if tile_tuple not in seen:
-            #     seen.add(tile_tuple)
-            #     if not self.is_expandable(tile_tuple):
-            #         return True  # Found collision, terminate early
             if tile_tuple == tuple(p2_grid):
                 return False
         
@@ -572,14 +542,38 @@ class GraphSampler(Grid):
         self.edges, self.edge_indices_dict,self.edge_weights  = self.calculate_edges(planar_map,edge_weights)
         return planar_map
 
+    def generate_custom_roadmap(self, nodes_indices: List[int],edge_indices: List[Tuple[int,int]]):
+        road_map = [[] for ii in range(len(self.nodes))]
+        edge_weights = [[] for ii in range(len(self.nodes))]
+        edge_list = {}
+        for edge in edge_indices:
+            s_idx = edge[0]
+            n_idx = edge[1]
+            e = (s_idx, n_idx)
+            if e in edge_list:
+                continue
+            edge_list[e] = 1
+            edge_list[e[::-1]] = 1
+            node_s = self.nodes[s_idx]
+            node_n = self.nodes[n_idx]
+            e_weight = self.get_cost(node_s,node_n)
+            road_map[s_idx].append(n_idx)
+            road_map[n_idx].append(s_idx)
+            edge_weights[s_idx].append(e_weight)
+            edge_weights[n_idx].append(e_weight)
+
+        self.road_map = road_map
+        self.edges, self.edge_indices_dict,self.edge_weights  = self.calculate_edges(road_map,edge_weights)
+        return road_map
+
     def set_constraint_sweep(self):
         self.constraint_sweep.set_graph([node.current for node in self.nodes],self.edges)
 
-    def get_constraint_sweep(self, p1: tuple[float,float], p2: tuple[float,float],v: float = 0.0, r: float = 0.5, use_interval: bool = False):
+    def get_constraint_sweep(self, p1: tuple[float,float], p2: tuple[float,float],v: float = 0.0, r: float = 0.5, use_interval: bool = False,get_time_interval: bool = False):
         if not self.use_constraint_sweep:
             return None
         if use_interval:
-            overlapping_vertices,overlapping_edges = self.constraint_sweep.overlapping_interval_cgal(p1, p2,v, r)
+            overlapping_vertices,overlapping_edges = self.constraint_sweep.overlapping_interval_cgal(p1, p2,v, r,get_time_interval=get_time_interval)
             vertices_interval = dict({self.nodes[vertex_index].current: vertex_interval for vertex_index, vertex_interval in overlapping_vertices.items()})
             edges_interval = dict({(self.nodes[edge_idx[0]].current, self.nodes[edge_idx[1]].current): edge_interval for edge_idx, edge_interval in overlapping_edges.items()})
             return vertices_interval,edges_interval
