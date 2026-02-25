@@ -36,17 +36,26 @@ def check_velocity_anomaly(solution,is_using_constant_speed: bool = False,verbos
 
 def check_collision(solution, r, verbose: bool = True):
     """
-    Check for collisions between all pairs of agents in a solution.
+    Check for collisions between all pairs of agents in a solution, and
+    compute the time intervals during which they collide.
 
     `solution` is a dict: agent_name -> list of {"t", "x", "y"}.
     Agents are modeled as discs of radius `r`; a collision occurs if
     the distance between two agents is <= 2r at any time.
+
+    Returns
+    -------
+    collisions : dict
+        Mapping (agent_i, agent_j) -> list of (t_start, t_end) intervals
+        (in global time) over which the two agents are in collision.
     """
     # Keep trajectories as lists of dicts for clarity
     agents = {name: path for name, path in solution.items()}
     agent_names = list(agents.keys())
     collision_radius_sq = (2 * r) ** 2
     no_collision = True
+    collisions = {}
+
     def get_pos(traj, t):
         """Linear interpolation for position at time t along a trajectory."""
         n = len(traj)
@@ -76,6 +85,9 @@ def check_collision(solution, r, verbose: bool = True):
             traj_i = agents[name_i]
             traj_j = agents[name_j]
 
+            pair_key = (name_i, name_j)
+            pair_intervals = []
+
             # Collect all unique time breakpoints from both trajectories
             times_i = [p["t"] for p in traj_i]
             times_j = [p["t"] for p in traj_j]
@@ -99,31 +111,71 @@ def check_collision(solution, r, verbose: bool = True):
                 # Relative motion: agent j relative to agent i
                 P_rel = p_j_start - p_i_start
                 V_rel = v_j - v_i
-
-                # Quadratic distance^2(t) = a t^2 + b t + c on [0, duration]
+                # Quadratic distance^2(t) = a t^2 + b t + c on local t in [0, duration]
                 a = np.dot(V_rel, V_rel)
                 b = 2 * np.dot(P_rel, V_rel)
                 c = np.dot(P_rel, P_rel)
 
-                # Time of minimum distance within this interval
-                if a > 1e-9:
-                    t_min = -b / (2 * a)
-                    t_check = max(0.0, min(duration, t_min))
+                # Solve for times in [0, duration] where distance^2(t) <= collision_radius_sq
+                # i.e. a t^2 + b t + (c - collision_radius_sq) <= 0
+                eps = 1e-9
+                if a < eps:
+                    # Relative velocity ~ 0: distance approximately constant over this slice.
+                    if c <= collision_radius_sq + eps:
+                        # Entire local interval is colliding.
+                        local_start, local_end = 0.0, duration
+                    else:
+                        continue
                 else:
-                    # Relative velocity ~ 0: distance is ~constant over slice
-                    t_check = 0.0
+                    A = a
+                    B = b
+                    C = c - collision_radius_sq
+                    disc = B * B - 4 * A * C
+                    if disc < -eps:
+                        # No real roots -> always outside or always inside; but since
+                        # a > 0 and we subtracted the threshold, this means no collision.
+                        continue
+                    disc = max(disc, 0.0)
+                    sqrt_disc = np.sqrt(disc)
+                    t1 = (-B - sqrt_disc) / (2 * A)
+                    t2 = (-B + sqrt_disc) / (2 * A)
+                    if t1 > t2:
+                        t1, t2 = t2, t1
+                    # Intersection with [0, duration]
+                    local_start = max(0.0, t1)
+                    local_end = min(duration, t2)
+                    if local_start >= local_end - eps:
+                        continue
 
-                min_dist_sq = a * (t_check ** 2) + b * t_check + c
+                # Convert to global time interval
+                g_start = t_start + local_start
+                g_end = t_start + local_end
+                pair_intervals.append((g_start, g_end,t_start, t_end))
+                no_collision = False
 
-                if min_dist_sq < collision_radius_sq:
-                    t_collide = t_start + t_check
+            # Optionally merge overlapping/adjacent intervals for this pair
+            if pair_intervals:
+                pair_intervals.sort(key=lambda iv: iv[0])
+                merged = [pair_intervals[0]]
+                for s, e, t_start_local, t_end_local in pair_intervals[1:]:
+                    last_s, last_e, last_t_start_local, last_t_end_local = merged[-1]
+                    if s <= last_e + 1e-9:
+                        merged[-1] = (last_s, max(last_e, e), last_t_start_local, max(last_t_end_local, t_end_local))
+                    else:
+                        merged.append((s, e, t_start_local, t_end_local))
+                collisions[pair_key] = merged
+
+    if verbose:
+        if collisions:
+            for (name_i, name_j), ivs in collisions.items():
+                for g_start, g_end, t_start, t_end in ivs:
                     print(
-                        f"Agents {name_i} and {name_j} collided at "
-                        f"t={t_collide:.3f} (distance={np.sqrt(min_dist_sq):.3f}) from interval [{t_start:.3f}, {t_end:.3f}]"
+                        f"Agents {name_i} and {name_j} collide over "
+                        f"[t={g_start:.3f}, t={g_end:.3f}] in local time [t={t_start:.3f}, t={t_end:.3f}]"
                     )
-                    no_collision = False
-    if no_collision and verbose:
-        print("No collision detected")
+        else:
+            print("No collision detected")
+    return collisions
 
 
 def check_solution(solution):
