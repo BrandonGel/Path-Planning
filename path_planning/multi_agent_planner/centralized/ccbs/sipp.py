@@ -11,6 +11,7 @@ class SIPP():
         self.get_heuristic = env.get_heuristic
         self.is_at_goal = env.is_at_goal
         self.get_successors = env.get_successors
+        self.get_initial_state = env.get_initial_state
         self.max_iterations = max_iterations if max_iterations > 0 or max_iterations is None else float("inf")
         self.verbose = verbose
 
@@ -31,8 +32,7 @@ class SIPP():
         Modified low level search with conflict-aware tie-breaking.
         """
         goal_state = self.agent_dict[agent_name]["goal"]
-
-        initial_state = self.agent_dict[agent_name]["start"]
+        initial_state = self.get_initial_state(self.agent_dict[agent_name]["start"].position)
         initial_state_key = (initial_state.position, initial_state.interval)
 
         # Min-heap: (f, tie_break, state); tie_break ensures we never compare State objects

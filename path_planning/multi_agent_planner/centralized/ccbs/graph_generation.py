@@ -95,13 +95,9 @@ class Constraints(object):
         self.wait_constraints[other.position].split_interval(other.interval[0], other.interval[1],  other.t_buffer)
     
     def add_move_constraint(self, other):
-        # if (other.position_1, other.position_2) not in self.move_constraints:
-        #     self.move_constraints[(other.position_1, other.position_2)] = SippNode()
-        # self.move_constraints[(other.position_1, other.position_2)].split_interval(other.interval[0], other.interval[1], other.t_buffer)
-
-        if other.position_2 not in self.wait_constraints:
-            self.wait_constraints[other.position_2] = SippNode()
-        self.wait_constraints[other.position_2].split_interval(other.interval[1], other.interval[1]+other.travel_time, other.t_buffer)
+        if (other.position_1, other.position_2) not in self.move_constraints:
+            self.move_constraints[(other.position_1, other.position_2)] = SippNode()
+        self.move_constraints[(other.position_1, other.position_2)].split_interval(other.interval[0], other.interval[1], other.t_buffer)
 
     def is_in_safe_interval(self,key,depart_t, arrive_t= None):
         if key in self.wait_constraints:
@@ -131,8 +127,26 @@ class Environment(SippBaseEnvironment):
         self.collision_radius = (2 * radius) ** 2
         self.constraints = Constraints()
         self.constraint_dict = {agent["name"]: Constraints() for agent in agents}
-        self.t_buffer = 1 if radius == 0 else 0
+        self.t_buffer = 1 if radius == 0 else 1e-10
+        self.t_epsilon = 1e-10
 
+    def get_initial_state(self,position):
+        node =  self.constraints[position]
+        return State(position,0, node.interval_list[0])
+
+    def get_earliest_no_collision_arrival_time_body(self,start_t, vertex_interval, edge_interval, start_pos, neighbour,m_time):
+        arrive_t = max(start_t, vertex_interval[0],edge_interval[0] + m_time) 
+        depart_t = arrive_t - m_time
+        if arrive_t > vertex_interval[1]:
+            return None
+
+        if not self.constraints.is_in_safe_interval(start_pos,depart_t):
+            return None
+        if not self.constraints.is_in_safe_interval(neighbour,arrive_t):
+            return None
+        if not self.constraints.is_in_safe_interval((start_pos,neighbour),depart_t):
+            return None
+        return arrive_t
 
     def get_successors(self, state):
         successors = []
@@ -146,39 +160,66 @@ class Environment(SippBaseEnvironment):
             start_t = state.time + m_time  # Earliest possible arrival time
             end_t = state.interval[1] + m_time #Latest possible arrival time
             
-            for i in self.constraints[neighbour_pos].interval_list   :
+            for i in self.constraints[neighbour_pos].interval_list:
                 # If the interval is outside the possible arrival time, skip the interval
                 if i[0] > end_t or i[1] < start_t:
                     continue
 
-                # Get the earliest no collision arrival time
-                t = self.get_earliest_no_collision_arrival_time(depart_t, start_t, i, start_pos, neighbour_pos)
-                if t is None: # Any collision, skip the interval
-                    continue
-                
-                #Get total cost & wait cost for the successor
-                cost = t - state.time 
-                w_cost = cost - m_time
+                early_depart_t = state.time
+                late_depart_t = state.interval[1]
+                for i_edge in self.constraints[(start_pos,neighbour_pos)].interval_list:
+                    if i_edge[0] > late_depart_t or i_edge[1] < early_depart_t:
+                        continue
+                    # Skip if edge (departure) interval does not overlap arrival window shifted to departure time
+                    if i_edge[1] < i[0] - m_time or i_edge[0] > i[1] - m_time:
+                        continue
 
-                # Create the successor state
-                s = State(neighbour_pos, t, i)
-                successors.append(s)
-                costs.append(cost)
-                time_taken.append((w_cost, m_time))
+                    t = self.get_earliest_no_collision_arrival_time_body(start_t, i,i_edge, start_pos, neighbour_pos,m_time)
+                    if t is None: # Any collision, skip the interval
+                        continue
+                    
+                    #Get total cost & wait cost for the successor
+                    cost = t - state.time 
+                    w_cost = cost - m_time
+
+                    # Create the successor state
+                    s = State(neighbour_pos, t, i)
+                    successors.append(s)
+                    costs.append(cost)
+                    time_taken.append((w_cost, m_time))
+                
         return successors, costs, time_taken
 
-    def get_earliest_no_collision_arrival_time(self,depart_t, start_t, interval, start_pos, neighbour):
-        arrive_t = max(start_t, interval[0]) 
-        if arrive_t >= interval[0] and arrive_t <= interval[1]:
-            # Departure time for edge traversal (agent may have waited at start_pos)
-            if not self.constraints.is_in_safe_interval(start_pos,depart_t,arrive_t):
-                return None
+    def check_collision(self, position_1a,velocity1, position_2a,velocity2,tdur):
+        pos1a2a = position_2a - position_1a
+        vel12 = velocity2 - velocity1
+        a = np.dot(vel12, vel12)
+        b = 2*np.dot(pos1a2a, vel12)
+        c = np.dot(pos1a2a, pos1a2a) - (self.radius*2)**2 + 1e-10
+        d = b**2 - 4*a*c
 
-            if not self.constraints.is_in_safe_interval((start_pos,neighbour),depart_t,arrive_t):
-                return None
-            return arrive_t
-        return None
-    
+        if a == 0:
+            if c < 0:
+                return 0,tdur,tdur
+            else:
+                return False
+        if d < 0:
+            return False
+        t1 = (-b + np.sqrt(d)) / (2*a)
+        t2 = (-b - np.sqrt(d)) / (2*a)
+        tmin = -b/(2*a)
+        
+        if t1 < 0 and t2 < 0:
+            return False
+        if t1 > tdur and t2 > tdur:
+            return False
+        t1,t2 = min(t1,t2), max(t1,t2)
+        t1 = np.clip(t1, 0, tdur)
+        t2 = np.clip(t2, 0, tdur)
+        tmin = np.clip(tmin, 0, tdur)
+        return t1, t2, tmin
+        
+
     def get_conflicts(self, solution,solution_action_cost,get_first_conflict: bool = True):
         result = Conflict()
         conflicts = []
@@ -207,25 +248,31 @@ class Environment(SippBaseEnvironment):
             all_t = sorted(set(times_1 + times_2))
             if len(all_t) < 2:
                 continue
-            
+
             # Iterate over all the relevant time steps and check for conflicts
+            t1_now_idx = 0
+            t2_now_idx = 0
             t1_next_idx = 0
             t2_next_idx = 0
+            v1_arr = np.array([p.position for p in plan_1])
+            v2_arr = np.array([p.position for p in plan_2])
+            action_cost_1_arr = np.array([p for p in action_cost_1])
+            action_cost_2_arr = np.array([p for p in action_cost_2])
+            vel_1_arr = np.diff(v1_arr, axis=0) / action_cost_1_arr[:-1,1].reshape(-1,1)
+            vel_2_arr = np.diff(v2_arr, axis=0) / action_cost_2_arr[:-1,1].reshape(-1,1)
             for k in range(len(all_t) - 1):
-                # Global time interval
+                # Global time interval; skip numerically tiny slices
                 t_start, t_end = all_t[k], all_t[k + 1]
                 duration = t_end - t_start
-                if duration <= 0:
-                    continue
                 
                 # Update the time indices for the two agents
                 if times_1[t1_next_idx] ==  t_start:
+                    t1_now_idx = t1_next_idx
                     t1_next_idx = min(t1_next_idx + 1, len(times_1) - 1)
                 if times_2[t2_next_idx] == t_start:
+                    t2_now_idx = t2_next_idx
                     t2_next_idx = min(t2_next_idx + 1, len(times_2) - 1)
 
-                t1_now_idx = max(0, t1_next_idx-1)
-                t2_now_idx = max(0, t2_next_idx-1)
                 v1_now = plan_1[t1_now_idx].position
                 v2_now = plan_2[t2_now_idx].position
                 v1_next = plan_1[t1_next_idx].position
@@ -233,9 +280,12 @@ class Environment(SippBaseEnvironment):
                 e1 = (v1_now, v1_next)
                 e2 = (v2_now, v2_next)
 
+                if duration <= self.t_epsilon :
+                    continue
+
                 # Get the wait and move costs for the two agents
-                wait_cost_1, _ = action_cost_1[t1_now_idx]
-                wait_cost_2, _ = action_cost_2[t2_now_idx]
+                wait_cost_1, move_cost_1 = action_cost_1[t1_now_idx]
+                wait_cost_2, move_cost_2 = action_cost_2[t2_now_idx]
 
                 # Get the global start and moving times for the two agents
                 t1_start = times_1[t1_now_idx]
@@ -277,7 +327,8 @@ class Environment(SippBaseEnvironment):
                         t2_interval = [(t2_start, t2_moving_start),(t2_moving_start, t2_moving_start)]
                 else:
                     t2_interval = [(t_start, t_start),(t_start, t_end)]
-            
+
+                pass
                 for it1_idx, t1_int in enumerate(t1_interval):
                     for it2_idx, t2_int in enumerate(t2_interval):
                         if t1_int[0] == t1_int[1] or t2_int[0] == t2_int[1]:
@@ -288,143 +339,138 @@ class Environment(SippBaseEnvironment):
                         overlapping_edges_2it = overlapping_edges_2[it2_idx]
                     
                         if it1_idx == 0 and it2_idx == 0:
-                            interval_1 = overlapping_vertices_1it.get(v2_now)
-                            interval_2 = overlapping_vertices_2it.get(v1_now)
-                            if interval_1 is not None and interval_2 is not None:
-                                t_stationary1 = t1_int[0]
-                                t_stationary2 = t2_int[0]
+                            if v2_now not in overlapping_vertices_1it or v1_now not in overlapping_vertices_2it:
+                                continue
 
-                                # Get the time intervals for agent 1 and agent 2 w.r.t. each other
-                                t_stationary1_wrt_2 = t_stationary1 - t_stationary2
-                                t_stationary2_wrt_1 = t_stationary2 - t_stationary1
-                                t_int1_wrt2 = (t_stationary1_wrt_2, t_stationary1_wrt_2)
-                                t_int2_wrt1 = (t_stationary2_wrt_1, t_stationary2_wrt_1)
+                            collision_interval1 = (t_start, t_end)
+                            collision_interval2 = (t_start, t_end)
 
-                                # Check for collision conflict
-                                vertex_collision_interval_1 = self.check_collision_interval(t_int1_wrt2, interval_1)
-                                vertex_collision_interval_2 = self.check_collision_interval(t_int2_wrt1, interval_2)
-                                edge_conflict = vertex_collision_interval_1 and vertex_collision_interval_2
-                                if edge_conflict:
-                                    result.type1 = Conflict.WAIT
-                                    result.type2 = Conflict.WAIT
-                                    result.agent_1 = agent_1
-                                    result.agent_2 = agent_2
-                                    result.location_1a = v1_now
-                                    result.location_1b = v1_now
-                                    result.location_2a = v2_now
-                                    result.location_2b = v2_now
-                                    result.time_interval_1 = (t_stationary1, t_stationary1+vertex_collision_interval_1[1])
-                                    result.time_interval_2 = (t_stationary2, t_stationary2+vertex_collision_interval_2[1])
-                                    result.travel_time_1 = 0
-                                    result.travel_time_2 = 0
-                                    if get_first_conflict:
-                                        return result
-                                    conflicts.append(result)
+                            result.type1 = Conflict.WAIT
+                            result.type2 = Conflict.WAIT
+                            result.agent_1 = agent_1
+                            result.agent_2 = agent_2
+                            result.location_1a = v1_now
+                            result.location_1b = v1_now
+                            result.location_2a = v2_now
+                            result.location_2b = v2_now
+                            result.time_interval_1 = collision_interval1
+                            result.time_interval_2 = collision_interval2
+                            result.travel_time_1 = 0
+                            result.travel_time_2 = 0
+                            if get_first_conflict:
+                                return result
+                            conflicts.append(result)
                         elif it1_idx == 0 and it2_idx == 1:
-                            interval_1 = overlapping_edges_1it.get(e2)
-                            interval_2 = overlapping_vertices_2it.get(v1_now)
-                            if interval_1 is not None and interval_2 is not None:
-                                t_stationary1 = t1_int[0]
-                                t_depart2, t_arrive2 = t2_int[0], t2_int[1]
+                            if e2 not in overlapping_edges_1it or v1_now not in overlapping_vertices_2it:
+                                continue
+                            t_wait1, t_depart1 = t1_int[0], t1_int[1]
+                            t_depart2, t_arrive2 = t2_int[0], t2_int[1]
 
-                                # Get the time intervals for agent 1 and agent 2 w.r.t. each other
-                                t_stationary1_wrt_2 = t_stationary1 - t_depart2
-                                t_depart2_wrt_1 = t_depart2 - t_stationary1
-                                t_arrive2_wrt_1 = t_arrive2 - t_stationary1
-                                t_int1_wrt2 = (t_stationary1_wrt_2, t_stationary1_wrt_2)
-                                t_int2_wrt1 = (t_depart2_wrt_1, t_arrive2_wrt_1)
-                                
-                                # Check for collision conflict
-                                vertex_collision_interval_1 = self.check_collision_interval(t_int1_wrt2, interval_1)
-                                edge_collision_interval_2 = self.check_collision_interval(t_int2_wrt1, interval_2)
+                            v1_now_arr = v1_arr[t1_now_idx]
+                            
+                            v2_now_arr = v2_arr[t2_now_idx]
+                            vel2_now = vel_2_arr[t2_now_idx]
+                            v2_delta_t = t_start - t_depart2
+                            v2_current = v2_now_arr + vel2_now * v2_delta_t
 
-                                edge_conflict = vertex_collision_interval_1 and edge_collision_interval_2
-                                if edge_conflict:
-                                    result.type1 = Conflict.WAIT
-                                    result.type2 = Conflict.MOVE
-                                    result.agent_1 = agent_1
-                                    result.agent_2 = agent_2
-                                    result.location_1a = v1_now
-                                    result.location_1b = v1_now
-                                    result.location_2a = v2_now
-                                    result.location_2b = v2_next
-                                    result.time_interval_1 = (t_stationary1,  t_depart2+edge_collision_interval_2[1])
-                                    result.time_interval_2 = (t_depart2, t_depart2+edge_collision_interval_2[1])
-                                    result.travel_time_1 = 0
-                                    result.travel_time_2 = t_arrive2 - t_depart2
-                                    if get_first_conflict:
-                                        return result
-                                    conflicts.append(result)
+                            tdur = t_end - t_start
+                            collision_time= self.check_collision(v1_now_arr,0, v2_current,vel2_now,tdur)
+                            if not collision_time:
+                                continue
+                            t1,t2,min_collision_time = collision_time
+                            collision_interval1 = (t_start+t1, t_start+t2)
+                            collision_interval2 = (t_depart2, t_start+min_collision_time)
+                            
+                            result.type1 = Conflict.WAIT
+                            result.type2 = Conflict.MOVE
+                            result.agent_1 = agent_1
+                            result.agent_2 = agent_2
+                            result.location_1a = v1_now
+                            result.location_1b = v1_now
+                            result.location_2a = v2_now
+                            result.location_2b = v2_next
+                            result.time_interval_1 = collision_interval1
+                            result.time_interval_2 = collision_interval2
+                            result.travel_time_1 = 0
+                            result.travel_time_2 = t_arrive2 - t_depart2
+                            if get_first_conflict:
+                                return result
+                            conflicts.append(result)
                         elif it1_idx == 1 and it2_idx == 0:
-                            interval_1 = overlapping_vertices_1it.get(v2_now)
-                            interval_2 = overlapping_edges_2it.get(e1)
-                            if interval_1 is not None and interval_2 is not None:
-                                t_depart1, t_arrive1 = t1_int[0], t1_int[1]
-                                t_stationary2 = t2_int[0]
+                            if v2_now not in overlapping_vertices_1it or e1 not in overlapping_edges_2it:
+                                continue
+                            t_depart1, t_arrive1 = t1_int[0], t1_int[1]
+                            t_wait2, t_depart2 = t2_int[0], t2_int[1]
 
-                                # Get the time intervals for agent 1 and agent 2 w.r.t. each other
-                                t_depart1_wrt_2 = t_depart1 - t_stationary2
-                                t_arrive1_wrt_2 = t_arrive1 - t_stationary2
-                                t_stationary2_wrt_1 = t_stationary2 - t_depart1
-                                t_int1_wrt2 = (t_depart1_wrt_2, t_arrive1_wrt_2)
-                                t_int2_wrt1 = (t_stationary2_wrt_1, t_stationary2_wrt_1)
+                            v1_now_arr = v1_arr[t1_now_idx]
+                            vel1_now = vel_1_arr[t1_now_idx]
+                            v1_delta_t = t_start - t_depart1
+                            v1_current = v1_now_arr + vel1_now * v1_delta_t
+                            
+                            v2_now_arr = v2_arr[t2_now_idx]
 
-                                # Check for collision conflict                    
-                                edge_collision_interval_1 = self.check_collision_interval(t_int1_wrt2, interval_1)
-                                vertex_collision_interval_2 = self.check_collision_interval(t_int2_wrt1, interval_2)
+                            tdur = t_end - t_start
+                            collision_time = self.check_collision(v1_current,vel1_now, v2_now_arr,0,tdur)
+                            if not collision_time:
+                                continue
+                            t1,t2,min_collision_time = collision_time
+                            collision_interval1 = (t_depart1, t_start+min_collision_time)
+                            collision_interval2 = (t_start+t1, t_start+t2)
 
-                                edge_conflict = edge_collision_interval_1 and vertex_collision_interval_2
-                                if edge_conflict:
-                                    result.type1 = Conflict.MOVE
-                                    result.type2 = Conflict.WAIT
-                                    result.agent_1 = agent_1
-                                    result.agent_2 = agent_2
-                                    result.location_1a = v1_now
-                                    result.location_1b = v1_next
-                                    result.location_2a = v2_now
-                                    result.location_2b = v2_now
-                                    result.time_interval_1 = (t_depart1,  t_stationary2+edge_collision_interval_1[1])
-                                    result.time_interval_2 = (t_stationary2, t_stationary2+edge_collision_interval_1[1])
-                                    result.travel_time_1 = t_arrive1 - t_depart1
-                                    result.travel_time_2 = 0
-                                    if get_first_conflict:
-                                        return result
-                                    conflicts.append(result)
+                            result.type1 = Conflict.MOVE
+                            result.type2 = Conflict.WAIT
+                            result.agent_1 = agent_1
+                            result.agent_2 = agent_2
+                            result.location_1a = v1_now
+                            result.location_1b = v1_next
+                            result.location_2a = v2_now
+                            result.location_2b = v2_now
+                            result.time_interval_1 = collision_interval1
+                            result.time_interval_2 = collision_interval2
+                            result.travel_time_1 = t_arrive1 - t_depart1
+                            result.travel_time_2 = 0
+                            if get_first_conflict:
+                                return result
+                            conflicts.append(result)
                         elif it1_idx == 1 and it2_idx == 1:
-                            interval_1 = overlapping_edges_1it.get(e2)
-                            interval_2 = overlapping_edges_2it.get(e1)
-                            if interval_1 is not None and interval_2 is not None:
-                                t_depart1, t_arrive1 = t1_int[0], t1_int[1]
-                                t_depart2, t_arrive2 = t2_int[0], t2_int[1]
+                            if e2 not in overlapping_edges_1it or e1 not in overlapping_edges_2it:
+                                continue
 
-                                # Get the time intervals for agent 1 and agent 2 w.r.t. each other
-                                t_depart1_wrt_2 = t_depart1 - t_depart2
-                                t_arrive1_wrt_2 = t_arrive1 - t_depart2
-                                t_depart2_wrt_1 = t_depart2 - t_depart1
-                                t_arrive2_wrt_1 = t_arrive2 - t_depart1
-                                t_int1_wrt2 = (t_depart1_wrt_2, t_arrive1_wrt_2)
-                                t_int2_wrt1 = (t_depart2_wrt_1, t_arrive2_wrt_1)
-                                
-                                # Check for collision conflict
-                                edge_collision_interval_1 = self.check_collision_interval(t_int1_wrt2, interval_1)
-                                edge_collision_interval_2 = self.check_collision_interval(t_int2_wrt1, interval_2)
-                                edge_conflict = edge_collision_interval_1 and edge_collision_interval_2
-                                if edge_conflict:
-                                    result.type1 = Conflict.MOVE
-                                    result.type2 = Conflict.MOVE
-                                    result.agent_1 = agent_1
-                                    result.agent_2 = agent_2
-                                    result.location_1a = v1_now
-                                    result.location_1b = v1_next
-                                    result.location_2a = v2_now
-                                    result.location_2b = v2_next
-                                    result.time_interval_1 = (t_depart1, t_depart1+edge_collision_interval_1[1])
-                                    result.time_interval_2 = (t_depart2, t_depart2+edge_collision_interval_2[1])
-                                    result.travel_time_1 = t_arrive1 - t_depart1
-                                    result.travel_time_2 = t_arrive2 - t_depart2
-                                    if get_first_conflict:
-                                        return result
-                                    conflicts.append(result)
+                            t_depart1, t_arrive1 = t1_int[0], t1_int[1]
+                            t_depart2, t_arrive2 = t2_int[0], t2_int[1]
+                            
+                            v1_now_arr = v1_arr[t1_now_idx]
+                            vel1_now = vel_1_arr[t1_now_idx]
+                            v1_delta_t = t_start - t_depart1
+                            v1_current = v1_now_arr + vel1_now * v1_delta_t
+                            
+                            v2_now_arr = v2_arr[t2_now_idx]
+                            vel2_now = vel_2_arr[t2_now_idx]
+                            v2_delta_t = t_start - t_depart2
+                            v2_current = v2_now_arr + vel2_now * v2_delta_t
+                            tdur = t_end - t_start
+                            collision_time = self.check_collision(v1_current,vel1_now, v2_current,vel2_now,tdur)
+                            if not collision_time:
+                                continue
+                            t1,t2,min_collision_time = collision_time
+                            collision_interval1 = (t_depart1, t_start+min_collision_time)
+                            collision_interval2 = (t_depart2, t_start+min_collision_time)
+                            result.type1 = Conflict.MOVE
+                            result.type2 = Conflict.MOVE
+                            result.agent_1 = agent_1
+                            result.agent_2 = agent_2
+                            result.location_1a = v1_now
+                            result.location_1b = v1_next
+                            result.location_2a = v2_now
+                            result.location_2b = v2_next
+                            result.time_interval_1 = collision_interval1
+                            result.time_interval_2 = collision_interval2
+                            result.travel_time_1 = t_arrive1 - t_depart1
+                            result.travel_time_2 = t_arrive2 - t_depart2
+                            if get_first_conflict:
+                                return result
+                            conflicts.append(result)
+
         return conflicts
 
     def check_collision_interval(self, time_interval, interval):
@@ -494,5 +540,6 @@ class Environment(SippBaseEnvironment):
         """Cached wrapper for get_constraint_sweep to avoid duplicate queries."""
         key = (p1, p2, v, r)
         if key not in self._constraint_sweep_cache:
-            self._constraint_sweep_cache[key] = self.graph_map.get_constraint_sweep(p1, p2,v, r, use_interval=True,get_time_interval=True)
+            self._constraint_sweep_cache[key] = self.graph_map.get_constraint_sweep(p1, p2,v, r, use_interval=True,get_time_interval=False)
         return self._constraint_sweep_cache[key]
+    

@@ -96,10 +96,7 @@ class CCBS(object):
                     )
                 return {}
 
-            _, _, P = heapq.heappop(self.open_list)
-
-            if P is None:
-                break
+            _, P_counter, P = heapq.heappop(self.open_list)
             state_key = self._get_state_key(P)
             if state_key in self.closed_set:
                 continue
@@ -107,9 +104,7 @@ class CCBS(object):
 
             self.env.constraint_dict = P.constraint_dict
 
-            
             conflict_dict = self.env.get_conflicts(P.solution, P.solution_action_cost)
-            print(conflict_dict)
             if not conflict_dict:
                 if self.verbose:
                     print("solution found")
@@ -123,7 +118,7 @@ class CCBS(object):
                 new_node.solution_action_cost = P.solution_action_cost.copy()
                 # Selective deep copy only for affected agent's constraints
                 new_node.constraint_dict = {}
-                for a in self.env.agent_dict.keys():
+                for i, a in enumerate(self.env.agent_dict.keys()):
                     if a == agent:
                         # Deep copy only the modified agent's constraints (copy SippNode values)
                         new_constraints = Constraints()
@@ -134,7 +129,6 @@ class CCBS(object):
                             k: v.copy() for k, v in P.constraint_dict[a].move_constraints.items()
                         }
                         new_constraints.add_constraint(constraint_dict[agent])
-                        print("New constraints: ", new_constraints)
                         new_node.constraint_dict[a] = new_constraints
                     else:
                         # Share unchanged constraints
@@ -144,12 +138,11 @@ class CCBS(object):
                 new_node.solution, new_node.solution_action_cost, new_node.solution_cost = self.env.compute_solution()
                 if not new_node.solution:
                     continue
-                if self._get_state_key(new_node) not in self.closed_set:
-                    print("Solution: ", new_node.solution)
                 new_node.cost = sum(new_node.solution_cost.values())
                 heapq.heappush(self.open_list, (new_node.cost, next(self.counter), new_node))
-
             iterations += 1
+            # if iterations > 30:
+            #     break
         return {}
 
     def generate_plan(self, solution, solution_action_cost):
