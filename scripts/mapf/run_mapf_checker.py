@@ -50,4 +50,10 @@ if __name__ == "__main__":
         file = f'path_planning/maps/2d/sipp/solution_velocity{float(ii)}.yaml'
         check_mapf_solution(file,radius=1.0,velocity=float(ii))
 
-    
+    for ii in [1.0,2.0]:
+        file = f'path_planning/maps/2d/ccbs/solution_radius{float(ii)}.yaml'
+        check_mapf_solution(file,radius=float(ii),velocity=0.0)
+
+    for ii in [0.0,1.0,2.0]:
+        file = f'path_planning/maps/2d/ccbs/solution_velocity{float(ii)}.yaml'
+        check_mapf_solution(file,radius=1.0,velocity=float(ii))

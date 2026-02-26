@@ -20,7 +20,7 @@ def check_velocity_anomaly(solution,is_using_constant_speed: bool = False,verbos
     for agent, path in agents.items():
         diff = np.diff(path[:,1:], axis=0)
         t_diff = np.diff(path[:,0], axis=0)
-        v_diff = diff / t_diff.reshape(-1,1)
+        v_diff = diff[t_diff > 1e-10] / t_diff[t_diff > 1e-10].reshape(-1,1)
         speed = np.linalg.norm(v_diff, axis=1)
 
         median_speed = np.median(speed)
