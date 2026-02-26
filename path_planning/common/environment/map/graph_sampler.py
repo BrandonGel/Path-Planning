@@ -574,9 +574,13 @@ class GraphSampler(Grid):
             return None
         if use_interval:
             overlapping_vertices,overlapping_edges = self.constraint_sweep.overlapping_interval_cgal(p1, p2,v, r,get_time_interval=get_time_interval)
-            vertices_interval = dict({self.nodes[vertex_index].current: vertex_interval for vertex_index, vertex_interval in overlapping_vertices.items()})
-            edges_interval = dict({(self.nodes[edge_idx[0]].current, self.nodes[edge_idx[1]].current): edge_interval for edge_idx, edge_interval in overlapping_edges.items()})
-            return vertices_interval,edges_interval
+            if get_time_interval:
+                vertices_interval = dict({self.nodes[vertex_index].current: vertex_interval for vertex_index, vertex_interval in overlapping_vertices.items()})
+                edges_interval = dict({(self.nodes[edge_idx[0]].current, self.nodes[edge_idx[1]].current): edge_interval for edge_idx, edge_interval in overlapping_edges.items()})
+                return vertices_interval,edges_interval
+            vertices_locations = set(self.nodes[vertex_index].current for vertex_index in overlapping_vertices)
+            edges_locations = set((self.nodes[edge_idx[0]].current, self.nodes[edge_idx[1]].current) for edge_idx in overlapping_edges)
+            return vertices_locations,edges_locations
         overlapping_edges = self.constraint_sweep.overlapping_graph_elements_cgal(p1, p2,v, r)
         edges_locations = set((self.nodes[edge_idx[0]].current, self.nodes[edge_idx[1]].current) for edge_idx in overlapping_edges)
         return edges_locations
