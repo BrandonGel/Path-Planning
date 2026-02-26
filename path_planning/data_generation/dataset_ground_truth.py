@@ -173,7 +173,7 @@ def process_single_permutation(args: Tuple) -> Tuple[bool, int]:
     inpt_copy["agents"] = agents
 
     # Generate solution
-    perm_path = case_path / f"perm_{perm_id}"
+    perm_path = case_path / f"perm_{perm_id}" / mapf_solver_name
     success = data_gen(
         inpt_copy,
         perm_path,
@@ -453,7 +453,6 @@ def create_path_parameter_directory(base_path: Path, config: Dict,dump_config: b
     nb_agents = config["nb_agents"]
     nb_obstacles = config["nb_obstacles"]
     resolution = config["resolution"]
-    solver = config["mapf_solver_name"]
     str_bounds = ""
     for b in bounds:
         str_bounds += f"{b[1]-b[0]}x"
@@ -462,7 +461,6 @@ def create_path_parameter_directory(base_path: Path, config: Dict,dump_config: b
         base_path
         / f"map{str_bounds}_resolution{resolution}"
         / f"agents{nb_agents}_obst{nb_obstacles}"
-        / f"{solver}"
     )
     os.makedirs(path, exist_ok=True)
 

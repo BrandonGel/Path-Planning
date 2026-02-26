@@ -31,17 +31,17 @@ for config1 in os.listdir(base_path):
         config_key = f"{config1}/{config2}"
         raw_data = {}
 
-        for solver in os.listdir(config2_path):
-            solver_path = os.path.join(config2_path, solver, "case_0", "ground_truth")
-            if not os.path.isdir(solver_path):
+        gt_path = os.path.join(config2_path, "case_0", "ground_truth")
+
+        # Loop through the 64 permutation folders
+        for perm in os.listdir(gt_path):
+            perm_path = os.path.join(gt_path, perm)
+            if not os.path.isdir(perm_path):
                 continue
 
-            raw_data[solver] = []
-
-            # Loop through the 64 permutation folders
-            for perm in sorted(os.listdir(solver_path)):
-                perm_path = os.path.join(solver_path, perm)
-                sol_file = os.path.join(perm_path, "solution.yaml")
+            for solver in sorted(os.listdir(perm_path)):
+                solver_path = os.path.join(perm_path, solver)
+                sol_file = os.path.join(solver_path, "solution.yaml")
 
                 if not os.path.isfile(sol_file):
                     print(f"Missing solution.yaml: {sol_file}")
@@ -53,9 +53,15 @@ for config1 in os.listdir(base_path):
                 cost = data.get("cost", None)
                 runtime = data.get("runtime", None)
 
-                raw_data[solver].append(
-                    {"perm": perm, "cost": cost, "runtime": runtime}
-                )
+                if solver in raw_data:
+                    raw_data[solver].append(
+                        {"perm": perm, "cost": cost, "runtime": runtime}
+                    )
+                else:
+                    raw_data[solver] = []
+                    raw_data[solver].append(
+                        {"perm": perm, "cost": cost, "runtime": runtime}
+                    )
 
         raw_file = os.path.join(config2_path, "raw_data.yaml")
         with open(raw_file, "w") as f:
