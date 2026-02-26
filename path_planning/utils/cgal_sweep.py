@@ -285,14 +285,45 @@ class CGAL_Sweep:
             
             # Query R-tree for edges whose bounding boxes overlap with query point
             candidate_edge_indices = list(self.edge_rtree.intersection(query_bbox))
-            
             # Check exact distance for candidate edges
-            overlapping_edges = {}
-            for edge_idx in candidate_edge_indices:
-                if squared_distance(u_pt, self.edges[edge_idx])**0.5 < r:
-                    # overlapping_edges[self.edge_indices[edge_idx]] = (0, float('inf'),u,u)
-                    overlapping_edges[self.edge_indices[edge_idx]] = (0, float('inf'))
+            # overlapping_edges = {self.edge_indices[edge_idx]: (0, float('inf')) for edge_idx in candidate_edge_indices if squared_distance(traversal_seg, self.edges[edge_idx])**0.5 < r}
+
+
+            candidate_edge_indices = np.array([edge_idx for edge_idx in candidate_edge_indices if squared_distance(traversal_seg, self.edges[edge_idx])**0.5 < r], dtype=int)
+            src_indices = np.array([self.edge_indices[i][0] for i in candidate_edge_indices], dtype=int)
+            tgt_indices = np.array([self.edge_indices[i][1] for i in candidate_edge_indices], dtype=int)
+            K = len(candidate_edge_indices)
+            a_pos = self.vertex_positions[src_indices].astype(np.float32, copy=False).reshape(K, -1)
+            b_pos = self.vertex_positions[tgt_indices].astype(np.float32, copy=False).reshape(K, -1)
+    
+            # 1. Vector setup
+            a_to_b = b_pos - a_pos
+            a_to_u = u_arr - a_pos
+            seg_len_sq = np.sum(a_to_b**2, axis=1) + 1e-9
             
+            # 2. Project M onto the infinite line AB to find parameter s
+            A_coeff = np.sum(a_to_b**2, axis=1)
+            B_coeff = 2 * np.sum(a_to_u * a_to_b, axis=1)
+            C_coeff = np.sum(a_to_u**2, axis=1) - r**2
+            
+            disc = B_coeff**2 - 4 * A_coeff * C_coeff
+
+            sqrt_disc = np.sqrt(np.maximum(0, disc))
+            s1 = (-B_coeff - sqrt_disc) / (2 * A_coeff + 1e-9)
+            s2 = (-B_coeff + sqrt_disc) / (2 * A_coeff + 1e-9)
+            s_start = np.clip(s1, 0, 1)
+            s_end = np.clip(s2, 0, 1)
+
+            L = np.linalg.norm(a_to_b, axis=1)
+            lower_s = s_start*L
+            upper_s = s_end*L
+            lower_t = - lower_s/velocity if velocity != 0.0 else - lower_s/L
+            upper_t = - upper_s/velocity if velocity != 0.0 else - upper_s/L
+            mask = upper_t < lower_t
+            lower_t[mask] = 0
+            upper_t[mask] = 0
+            overlapping_edges = {(src_indices[ii], tgt_indices[ii]): (float(lower_t[ii]), float(upper_t[ii])) for ii in range(len(candidate_edge_indices))}
+
             if self.record_sweep:
                 self.overlapping_interval_sweep[u,v,velocity,r] = overlapping_vertices,overlapping_edges
             return overlapping_vertices,overlapping_edges
@@ -333,42 +364,6 @@ class CGAL_Sweep:
 
         if not candidate_edge_indices:
             overlapping_edges = {}
-        elif not get_time_interval:
-            # Only run expensive CGAL check on candidates
-            overlapping_edges = {}
-            for edge_idx in candidate_edge_indices:
-                # overlapping_edges[self.edge_indices[edge_idx]] = (0, float('inf'),u,u)
-                overlapping_edges[self.edge_indices[edge_idx]] = (0, float('inf'))
-            crossing_edges = set()
-            for edge in overlapping_edges:
-                src,tgt = edge
-                if src not in overlapping_vertices:
-                    crossing_edges.add(edge)
-                if tgt not in overlapping_vertices:
-                    crossing_edges.add(edge)
-            
-            for edge in crossing_edges:
-                src,tgt = edge
-                a_pt = self.vertices[src]
-                b_pt = self.vertices[tgt]
-
-                u_to_v = v_pt-u_pt
-                a_to_b = b_pt-a_pt
-
-                 # --- Edge 1 ---
-                # a -> b and u -> v Z
-                ro1 = a_pt-u_pt
-                if velocity == 0.0:
-                    vel = a_to_b-u_to_v
-                    tdur = 1.0
-                else:
-                    dist = np.linalg.norm(a_to_b-u_to_v)
-                    vel = velocity*(a_to_b-u_to_v)/dist if dist > 0.0 else np.zeros(dim)
-                    tdur = np.linalg.norm(a_to_b-u_to_v)/velocity
-                tmin = np.clip(-np.dot(ro1,vel)/(np.dot(vel,vel)+1e-10),0.0,tdur)
-                vec = ro1 + vel*tmin
-                if np.linalg.norm(vec) > r:
-                    overlapping_edges.pop(edge,None)
         else:
             overlapping_edges = {}
             candidate_edge_indices = np.array(candidate_edge_indices, dtype=int)
@@ -482,10 +477,10 @@ class CGAL_Sweep:
             L = np.linalg.norm(a_to_b, axis=1)
             lower_s = start_seg_pos*L
             upper_s = end_seg_pos*L
-            lower_ta = tau_start - lower_s/velocity if velocity != 0.0 else lower_s/L
-            lower_tb = tau_end - upper_s/velocity if velocity != 0.0 else upper_s/L
-            upper_ta = tdur - lower_s/velocity if velocity != 0.0 else lower_s/L
-            upper_tb = tdur - upper_s/velocity if velocity != 0.0 else upper_s/L
+            lower_ta = tau_start - lower_s/velocity if velocity != 0.0 else tau_start - lower_s/L
+            lower_tb = tau_end - upper_s/velocity if velocity != 0.0 else tau_end - upper_s/L
+            upper_ta = tdur - lower_s/velocity if velocity != 0.0 else tdur - lower_s/L
+            upper_tb = tdur - upper_s/velocity if velocity != 0.0 else tdur - upper_s/L
             lower_t = np.minimum(lower_ta, lower_tb)
             upper_t = np.maximum(upper_ta, upper_tb)
             overlapping_edges = {(src_indices[ii], tgt_indices[ii]): (float(lower_t[ii]), float(upper_t[ii])) for ii in range(len(candidate_edge_indices)) if not no_collision[ii]}
