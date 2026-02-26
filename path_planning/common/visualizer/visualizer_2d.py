@@ -177,7 +177,7 @@ class Visualizer2D(BaseVisualizer2D):
                     else:
                         start = start
                     if start is not None and len(start) >= 2:
-                        self.ax.scatter(start[0], start[1], c='red', s=20, alpha=1, zorder=self.zorder['expand_tree_node'], label='Start' if start == map_.start[0] else '')
+                        self.ax.scatter(start[0], start[1], c='red', s=node_size, alpha=1, zorder=self.zorder['expand_tree_node'], label='Start' if start == map_.start[0] else '')
             else:
                 # Single start position (not a list)
                 if map_frame:   
@@ -185,7 +185,7 @@ class Visualizer2D(BaseVisualizer2D):
                 else:
                     start = map_.start
                 if len(start) >= 2:
-                    self.ax.scatter(start[0], start[1], c='red', s=20, alpha=1, zorder=self.zorder['expand_tree_node'], label='Start')
+                    self.ax.scatter(start[0], start[1], c='red', s=node_size, alpha=1, zorder=self.zorder['expand_tree_node'], label='Start')
 
         if hasattr(map_, 'goal') and map_.goal is not None:
             if isinstance(map_.goal, list) and len(map_.goal) > 0:
@@ -195,14 +195,14 @@ class Visualizer2D(BaseVisualizer2D):
                     else:
                         goal = goal
                     if goal is not None and len(goal) >= 2:
-                        self.ax.scatter(goal[0], goal[1], c='blue', s=20, alpha=1, zorder=self.zorder['expand_tree_node'], label='Goal')
+                        self.ax.scatter(goal[0], goal[1], c='blue', s=node_size, alpha=1, zorder=self.zorder['expand_tree_node'], label='Goal')
             else:
                 if map_frame:   
                     goal = map_.map_to_world(map_.goal)
                 else:
                     goal = map_.goal
                 if len(goal) >= 2:
-                    self.ax.scatter(goal[0], goal[1], c='blue', s=20, alpha=1, zorder=self.zorder['expand_tree_node'], label='Goal')
+                    self.ax.scatter(goal[0], goal[1], c='blue', s=node_size, alpha=1, zorder=self.zorder['expand_tree_node'], label='Goal')
 
     def animate(self,file_name,map, schedule, road_map=None, skip_frames=1, intermediate_frames=3,speed=1,map_frame=True,radius=0.0):
 
@@ -245,7 +245,7 @@ class Visualizer2D(BaseVisualizer2D):
             agent_names[name].set_verticalalignment('center')
             artists.append(agent_names[name])
 
-        colors = ['tab:green', 'tab:orange']
+        colors = ['tab:green']
         agent_num = 0
         for agent_name, agent in combined_schedule.items():
             pos = np.array([[state['x'],state['y']] for state in agent])

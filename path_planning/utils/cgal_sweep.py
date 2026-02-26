@@ -270,7 +270,10 @@ class CGAL_Sweep:
         # Special case: point query (stationary agent)
         if u == v:
             indices = self.vertex_kdtree.query_ball_point(u, r-1e-10)
-            overlapping_vertices = {index: (0, float('inf')) for index in indices}
+            if get_time_interval:
+                overlapping_vertices = {index: (0, float('inf')) for index in indices}
+            else:
+                overlapping_vertices = set(indices)
             
             # Create query box: point expanded by radius
             query_min = u_arr - r
@@ -285,14 +288,46 @@ class CGAL_Sweep:
             
             # Query R-tree for edges whose bounding boxes overlap with query point
             candidate_edge_indices = list(self.edge_rtree.intersection(query_bbox))
-            
             # Check exact distance for candidate edges
-            overlapping_edges = {}
-            for edge_idx in candidate_edge_indices:
-                if squared_distance(u_pt, self.edges[edge_idx])**0.5 < r:
-                    # overlapping_edges[self.edge_indices[edge_idx]] = (0, float('inf'),u,u)
-                    overlapping_edges[self.edge_indices[edge_idx]] = (0, float('inf'))
-            
+            # overlapping_edges = {self.edge_indices[edge_idx]: (0, float('inf')) for edge_idx in candidate_edge_indices if squared_distance(traversal_seg, self.edges[edge_idx])**0.5 < r}
+
+            if get_time_interval:
+                candidate_edge_indices = np.array([edge_idx for edge_idx in candidate_edge_indices if squared_distance(traversal_seg, self.edges[edge_idx])**0.5 < r], dtype=int)
+                src_indices = np.array([self.edge_indices[i][0] for i in candidate_edge_indices], dtype=int)
+                tgt_indices = np.array([self.edge_indices[i][1] for i in candidate_edge_indices], dtype=int)
+                K = len(candidate_edge_indices)
+                a_pos = self.vertex_positions[src_indices].astype(np.float32, copy=False).reshape(K, -1)
+                b_pos = self.vertex_positions[tgt_indices].astype(np.float32, copy=False).reshape(K, -1)
+        
+                # 1. Vector setup
+                a_to_b = b_pos - a_pos
+                a_to_u = u_arr - a_pos
+                seg_len_sq = np.sum(a_to_b**2, axis=1) + 1e-9
+                
+                # 2. Project M onto the infinite line AB to find parameter s
+                A_coeff = np.sum(a_to_b**2, axis=1)
+                B_coeff = 2 * np.sum(a_to_u * a_to_b, axis=1)
+                C_coeff = np.sum(a_to_u**2, axis=1) - r**2
+                
+                disc = B_coeff**2 - 4 * A_coeff * C_coeff
+
+                sqrt_disc = np.sqrt(np.maximum(0, disc))
+                s1 = (-B_coeff - sqrt_disc) / (2 * A_coeff + 1e-9)
+                s2 = (-B_coeff + sqrt_disc) / (2 * A_coeff + 1e-9)
+                s_start = np.clip(s1, 0, 1)
+                s_end = np.clip(s2, 0, 1)
+
+                L = np.linalg.norm(a_to_b, axis=1)
+                lower_s = s_start*L
+                upper_s = s_end*L
+                lower_t = - lower_s/velocity if velocity != 0.0 else - lower_s/L
+                upper_t= lower_t
+                overlapping_edges = {(src_indices[ii], tgt_indices[ii]): (float(lower_t[ii]), float(upper_t[ii])) for ii in range(len(candidate_edge_indices))}
+            else:
+                candidate_edge_indices = np.array(candidate_edge_indices, dtype=int)
+                src_indices = np.array([self.edge_indices[i][0] for i in candidate_edge_indices], dtype=int)
+                tgt_indices = np.array([self.edge_indices[i][1] for i in candidate_edge_indices], dtype=int)
+                overlapping_edges = set((src_indices[ii], tgt_indices[ii]) for ii in range(len(candidate_edge_indices)))
             if self.record_sweep:
                 self.overlapping_interval_sweep[u,v,velocity,r] = overlapping_vertices,overlapping_edges
             return overlapping_vertices,overlapping_edges
@@ -304,24 +339,30 @@ class CGAL_Sweep:
             overlapping_vertices_set.update(idx_list)
 
         if overlapping_vertices_set:
-            all_indices = list(overlapping_vertices_set)
-            overlapping_vertices_position = self.vertex_positions[all_indices]
-            r0 = u_arr - overlapping_vertices_position
+            if get_time_interval:
+                all_indices = list(overlapping_vertices_set)
+                overlapping_vertices_position = self.vertex_positions[all_indices]
+                r0 = u_arr - overlapping_vertices_position
 
-            # Per-edge relative velocity and duration
-            u_to_v = v_arr - u_arr 
-            if velocity == 0.0:
-                vel_vec = u_to_v            # (K, dim)
-                tdur = 1
+                # Per-edge relative velocity and duration
+                u_to_v = v_arr - u_arr 
+                if velocity == 0.0:
+                    vel_vec = u_to_v            # (K, dim)
+                    tdur = 1
+                else:
+                    dist = np.linalg.norm(u_to_v)     # (K,)
+                    vel_vec = velocity*u_to_v/dist
+                    tdur = dist / velocity
+
+                t1, t2 = self.get_interval_from_quadratic_equation(r0, vel_vec, r, tdur)
+                overlapping_vertices = {idx: (float(t1[i]), float(t2[i])) for i, idx in enumerate(all_indices)}
             else:
-                dist = np.linalg.norm(u_to_v)     # (K,)
-                vel_vec = velocity*u_to_v/dist
-                tdur = dist / velocity
-
-            t1, t2 = self.get_interval_from_quadratic_equation(r0, vel_vec, r, tdur)
-            overlapping_vertices = {idx: (float(t1[i]), float(t2[i])) for i, idx in enumerate(all_indices)}
+                overlapping_vertices = overlapping_vertices_set
         else:
-            overlapping_vertices = {}
+            if get_time_interval:
+                overlapping_vertices = {}
+            else:
+                overlapping_vertices = set()
 
         # --- Edge overlap using R-tree spatial query (OPTIMIZED) ---
         query_bbox = self._build_query_bbox(u_arr, v_arr, r)
@@ -331,165 +372,134 @@ class CGAL_Sweep:
             if squared_distance(traversal_seg, self.edges[edge_idx])**0.5 < r
         ]
 
-        if not candidate_edge_indices:
-            overlapping_edges = {}
-        elif not get_time_interval:
-            # Only run expensive CGAL check on candidates
-            overlapping_edges = {}
-            for edge_idx in candidate_edge_indices:
-                # overlapping_edges[self.edge_indices[edge_idx]] = (0, float('inf'),u,u)
-                overlapping_edges[self.edge_indices[edge_idx]] = (0, float('inf'))
-            crossing_edges = set()
-            for edge in overlapping_edges:
-                src,tgt = edge
-                if src not in overlapping_vertices:
-                    crossing_edges.add(edge)
-                if tgt not in overlapping_vertices:
-                    crossing_edges.add(edge)
-            
-            for edge in crossing_edges:
-                src,tgt = edge
-                a_pt = self.vertices[src]
-                b_pt = self.vertices[tgt]
+        if candidate_edge_indices:
+            if get_time_interval:
+                candidate_edge_indices = np.array(candidate_edge_indices, dtype=int)
+                src_indices = np.array([self.edge_indices[i][0] for i in candidate_edge_indices], dtype=int)
+                tgt_indices = np.array([self.edge_indices[i][1] for i in candidate_edge_indices], dtype=int)
 
-                u_to_v = v_pt-u_pt
-                a_to_b = b_pt-a_pt
+                # Positions and relative motion (float32 to reduce peak memory)
+                K = len(candidate_edge_indices)
+                a_pos = self.vertex_positions[src_indices].astype(np.float32, copy=False).reshape(K, -1)
+                b_pos = self.vertex_positions[tgt_indices].astype(np.float32, copy=False).reshape(K, -1)
+                u_arr_f = np.asarray(u_arr, dtype=np.float32)
+                v_arr_f = np.asarray(v_arr, dtype=np.float32)
+                u_to_v = v_arr_f - u_arr_f
+                a_to_b = b_pos - a_pos
 
-                 # --- Edge 1 ---
-                # a -> b and u -> v Z
-                ro1 = a_pt-u_pt
                 if velocity == 0.0:
-                    vel = a_to_b-u_to_v
-                    tdur = 1.0
+                    vel_vec = u_to_v
+                    tdur = 1
                 else:
-                    dist = np.linalg.norm(a_to_b-u_to_v)
-                    vel = velocity*(a_to_b-u_to_v)/dist if dist > 0.0 else np.zeros(dim)
-                    tdur = np.linalg.norm(a_to_b-u_to_v)/velocity
-                tmin = np.clip(-np.dot(ro1,vel)/(np.dot(vel,vel)+1e-10),0.0,tdur)
-                vec = ro1 + vel*tmin
-                if np.linalg.norm(vec) > r:
-                    overlapping_edges.pop(edge,None)
-        else:
-            overlapping_edges = {}
-            candidate_edge_indices = np.array(candidate_edge_indices, dtype=int)
-            src_indices = np.array([self.edge_indices[i][0] for i in candidate_edge_indices], dtype=int)
-            tgt_indices = np.array([self.edge_indices[i][1] for i in candidate_edge_indices], dtype=int)
+                    dist = np.linalg.norm(u_to_v)
+                    vel_vec = velocity * u_to_v / dist
+                    tdur = float(dist / velocity)
 
-            # Positions and relative motion (float32 to reduce peak memory)
-            K = len(candidate_edge_indices)
-            a_pos = self.vertex_positions[src_indices].astype(np.float32, copy=False).reshape(K, -1)
-            b_pos = self.vertex_positions[tgt_indices].astype(np.float32, copy=False).reshape(K, -1)
-            u_arr_f = np.asarray(u_arr, dtype=np.float32)
-            v_arr_f = np.asarray(v_arr, dtype=np.float32)
-            u_to_v = v_arr_f - u_arr_f
-            a_to_b = b_pos - a_pos
+                K = a_pos.shape[0]
+                # Initialize intervals with null values
+                all_starts = np.full(K, np.inf, dtype=np.float32)
+                all_ends = np.full(K, -np.inf, dtype=np.float32)
 
-            if velocity == 0.0:
-                vel_vec = u_to_v
-                tdur = 1
+                # Track segment positions at start and end of collision
+                start_seg_pos = np.full(K, np.nan, dtype=np.float32)
+                end_seg_pos = np.full(K, np.nan, dtype=np.float32)
+
+                def get_seg_proj(tau, a_to_b, seg_len_sq):
+                    # Position of moving point at time tau
+                    p_tau = u_arr_f + tau[:, np.newaxis] * vel_vec
+                    # Projection onto segment
+                    proj = np.sum((p_tau - a_pos) * a_to_b, axis=1) / seg_len_sq
+                    return np.clip(proj, 0, 1)
+                    
+                # 1. Endpoints a and b (Spheres)
+                for i, endpoint in enumerate([a_pos, b_pos]):
+                    rel_pos = u_arr_f - endpoint
+                    A = np.sum(vel_vec**2, axis=1)
+                    B = 2 * np.sum(vel_vec * rel_pos, axis=1)
+                    C = np.sum(rel_pos**2, axis=1) - r**2
+                    
+                    disc = B**2 - 4*A*C
+                    mask = disc >= 0
+                    sqrt_disc = np.sqrt(np.maximum(0, disc))
+                    t1 = (-B - sqrt_disc) / (2 * A + 1e-9)
+                    t2 = (-B + sqrt_disc) / (2 * A + 1e-9)
+                    
+                    # Update starts
+                    is_earlier = mask & (t1 < all_starts)
+                    all_starts[is_earlier] = t1[is_earlier]
+                    start_seg_pos[is_earlier] = float(i) # 0 for a, 1 for b
+                    
+                    # Update ends
+                    is_later = mask & (t2 > all_ends)
+                    all_ends[is_later] = t2[is_later]
+                    end_seg_pos[is_later] = float(i)
+
+                # 2. Cylinder Body
+                a_to_b = b_pos - a_pos
+                seg_len_sq = np.sum(a_to_b**2, axis=1) + 1e-9
+                
+                def get_perp(vec, axis_vec, axis_len_sq):
+                    dot = np.sum(vec * axis_vec, axis=1) / axis_len_sq
+                    return vec - dot[:, np.newaxis] * axis_vec
+
+                v_perp = get_perp(vel_vec, a_to_b, seg_len_sq)
+                pos_perp = get_perp(u_arr_f - a_pos, a_to_b, seg_len_sq)
+
+                A_c = np.sum(v_perp**2, axis=1)
+                B_c = 2 * np.sum(v_perp * pos_perp, axis=1)
+                C_c = np.sum(pos_perp**2, axis=1) - r**2
+
+                disc_c = B_c**2 - 4*A_c*C_c
+                mask_c = disc_c >= 0
+                sqrt_disc_c = np.sqrt(np.maximum(0, disc_c))
+                t1_c = (-B_c - sqrt_disc_c) / (2 * A_c + 1e-9)
+                t2_c = (-B_c + sqrt_disc_c) / (2 * A_c + 1e-9)
+
+                # Check projection for cylinder entries/exits
+                for t_val, is_start in [(t1_c, True), (t2_c, False)]:
+                    proj = get_seg_proj(t_val, a_to_b, seg_len_sq)
+                    valid_cyl = mask_c & (proj >= 0) & (proj <= 1)
+                    
+                    if is_start:
+                        is_earlier = valid_cyl & (t_val < all_starts)
+                        all_starts[is_earlier] = t_val[is_earlier]
+                        start_seg_pos[is_earlier] = proj[is_earlier]
+                    else:
+                        is_later = valid_cyl & (t_val > all_ends)
+                        all_ends[is_later] = t_val[is_later]
+                        end_seg_pos[is_later] = proj[is_later]
+
+                # 3. Final Constraints
+                # Clip to the travel period [0, tdur]
+                tau_start = np.clip(all_starts, 0, tdur)
+                tau_end = np.clip(all_ends, 0, tdur)
+
+                # Re-calculate segment positions for clipped bounds
+                start_seg_pos = np.where(all_starts < 0, get_seg_proj(tau_start, a_to_b, seg_len_sq), start_seg_pos)
+                end_seg_pos = np.where(all_ends > tdur, get_seg_proj(tau_end, a_to_b, seg_len_sq), end_seg_pos)
+
+                no_collision = (tau_start >= tau_end) | (all_starts == np.inf)
+                tau_start[no_collision], tau_end[no_collision] = np.nan, np.nan
+                start_seg_pos[no_collision], end_seg_pos[no_collision] = np.nan, np.nan
+
+                L = np.linalg.norm(a_to_b, axis=1)
+                lower_s = start_seg_pos*L
+                upper_s = end_seg_pos*L
+                lower_ta = tau_start - lower_s/velocity if velocity != 0.0 else tau_start - lower_s/L
+                lower_tb = tau_end - upper_s/velocity if velocity != 0.0 else tau_end - upper_s/L
+                lower_t = np.minimum(lower_ta, lower_tb)
+                upper_t= np.maximum(0, lower_tb,lower_tb)
+                overlapping_edges = {(src_indices[ii], tgt_indices[ii]): (float(lower_t[ii]), float(upper_t[ii])) for ii in range(len(candidate_edge_indices)) if not no_collision[ii]}
             else:
-                dist = np.linalg.norm(u_to_v)
-                vel_vec = velocity * u_to_v / dist
-                tdur = float(dist / velocity)
-
-            K = a_pos.shape[0]
-            # Initialize intervals with null values
-            all_starts = np.full(K, np.inf, dtype=np.float32)
-            all_ends = np.full(K, -np.inf, dtype=np.float32)
-
-            # Track segment positions at start and end of collision
-            start_seg_pos = np.full(K, np.nan, dtype=np.float32)
-            end_seg_pos = np.full(K, np.nan, dtype=np.float32)
-
-            def get_seg_proj(tau, a_to_b, seg_len_sq):
-                # Position of moving point at time tau
-                p_tau = u_arr_f + tau[:, np.newaxis] * vel_vec
-                # Projection onto segment
-                proj = np.sum((p_tau - a_pos) * a_to_b, axis=1) / seg_len_sq
-                return np.clip(proj, 0, 1)
-                
-            # 1. Endpoints a and b (Spheres)
-            for i, endpoint in enumerate([a_pos, b_pos]):
-                rel_pos = u_arr_f - endpoint
-                A = np.sum(vel_vec**2, axis=1)
-                B = 2 * np.sum(vel_vec * rel_pos, axis=1)
-                C = np.sum(rel_pos**2, axis=1) - r**2
-                
-                disc = B**2 - 4*A*C
-                mask = disc >= 0
-                sqrt_disc = np.sqrt(np.maximum(0, disc))
-                t1 = (-B - sqrt_disc) / (2 * A + 1e-9)
-                t2 = (-B + sqrt_disc) / (2 * A + 1e-9)
-                
-                # Update starts
-                is_earlier = mask & (t1 < all_starts)
-                all_starts[is_earlier] = t1[is_earlier]
-                start_seg_pos[is_earlier] = float(i) # 0 for a, 1 for b
-                
-                # Update ends
-                is_later = mask & (t2 > all_ends)
-                all_ends[is_later] = t2[is_later]
-                end_seg_pos[is_later] = float(i)
-
-            # 2. Cylinder Body
-            a_to_b = b_pos - a_pos
-            seg_len_sq = np.sum(a_to_b**2, axis=1) + 1e-9
-            
-            def get_perp(vec, axis_vec, axis_len_sq):
-                dot = np.sum(vec * axis_vec, axis=1) / axis_len_sq
-                return vec - dot[:, np.newaxis] * axis_vec
-
-            v_perp = get_perp(vel_vec, a_to_b, seg_len_sq)
-            pos_perp = get_perp(u_arr_f - a_pos, a_to_b, seg_len_sq)
-
-            A_c = np.sum(v_perp**2, axis=1)
-            B_c = 2 * np.sum(v_perp * pos_perp, axis=1)
-            C_c = np.sum(pos_perp**2, axis=1) - r**2
-
-            disc_c = B_c**2 - 4*A_c*C_c
-            mask_c = disc_c >= 0
-            sqrt_disc_c = np.sqrt(np.maximum(0, disc_c))
-            t1_c = (-B_c - sqrt_disc_c) / (2 * A_c + 1e-9)
-            t2_c = (-B_c + sqrt_disc_c) / (2 * A_c + 1e-9)
-
-            # Check projection for cylinder entries/exits
-            for t_val, is_start in [(t1_c, True), (t2_c, False)]:
-                proj = get_seg_proj(t_val, a_to_b, seg_len_sq)
-                valid_cyl = mask_c & (proj >= 0) & (proj <= 1)
-                
-                if is_start:
-                    is_earlier = valid_cyl & (t_val < all_starts)
-                    all_starts[is_earlier] = t_val[is_earlier]
-                    start_seg_pos[is_earlier] = proj[is_earlier]
-                else:
-                    is_later = valid_cyl & (t_val > all_ends)
-                    all_ends[is_later] = t_val[is_later]
-                    end_seg_pos[is_later] = proj[is_later]
-
-            # 3. Final Constraints
-            # Clip to the travel period [0, tdur]
-            tau_start = np.clip(all_starts, 0, tdur)
-            tau_end = np.clip(all_ends, 0, tdur)
-
-            # Re-calculate segment positions for clipped bounds
-            start_seg_pos = np.where(all_starts < 0, get_seg_proj(tau_start, a_to_b, seg_len_sq), start_seg_pos)
-            end_seg_pos = np.where(all_ends > tdur, get_seg_proj(tau_end, a_to_b, seg_len_sq), end_seg_pos)
-
-            no_collision = (tau_start >= tau_end) | (all_starts == np.inf)
-            tau_start[no_collision], tau_end[no_collision] = np.nan, np.nan
-            start_seg_pos[no_collision], end_seg_pos[no_collision] = np.nan, np.nan
-
-            L = np.linalg.norm(a_to_b, axis=1)
-            lower_s = start_seg_pos*L
-            upper_s = end_seg_pos*L
-            lower_ta = tau_start - lower_s/velocity if velocity != 0.0 else lower_s/L
-            lower_tb = tau_end - upper_s/velocity if velocity != 0.0 else upper_s/L
-            upper_ta = tdur - lower_s/velocity if velocity != 0.0 else lower_s/L
-            upper_tb = tdur - upper_s/velocity if velocity != 0.0 else upper_s/L
-            lower_t = np.minimum(lower_ta, lower_tb)
-            upper_t = np.maximum(upper_ta, upper_tb)
-            overlapping_edges = {(src_indices[ii], tgt_indices[ii]): (float(lower_t[ii]), float(upper_t[ii])) for ii in range(len(candidate_edge_indices)) if not no_collision[ii]}
-
+                candidate_edge_indices = np.array(candidate_edge_indices, dtype=int)
+                src_indices = np.array([self.edge_indices[i][0] for i in candidate_edge_indices], dtype=int)
+                tgt_indices = np.array([self.edge_indices[i][1] for i in candidate_edge_indices], dtype=int)
+                overlapping_edges = set((src_indices[ii], tgt_indices[ii]) for ii in range(len(candidate_edge_indices)))
+        else:
+            if get_time_interval:
+                overlapping_edges = {}
+            else:
+                overlapping_edges = set()
         # Caller expects overlapping_vertices as dict (vertex_index -> interval)
         if self.record_sweep:
             self.overlapping_interval_sweep[u,v,velocity,r] = overlapping_vertices,overlapping_edges

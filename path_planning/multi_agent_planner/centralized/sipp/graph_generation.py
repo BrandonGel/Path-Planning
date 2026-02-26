@@ -197,10 +197,11 @@ class SippGraph(object):
                         overlapping_vertices,overlapping_edges = self._get_constraint_sweep_cached(position, position,self.velocity, 2*self.radius)
                         next_t = float('inf')
                         for vertex_pos, vertex_interval in overlapping_vertices.items():
-                            t1,t2 = vertex_interval
                             self.sipp_graph[vertex_pos].split_interval(t, next_t)
                         for edge_pos, edge_interval in overlapping_edges.items():
-                            self.sipp_graph[edge_pos].split_interval(t, next_t)
+                            t_start,t_end = edge_interval
+                            t1 = max(0,t+t_start)
+                            self.sipp_graph[edge_pos].split_interval(t1, next_t)
                         continue
                     
                     # Intermediate time step between two locations
@@ -214,7 +215,12 @@ class SippGraph(object):
                         for vertex_pos, vertex_interval in overlapping_vertices.items():
                             self.sipp_graph[vertex_pos].split_interval(t, t0)
                         for edge_pos, edge_interval in overlapping_edges.items():
-                            self.sipp_graph[edge_pos].split_interval(t, t0,0)
+                            t_start,t_end = edge_interval
+                            t1 = max(0,t+t_start)
+                            t2 = max(0,t0+t_end)                        
+                            if t1 == 0 and t2 == 0:
+                                continue
+                            self.sipp_graph[edge_pos].split_interval(t1, t2)
                     else:
                         t0 = t
                     overlapping_vertices,overlapping_edges = self._get_constraint_sweep_cached(position, next_position,self.velocity, 2*self.radius)

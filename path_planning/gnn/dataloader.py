@@ -15,7 +15,7 @@ import torch
 import torch_geometric
 from torch_geometric.typing import EdgeType
 from typing import Dict, Any
-
+from path_planning.common.environment.map.graph_sampler import GraphSampler
 # Allowlist PyG's base storage to bypass the security check
 torch.serialization.add_safe_globals([torch_geometric.data.storage.BaseStorage])
 torch.serialization.add_safe_globals([torch_geometric.data.storage.NodeStorage])
