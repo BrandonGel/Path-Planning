@@ -16,6 +16,8 @@ from itertools import count,combinations
 from path_planning.multi_agent_planner.centralized.sipp.graph_generation import SippNode
 from copy import deepcopy
 
+# Shared singleton for unconstrained vertex/edge (avoids allocation in hot path)
+_UNCONSTRAINED_NODE = SippNode()
 
 
 class Conflict(object):
@@ -111,7 +113,7 @@ class Constraints(object):
             return self.wait_constraints[key]
         if key in self.move_constraints:
             return self.move_constraints[key]
-        return SippNode()
+        return _UNCONSTRAINED_NODE
 
     def __str__(self):
         return "WC: " + str([str(wc) for wc in self.wait_constraints])  + \
@@ -235,31 +237,48 @@ class Environment(SippBaseEnvironment):
                 if wait_time > 0:
                     self._get_constraint_sweep_cached(position_1, position_1,self.velocity, 2*self.radius)
                 self._get_constraint_sweep_cached(position_1, position_2,self.velocity, 2*self.radius)
-                
-        for agent_1, agent_2 in combinations(solution.keys(), 2):
-            plan_1 = solution[agent_1]
-            plan_2 = solution[agent_2]
-            result = Conflict()
-            action_cost_1 = solution_action_cost[agent_1]
-            action_cost_2 = solution_action_cost[agent_2]
 
-            times_1 = [p.time for p in plan_1]
-            times_2 = [p.time for p in plan_2]
+        # Precompute per-agent arrays once (avoid recomputing for each pair)
+        agent_data = {}
+        for agent in solution:
+            plan = solution[agent]
+            ac = solution_action_cost[agent]
+            pos_arr = np.array([p.position for p in plan])
+            ac_arr = np.array(ac)
+            times = [p.time for p in plan]
+            n = len(plan)
+            if n >= 2:
+                move_costs = ac_arr[:-1, 1].reshape(-1, 1)
+                denom = np.where(move_costs != 0, move_costs, 1.0)
+                vel_arr = np.zeros((n - 1, pos_arr.shape[1]), dtype=np.float64)
+                np.divide(np.diff(pos_arr, axis=0), denom, out=vel_arr, where=move_costs != 0)
+            else:
+                vel_arr = np.zeros((0, pos_arr.shape[1]), dtype=np.float64)
+            agent_data[agent] = {"pos": pos_arr, "vel": vel_arr, "times": times, "ac": list(ac), "plan": plan}
+
+        for agent_1, agent_2 in combinations(solution.keys(), 2):
+            d1 = agent_data[agent_1]
+            d2 = agent_data[agent_2]
+            plan_1 = d1["plan"]
+            plan_2 = d2["plan"]
+            result = Conflict()
+            action_cost_1 = d1["ac"]
+            action_cost_2 = d2["ac"]
+
+            times_1 = d1["times"]
+            times_2 = d2["times"]
             all_t = sorted(set(times_1 + times_2))
             if len(all_t) < 2:
                 continue
 
-            # Iterate over all the relevant time steps and check for conflicts
             t1_now_idx = 0
             t2_now_idx = 0
             t1_next_idx = 0
             t2_next_idx = 0
-            v1_arr = np.array([p.position for p in plan_1])
-            v2_arr = np.array([p.position for p in plan_2])
-            action_cost_1_arr = np.array([p for p in action_cost_1])
-            action_cost_2_arr = np.array([p for p in action_cost_2])
-            vel_1_arr = np.diff(v1_arr, axis=0) / action_cost_1_arr[:-1,1].reshape(-1,1)
-            vel_2_arr = np.diff(v2_arr, axis=0) / action_cost_2_arr[:-1,1].reshape(-1,1)
+            v1_arr = d1["pos"]
+            v2_arr = d2["pos"]
+            vel_1_arr = d1["vel"]
+            vel_2_arr = d2["vel"]
             for k in range(len(all_t) - 1):
                 # Global time interval; skip numerically tiny slices
                 t_start, t_end = all_t[k], all_t[k + 1]
@@ -349,6 +368,50 @@ class Environment(SippBaseEnvironment):
                             result.type2 = Conflict.WAIT
                             result.agent_1 = agent_1
                             result.agent_2 = agent_2
+                overlapping_vertices_2 = [overlapping_vertices_2_wait,overlapping_vertices_2_move]
+                overlapping_edges_2 = [overlapping_edges_2_wait,overlapping_edges_2_move]
+
+                # Get the time intervals for agent 1
+                t1_interval = []
+                if t_start < t1_moving_start:
+                    if t_end >= t1_moving_start:
+                        t1_interval = [(t1_start, t1_moving_start),(t1_moving_start, t_end)]
+                    else:
+                        t1_interval = [(t1_start, t1_moving_start),(t1_moving_start, t1_moving_start)]
+                else:
+                    t1_interval = [(t_start, t_start),(t_start, t_end)]
+
+                # Get the time intervals for agent 2
+                t2_interval = []
+                if t_start < t2_moving_start:
+                    if t_end >= t2_moving_start:
+                        t2_interval = [(t2_start, t2_moving_start),(t2_moving_start, t_end)]
+                    else:
+                        t2_interval = [(t2_start, t2_moving_start),(t2_moving_start, t2_moving_start)]
+                else:
+                    t2_interval = [(t_start, t_start),(t_start, t_end)]
+
+                pass
+                for it1_idx, t1_int in enumerate(t1_interval):
+                    for it2_idx, t2_int in enumerate(t2_interval):
+                        if t1_int[0] == t1_int[1] or t2_int[0] == t2_int[1]:
+                            continue
+                        overlapping_vertices_1it = overlapping_vertices_1[it1_idx]
+                        overlapping_vertices_2it = overlapping_vertices_2[it2_idx]
+                        overlapping_edges_1it = overlapping_edges_1[it1_idx]
+                        overlapping_edges_2it = overlapping_edges_2[it2_idx]
+                    
+                        if it1_idx == 0 and it2_idx == 0:
+                            if v2_now not in overlapping_vertices_1it or v1_now not in overlapping_vertices_2it:
+                                continue
+
+                            collision_interval1 = (t_start, t_end)
+                            collision_interval2 = (t_start, t_end)
+
+                            result.type1 = Conflict.WAIT
+                            result.type2 = Conflict.WAIT
+                            result.agent_1 = agent_1
+                            result.agent_2 = agent_2
                             result.location_1a = v1_now
                             result.location_1b = v1_now
                             result.location_2a = v2_now
@@ -357,9 +420,10 @@ class Environment(SippBaseEnvironment):
                             result.time_interval_2 = collision_interval2
                             result.travel_time_1 = 0
                             result.travel_time_2 = 0
-                            if get_first_conflict:
-                                return result
                             conflicts.append(result)
+                            if get_first_conflict:
+                                return conflicts
+                            
                         elif it1_idx == 0 and it2_idx == 1:
                             if e2 not in overlapping_edges_1it or v1_now not in overlapping_vertices_2it:
                                 continue
@@ -393,9 +457,9 @@ class Environment(SippBaseEnvironment):
                             result.time_interval_2 = collision_interval2
                             result.travel_time_1 = 0
                             result.travel_time_2 = t_arrive2 - t_depart2
-                            if get_first_conflict:
-                                return result
                             conflicts.append(result)
+                            if get_first_conflict:
+                                return conflicts
                         elif it1_idx == 1 and it2_idx == 0:
                             if v2_now not in overlapping_vertices_1it or e1 not in overlapping_edges_2it:
                                 continue
@@ -429,9 +493,9 @@ class Environment(SippBaseEnvironment):
                             result.time_interval_2 = collision_interval2
                             result.travel_time_1 = t_arrive1 - t_depart1
                             result.travel_time_2 = 0
-                            if get_first_conflict:
-                                return result
                             conflicts.append(result)
+                            if get_first_conflict:
+                                return conflicts
                         elif it1_idx == 1 and it2_idx == 1:
                             if e2 not in overlapping_edges_1it or e1 not in overlapping_edges_2it:
                                 continue
@@ -467,9 +531,9 @@ class Environment(SippBaseEnvironment):
                             result.time_interval_2 = collision_interval2
                             result.travel_time_1 = t_arrive1 - t_depart1
                             result.travel_time_2 = t_arrive2 - t_depart2
-                            if get_first_conflict:
-                                return result
                             conflicts.append(result)
+                            if get_first_conflict:
+                                return conflicts
 
         return conflicts
 
@@ -521,20 +585,31 @@ class Environment(SippBaseEnvironment):
             goal_state = State(agent['goal'])
             self.agent_dict.update({agent['name']:{'start':start_state, 'goal':goal_state}})
 
-    def compute_solution(self):
-        # Clear caches for fresh solution attempt
-        solution = {}
-        solution_action_cost = {}
-        solution_cost = {}
-        for agent in self.agent_dict.keys():
+    def compute_solution(self, affected_agent=None, base_solution=None, base_action_cost=None, base_cost=None,find_num_conflicts=False):
+        if base_solution is not None and affected_agent is not None:
+            solution = dict(base_solution)
+            solution_action_cost = dict(base_action_cost)
+            solution_cost = dict(base_cost)
+            agents_to_plan = [affected_agent]
+        else:
+            solution = {}
+            solution_action_cost = {}
+            solution_cost = {}
+            agents_to_plan = list(self.agent_dict.keys())
+
+        for agent in agents_to_plan:
             self.constraints = self.constraint_dict.setdefault(agent, Constraints())
-            local_solution, local_action_cost, local_cost = self.sipp.search(agent)
+            if find_num_conflicts:
+                local_solution, local_action_cost, local_cost = self.sipp.search(agent,solution=solution,solution_action_cost=solution_action_cost)
+            else:
+                local_solution, local_action_cost, local_cost = self.sipp.search(agent)
             if not local_solution:
-                return False, False, float('inf')
-            solution.update({agent:local_solution})
-            solution_action_cost.update({agent:local_action_cost})
+                return {}, {}, {}
+            solution[agent] = local_solution
+            solution_action_cost[agent] = local_action_cost
             solution_cost[agent] = local_cost
         return solution, solution_action_cost, solution_cost
+
 
     def _get_constraint_sweep_cached(self, p1, p2,v, r):
         """Cached wrapper for get_constraint_sweep to avoid duplicate queries."""

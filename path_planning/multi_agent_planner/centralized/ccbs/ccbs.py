@@ -104,13 +104,13 @@ class CCBS(object):
 
             self.env.constraint_dict = P.constraint_dict
 
-            conflict_dict = self.env.get_conflicts(P.solution, P.solution_action_cost)
-            if not conflict_dict:
+            conflict_list = self.env.get_conflicts(P.solution, P.solution_action_cost)
+            if not conflict_list:
                 if self.verbose:
                     print("solution found")
                 return self.generate_plan(P.solution, P.solution_action_cost)
 
-            constraint_dict = self.env.create_constraints_from_conflict(conflict_dict)
+            constraint_dict = self.env.create_constraints_from_conflict(conflict_list[0])
             for agent in constraint_dict.keys():
                 new_node = HighLevelNode()
                 new_node.solution = P.solution.copy()
@@ -135,11 +135,17 @@ class CCBS(object):
                         new_node.constraint_dict[a] = P.constraint_dict[a]
 
                 self.env.constraint_dict = new_node.constraint_dict
-                new_node.solution, new_node.solution_action_cost, new_node.solution_cost = self.env.compute_solution()
+                new_node.solution, new_node.solution_action_cost, new_node.solution_cost = self.env.compute_solution(
+                    affected_agent=agent,
+                    base_solution=P.solution,
+                    base_action_cost=P.solution_action_cost,
+                    base_cost=P.solution_cost,
+                )
                 if not new_node.solution:
                     continue
                 new_node.cost = sum(new_node.solution_cost.values())
                 heapq.heappush(self.open_list, (new_node.cost, next(self.counter), new_node))
+
             iterations += 1
             # if iterations > 30:
             #     break
