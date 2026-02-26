@@ -65,7 +65,6 @@ class GraphSampler(Grid):
         for s in start_pixel:
             self.type_map[tuple(s)] = TYPES.START
         
-
     def set_goal(self, goal):
         if self.use_discrete_space:
             goal_pixel = goal
@@ -159,7 +158,6 @@ class GraphSampler(Grid):
             p2: Goal node.
         """
         if self.cost_matrix is None:
-            
             return self.get_distance(p1_node.current, p2_node.current)
         else:
             p1_index = self.node_index_dict[p1_node]
@@ -577,9 +575,14 @@ class GraphSampler(Grid):
     def set_constraint_sweep(self):
         self.constraint_sweep.set_graph([node.current for node in self.nodes],self.edges)
 
-    def get_constraint_sweep(self, p1: tuple[float,float], p2: tuple[float,float],v: float = 0.0, r: float = 0.5):
+    def get_constraint_sweep(self, p1: tuple[float,float], p2: tuple[float,float],v: float = 0.0, r: float = 0.5, use_interval: bool = False):
         if not self.use_constraint_sweep:
-            return set()
+            return None
+        if use_interval:
+            overlapping_vertices,overlapping_edges = self.constraint_sweep.overlapping_interval_cgal(p1, p2,v, r)
+            vertices_interval = dict({self.nodes[vertex_index].current: vertex_interval for vertex_index, vertex_interval in overlapping_vertices.items()})
+            edges_interval = dict({(self.nodes[edge_idx[0]].current, self.nodes[edge_idx[1]].current): edge_interval for edge_idx, edge_interval in overlapping_edges.items()})
+            return vertices_interval,edges_interval
         overlapping_edges = self.constraint_sweep.overlapping_graph_elements_cgal(p1, p2,v, r)
         edges_locations = set((self.nodes[edge_idx[0]].current, self.nodes[edge_idx[1]].current) for edge_idx in overlapping_edges)
         return edges_locations

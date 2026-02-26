@@ -13,6 +13,7 @@ import time
 from math import fabs
 from itertools import count,combinations
 import numpy as np
+from path_planning.common.environment.map.graph_sampler import GraphSampler
 
 class Location(object):
     def __init__(self, point:tuple = None):
@@ -99,7 +100,7 @@ class Constraints(object):
             "EC: " + str([str(ec) for ec in self.edge_constraints])
 
 class Environment(object):
-    def __init__(self, graph_map, agents, astar_max_iterations=-1, radius = 0.0, velocity = 0.0, use_constraint_sweep=True):
+    def __init__(self, graph_map:GraphSampler, agents, astar_max_iterations=-1, radius = 0.0, velocity = 0.0, use_constraint_sweep=True):
         self.graph_map = graph_map
         if radius > 0:
             self.graph_map.set_constraint_sweep()
@@ -116,7 +117,7 @@ class Environment(object):
         self.velocity = velocity
         self.use_constraint_sweep = use_constraint_sweep
         self._constraint_sweep_cache = {}  # (p1, p2, r) -> (nodes, edges, start_nodes)
-        self._constraint_segment_cache = {}  # (p1a, p1b, p2a, p2b, v1, v2, r1, r2) -> bool
+        self._constraint_segment_cache = {}  # (p1a, p1b, p2a, p2b, v, r) -> bool
 
     def get_neighbors(self, state):
         neighbors = []
