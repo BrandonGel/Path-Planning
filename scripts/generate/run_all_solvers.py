@@ -120,12 +120,31 @@ if __name__ == "__main__":
         help="max attempts for the solver",
     )
     parser.add_argument(
-        "-mapf",
-        "--mapf_solver_name",
-        type=str,
-        default="lacam",
-        choices=["cbs", "icbs", "lacam", "lacam_random"],
-        help="MAPF solver to use",
+        "-ds",
+        "--use_discrete_space",
+        type=bool,
+        default=False,
+        help="use discrete space",
+    )
+    parser.add_argument(
+        "-ns", "--num_samples", type=int, default=1000, help="number of samples"
+    )
+    parser.add_argument(
+        "-nn", "--num_neighbors", type=float, default=13.0, help="number of neighbors"
+    )
+    parser.add_argument(
+        "-min_el",
+        "--min_edge_len",
+        type=float,
+        default=1e-10,
+        help="minimum edge length",
+    )
+    parser.add_argument(
+        "-max_el",
+        "--max_edge_len",
+        type=float,
+        default=5 + 1e-10,
+        help="maximum edge length",
     )
     args = parser.parse_args()
 
@@ -155,24 +174,32 @@ if __name__ == "__main__":
 
     # Array with all algorithms to run
     mapf_solvers = ["cbs", "icbs", "lacam", "lacam_random"]
+    road_maps = ["grid", "prm", "planar"]
 
-    # Loop runs ground truth on all desired algorithms
-    for solver in mapf_solvers:
-        if args.config != "":
-            with open(args.config, "r") as yaml_file:
-                config = yaml.load(yaml_file, Loader=yaml.FullLoader)
-        else:
-            config = {
-                "seed": args.seed,
-                "bounds": bounds,
-                "resolution": args.resolution,
-                "nb_agents": args.nb_agents,
-                "nb_obstacles": args.nb_obstacles,
-                "nb_permutations": args.nb_permutations,
-                "timeout": args.timeout,
-                "max_attempts": args.max_attempts,
-                "mapf_solver_name": solver,
-            }
-        print("Running on solver:", solver)
-        path = create_path_parameter_directory(base_path, config)
-        create_solutions(path, args.num_cases, config, num_workers=num_workers)
+    # Loop runs ground truth on all desired algorithms and road maps
+    for map in road_maps:
+        for solver in mapf_solvers:
+            if args.config != "":
+                with open(args.config, "r") as yaml_file:
+                    config = yaml.load(yaml_file, Loader=yaml.FullLoader)
+            else:
+                config = {
+                    "seed": args.seed,
+                    "bounds": bounds,
+                    "resolution": args.resolution,
+                    "nb_agents": args.nb_agents,
+                    "nb_obstacles": args.nb_obstacles,
+                    "nb_permutations": 1,
+                    "timeout": args.timeout,
+                    "max_attempts": args.max_attempts,
+                    "mapf_solver_name": solver,
+                    "road_map_name": map,
+                    "discrete_space": args.use_discrete_space,
+                    "num_samples": args.num_samples,
+                    "num_neighbors": args.num_neighbors,
+                    "min_edge_len": args.min_edge_len,
+                    "max_edge_len": args.max_edge_len,
+                }
+            print("Running on solver:", solver)
+            path = create_path_parameter_directory(base_path, config)
+            create_solutions(path, args.num_cases, config, num_workers=num_workers, all=True)
