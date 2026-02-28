@@ -54,17 +54,18 @@ if __name__ == "__main__":
     parser.add_argument("-seed","--seed",type=int, default=42, help="seed")
     parser.add_argument("-s","--path",type=str, default='benchmark/train', help="input file containing map and obstacles")
     parser.add_argument("-b","--bounds",type=float, nargs='+', default=[0,32.0,0,32.0], help="bounds of the map as x_min x_max y_min y_max (e.g., 0 32.0 0 32.0)")
-    parser.add_argument("-n","--nb_agents",type=int, default=4, help="number of agents")
+    parser.add_argument("-n","--nb_agents",type=int, default=16, help="number of agents")
     parser.add_argument("-o","--nb_obstacles",type=float, default=0.1, help="number of obstacles or obstacle density")
     parser.add_argument("-p","--nb_permutations",type=int, default=64, help="number of permutations")
     parser.add_argument("-pt","--nb_permutations_tries",type=int, default=128, help="number of permutations tries")
     parser.add_argument("-r","--resolution",type=float, default=1.0, help="resolution of the map")
     parser.add_argument("-c","--num_cases",type=int, default=1, help="number of cases to generate")
     parser.add_argument("-y","--config",type=str, default='', help="config file to use")
-    parser.add_argument("-w","--num_workers",type=int, default=None, help="number of parallel workers for cases (default: auto-detect CPU cores)")
-    parser.add_argument("-t","--timeout",type=int, default=60, help="timeout for the solver in seconds")
-    parser.add_argument("-m","--max_attempts",type=int, default=10000, help="max attempts for the solver")
-    parser.add_argument("-mapf","--mapf_solver_name",type=str, default='lacam', choices=['cbs', 'icbs', 'lacam', 'lacam_random'], help="MAPF solver to use")
+    parser.add_argument("-w","--num_workers",type=int, default=1, help="number of parallel workers for cases (default: auto-detect CPU cores)")
+    parser.add_argument("-t","--time_limit",type=float, default=0.1, help="time_limit for the solver in seconds")
+    parser.add_argument("-m","--max_iterations",type=int, default=10000, help="max iterations for the solver")
+    parser.add_argument("-mapf","--mapf_solver_name",type=str, default="cbs", choices=["cbs", "icbs", "lacam", "lacam_random"], help="MAPF solver to use")
+    parser.add_argument("-dp","--delete_failed_path",type=bool, default=False, help="delete failed path")
     args = parser.parse_args()
 
     # Convert bounds from flat list to nested list format
@@ -102,9 +103,11 @@ if __name__ == "__main__":
             "nb_agents": args.nb_agents,
             "nb_obstacles": args.nb_obstacles,
             "nb_permutations": args.nb_permutations,
-            "timeout": args.timeout,
-            "max_attempts": args.max_attempts,
+            "nb_permutations_tries": args.nb_permutations_tries,
+            "time_limit": args.time_limit,
+            "max_iterations": args.max_iterations,
+            "delete_failed_path": args.delete_failed_path,
             "mapf_solver_name": args.mapf_solver_name,
         }
     path = create_path_parameter_directory(base_path, config)
-    create_solutions(path, args.num_cases, config,num_workers=num_workers)
+    create_solutions(path, args.num_cases, config, all=True, num_workers=num_workers)
