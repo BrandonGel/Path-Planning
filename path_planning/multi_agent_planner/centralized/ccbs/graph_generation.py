@@ -120,17 +120,22 @@ class Constraints(object):
             " MC: " + str([str(mc) for mc in self.move_constraints])
 
 class Environment(SippBaseEnvironment):
-    def __init__(self, graph_map: GraphSampler,dynamic_obstacles:dict = {},agents:list = [],sipp_max_iterations=-1,radius:float = 0.0,velocity:float = 0.0,use_constraint_sweep:bool = True,verbose:bool = False):
+    def __init__(self, graph_map: GraphSampler,dynamic_obstacles:dict = {},agents:list = [],sipp_max_iterations=-1,radius:float = 0.0,velocity:float = 0.0,use_constraint_sweep:bool = True,heuristic_type : str = 'manhattan',time_limit: float | None = None, max_iterations: int | None = None,verbose: bool = False):
         self.agents = agents
         self.agent_dict = {}
         self.make_agent_dict()
-        SippBaseEnvironment.__init__(self, graph_map, dynamic_obstacles,agents,radius,velocity,use_constraint_sweep)
+        SippBaseEnvironment.__init__(self, graph_map, dynamic_obstacles,agents,radius,velocity,use_constraint_sweep,heuristic_type,time_limit,max_iterations,verbose)
+        assert radius > 0, "Radius must be greater than 0 for CCBS"
+        assert velocity > 0, "Velocity must be greater than 0 for CCBS"
         self.sipp = SIPP(self, max_iterations=sipp_max_iterations,verbose=verbose)
         self.collision_radius = (2 * radius) ** 2
         self.constraints = Constraints()
         self.constraint_dict = {agent["name"]: Constraints() for agent in agents}
         self.t_buffer = 1 if radius == 0 else 1e-10
         self.t_epsilon = 1e-10
+        self.time_limit = time_limit if time_limit is not None and time_limit > 0 else float('inf')
+        self.max_iterations = max_iterations if max_iterations is not None and max_iterations > 0 else float('inf')
+        self.verbose = verbose
 
     def get_initial_state(self,position):
         node =  self.constraints[position]
@@ -221,7 +226,6 @@ class Environment(SippBaseEnvironment):
         tmin = np.clip(tmin, 0, tdur)
         return t1, t2, tmin
         
-
     def get_conflicts(self, solution,solution_action_cost,get_first_conflict: bool = True):
         result = Conflict()
         conflicts = []
@@ -609,7 +613,6 @@ class Environment(SippBaseEnvironment):
             solution_action_cost[agent] = local_action_cost
             solution_cost[agent] = local_cost
         return solution, solution_action_cost, solution_cost
-
 
     def _get_constraint_sweep_cached(self, p1, p2,v, r):
         """Cached wrapper for get_constraint_sweep to avoid duplicate queries."""

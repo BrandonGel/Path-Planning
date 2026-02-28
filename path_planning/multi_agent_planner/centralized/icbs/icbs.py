@@ -9,6 +9,7 @@ from path_planning.multi_agent_planner.centralized.cbs.cbs import Environment, C
 import heapq
 import time
 from path_planning.multi_agent_planner.centralized.icbs.a_star import AStar
+from path_planning.multi_agent_planner.data_type import HEURISTIC_TYPE
 
 class IEnvironment(Environment):
     def __init__(
@@ -19,6 +20,7 @@ class IEnvironment(Environment):
         radius=0.0,
         velocity=0.0,
         use_constraint_sweep=True,
+        heuristic_type: str = 'manhattan',
     ):
         super().__init__(
             graph_map,
@@ -27,6 +29,7 @@ class IEnvironment(Environment):
             radius,
             velocity,
             use_constraint_sweep,
+            heuristic_type,
         )
         self.a_star = AStar(self, astar_max_iterations,radius)
 
@@ -38,7 +41,6 @@ class IEnvironment(Environment):
         curr_solution[target_agent] = local_solution
         curr_solution_cost[target_agent] = local_cost
         return curr_solution, curr_solution_cost
-
 
 class ICBS(CBS):
     def __init__(
@@ -168,6 +170,8 @@ class ICBS(CBS):
             if not conflict_list:
                 if self.verbose:
                     print("solution found")
+                self.total_time = min(self.time_limit, time.time() - st) 
+                self.total_iterations = min(self.max_iterations, iterations+1)
                 return self.generate_plan(P.solution)
 
             # 1. Prioritize Conflicts (Cardinal, Semi, Non)
@@ -203,6 +207,8 @@ class ICBS(CBS):
             # Branching (if no bypass)
             self._branch(P, best_conflict, best_costs)
             iterations += 1
+        self.total_time = min(self.time_limit, time.time() - st) 
+        self.total_iterations = min(self.max_iterations, iterations)
         return {}
 
 

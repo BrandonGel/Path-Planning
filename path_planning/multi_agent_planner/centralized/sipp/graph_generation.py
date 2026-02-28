@@ -103,7 +103,7 @@ class SippNode(object):
 
 
 class SippGraph(object):
-    def __init__(self, graph_map: GraphSampler,dynamic_obstacles:dict = {},radius:float = 0.0,velocity:float = 0.0,use_constraint_sweep:bool = True):
+    def __init__(self, graph_map: GraphSampler,dynamic_obstacles:dict = {},radius:float = 0.0,velocity:float = 0.0,use_constraint_sweep:bool = True, heuristic_type: str = 'manhattan',time_limit: float | None = None, max_iterations: int | None = None,verbose: bool = False):
         self.graph_map = graph_map 
         self.dyn_obstacles = {}
         self.sipp_graph = {}
@@ -113,10 +113,16 @@ class SippGraph(object):
         self.velocity = velocity
         self.use_constraint_sweep = use_constraint_sweep
         self._constraint_sweep_cache = {}  # (p1, p2, r) -> (nodes, edges, start_nodes)
-        self._constraint_segment_cache = {}  # (p1a, p1b, p2a, p2b, v1, v2, r1, r2) -> bool
+        self.heuristic_type = heuristic_type
         self.init_graph()
         self.init_intervals(dynamic_obstacles)
         self._valid_neighbours_cache = {}
+        self.time_limit = time_limit if time_limit is not None and time_limit > 0 else float('inf')
+        self.max_iterations = max_iterations if max_iterations is not None and max_iterations > 0 else 1
+        self.verbose = verbose
+        self.time_limit = time_limit
+        self.total_time = 0
+        self.total_iterations = 0
 
     def init_graph(self):
         for node in self.graph_map.nodes:

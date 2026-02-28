@@ -49,9 +49,11 @@ class CCBS(object):
         self.counter = count()
         self.open_list = []
         self.closed_set = set()
-        self.time_limit = time_limit
-        self.max_iterations = max_iterations
+        self.time_limit = time_limit if time_limit is not None and time_limit > 0 else float('inf')
+        self.max_iterations = max_iterations if max_iterations is not None and max_iterations > 0 else float('inf')
         self.verbose = verbose
+        self.total_time = 0
+        self.total_iterations = 0
 
     def _get_state_key(self, node):
         """Generate a hashable state key for closed set checking."""
@@ -65,6 +67,7 @@ class CCBS(object):
     def search(self):
         start = HighLevelNode()
         start.constraint_dict = {}
+        solution_info = {}
         for agent in self.env.agent_dict.keys():
             start.constraint_dict[agent] = deepcopy(Constraints())
 
@@ -81,22 +84,24 @@ class CCBS(object):
 
         st = time.time()
         iterations = 0
+        success = False
         while self.open_list:
+            iterations += 1
             if self.time_limit is not None and (time.time() - st) > self.time_limit:
                 if self.verbose:
                     print(
                         f"Search terminated: time limit of {self.time_limit} seconds exceeded."
                     )
-                return {}
+                break
 
             if self.max_iterations is not None and iterations >= self.max_iterations:
                 if self.verbose:
                     print(
                         f"Search terminated: max iterations of {self.max_iterations} reached."
                     )
-                return {}
+                break
 
-            _, P_counter, P = heapq.heappop(self.open_list)
+            _, _, P = heapq.heappop(self.open_list)
             state_key = self._get_state_key(P)
             if state_key in self.closed_set:
                 continue
@@ -108,7 +113,14 @@ class CCBS(object):
             if not conflict_list:
                 if self.verbose:
                     print("solution found")
-                return self.generate_plan(P.solution, P.solution_action_cost)
+                self.total_time = min(self.time_limit, time.time() - st) 
+                self.total_iterations = min(self.max_iterations, iterations)
+                solution = self.generate_plan(P.solution, P.solution_action_cost)
+                success = True
+                solution_info["runtime"] = self.total_time
+                solution_info["total_iterations"] = self.total_iterations
+                solution_info["success"] = success
+                return solution,solution_info
 
             constraint_dict = self.env.create_constraints_from_conflict(conflict_list[0])
             for agent in constraint_dict.keys():
@@ -146,10 +158,12 @@ class CCBS(object):
                 new_node.cost = sum(new_node.solution_cost.values())
                 heapq.heappush(self.open_list, (new_node.cost, next(self.counter), new_node))
 
-            iterations += 1
-            # if iterations > 30:
-            #     break
-        return {}
+        self.total_time = min(self.time_limit, time.time() - st) 
+        self.total_iterations = min(self.max_iterations, iterations)
+        solution_info["runtime"] = self.total_time
+        solution_info["total_iterations"] = self.total_iterations
+        solution_info["success"] = success
+        return {},solution_info
 
     def generate_plan(self, solution, solution_action_cost):
         plan = {}

@@ -9,7 +9,7 @@ from python_motion_planning.common import TYPES
 from path_planning.utils.cgal_sweep import CGAL_Sweep
 
 class GraphSampler(Grid):
-    def __init__(self,*args,start,goal,sample_num=0,num_neighbors = 13.0, min_edge_len = 0.0, max_edge_len = 30.0,use_discrete_space=True,use_constraint_sweep=True,record_sweep=True,use_exact_collision_check=True,**kwargs):
+    def __init__(self,*args,start,goal,sample_num=0,num_neighbors = 13.0, min_edge_len = 1e-10, max_edge_len = 30.0,use_discrete_space=True,use_constraint_sweep=True,record_sweep=True,use_exact_collision_check=True,**kwargs):
         super().__init__(*args, **kwargs)
 
         # Check if start and goal are lists, non-empty, and not None
@@ -50,7 +50,7 @@ class GraphSampler(Grid):
     def size(self) -> int:
         return int(np.prod(self.type_map.shape))
 
-    def set_parameters(self, sample_num, num_neighbors, min_edge_len, max_edge_len):
+    def set_parameters(self, sample_num, num_neighbors, min_edge_len=1e-10, max_edge_len=1.0+1e-10):
         self.sample_num = sample_num
         self.num_neighbors = num_neighbors
         self.min_edge_length = min_edge_len

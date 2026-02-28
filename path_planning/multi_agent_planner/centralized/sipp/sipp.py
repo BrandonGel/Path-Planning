@@ -12,22 +12,30 @@ from math import fabs
 import heapq
 from collections import deque
 import random
-
+import time
 from path_planning.multi_agent_planner.centralized.sipp.graph_generation import SippGraph, State
 from path_planning.common.environment.map.graph_sampler import GraphSampler
 from path_planning.common.environment.node import Node
+import math
+from path_planning.multi_agent_planner.data_type import HEURISTIC_TYPE
 
 class SippPlanner(SippGraph):
-    def __init__(self, graph_map: GraphSampler,dynamic_obstacles:dict = {},agents:list = [],radius:float = 0.0,velocity:float = 0.0,use_constraint_sweep:bool = True,verbose:bool = False):
-        SippGraph.__init__(self, graph_map, dynamic_obstacles,radius,velocity,use_constraint_sweep)
+    def __init__(self, graph_map: GraphSampler,dynamic_obstacles:dict = {},agents:list = [],radius:float = 0.0,velocity:float = 0.0,use_constraint_sweep:bool = True, heuristic_type: str = 'manhattan',time_limit: float | None = None, max_iterations: int | None = None,verbose: bool = False):
+        SippGraph.__init__(self,graph_map,dynamic_obstacles,radius,velocity,use_constraint_sweep,heuristic_type,time_limit,max_iterations,verbose)
         self.agents = agents
         self.agent_names = [agent["name"] for agent in agents]
-        self.verbose = verbose
         self.plan = {}
         self.plan_cost = {}
         self.action_cost = {}
         self._mtime_cache = {}
-        self.cost = 0
+        self.max_permutations = math.factorial(len(agents))
+        self.max_iterations = min(self.max_iterations , self.max_permutations)
+        if heuristic_type not in HEURISTIC_TYPE or heuristic_type is None:
+            self.heuristic_type = HEURISTIC_TYPE["manhattan"]
+        else:
+            self.heuristic_type = HEURISTIC_TYPE[heuristic_type]
+
+    def shuffle_agents(self):
         random.shuffle(self.agents)
 
     def get_mtime(self, position1, position2):
@@ -136,75 +144,102 @@ class SippPlanner(SippGraph):
         return successors, costs, time_taken
 
     def get_heuristic(self, position,goal):
-        dist =  fabs(position[0] - goal[0]) + fabs(position[1]-goal[1])
+        if self.heuristic_type == HEURISTIC_TYPE["manhattan"]:
+            dist =  fabs(position[0] - goal[0]) + fabs(position[1]-goal[1])
+        elif self.heuristic_type == HEURISTIC_TYPE["euclidean"]:
+            dist = math.sqrt((position[0] - goal[0])**2 + (position[1]-goal[1])**2)
+        else:
+            raise ValueError(f"Invalid heuristic type: {self.heuristic_type}")
         return dist if self.velocity == 0 else dist / self.velocity
 
     def compute_plan(self):
-        self.cost = 0
-        for ii, agent in enumerate(self.agents):
-            start = tuple(agent["start"])
-            goal = tuple(agent["goal"])
+        solution_info = {}
+        st = time.time()
+        best_solution = None
+        best_solution_cost = float('inf')
+        best_success = True
+        iterations = 0
+        for _ in range(self.max_iterations):
+            self.shuffle_agents()
+            iterations += 1
+            success = True
+            total_cost = 0
+            for ii, agent in enumerate(self.agents):
+                start = tuple(agent["start"])
+                goal = tuple(agent["goal"])
 
-            initial_state = State(start, 0, self.sipp_graph[start].interval_list[0])
-            initial_state_key = (start, initial_state.interval)
+                initial_state = State(start, 0, self.sipp_graph[start].interval_list[0])
+                initial_state_key = (start, initial_state.interval)
 
-            # Min-heap: (f, counter, state); counter ensures we never compare State objects
-            open_heap = []
-            counter = 0
-            closed_set = set()  # (position, interval) already expanded
-            g_score  = {initial_state_key:0.0}      # (position, interval) -> g
-            came_from   = {}      # (position, interval) -> State
-            action_cost = {}    # (position, interval) -> (wait_cost, move_cost)
-            
-            f_start = self.get_heuristic(start, goal)
-            heapq.heappush(open_heap, (f_start, counter, initial_state))
-            counter += 1
+                # Min-heap: (f, counter, state); counter ensures we never compare State objects
+                open_heap = []
+                counter = 0
+                closed_set = set()  # (position, interval) already expanded
+                g_score  = {initial_state_key:0.0}      # (position, interval) -> g
+                came_from   = {}      # (position, interval) -> State
+                action_cost = {}    # (position, interval) -> (wait_cost, move_cost)
+                
+                f_start = self.get_heuristic(start, goal)
+                heapq.heappush(open_heap, (f_start, counter, initial_state))
+                counter += 1
 
-            goal_reached = False
-            goal_state   = None
-            goal_cost = float('inf')
-            while open_heap and not goal_reached:
-                _, _, current = heapq.heappop(open_heap)
-                current_state_key = (current.position, current.interval)
-                if current_state_key in closed_set:
-                    continue
-                closed_set.add(current_state_key)
-
-                successors, costs, time_takens = self.get_successors(current)
-
-                for cost, time_taken, successor in zip(costs, time_takens, successors):
-                    succ_key = (successor.position, successor.interval)
-                    if succ_key in closed_set:
+                goal_reached = False
+                goal_state   = None
+                goal_cost = float('inf')
+                while open_heap and not goal_reached:
+                    _, _, current = heapq.heappop(open_heap)
+                    current_state_key = (current.position, current.interval)
+                    if current_state_key in closed_set:
                         continue
+                    closed_set.add(current_state_key)
 
-                    tentative_g_score = g_score.get(current_state_key, float('inf')) + cost
-                    if tentative_g_score < g_score.get(succ_key, float('inf')):
-                        came_from[succ_key]  = current
-                        g_score[succ_key] = tentative_g_score
-                        action_cost[succ_key] = time_taken
-                        if successor.position == goal:
-                            if self.verbose:
-                                print("Plan successfully calculated!!")
-                            goal_reached = True
-                            goal_state = successor
-                            goal_cost = successor.time
-                            break
+                    successors, costs, time_takens = self.get_successors(current)
 
-                        f_score = g_score[succ_key] + self.get_heuristic(successor.position, goal)
-                        heapq.heappush(open_heap, (f_score, counter, successor))
-                        counter += 1
+                    for cost, time_taken, successor in zip(costs, time_takens, successors):
+                        succ_key = (successor.position, successor.interval)
+                        if succ_key in closed_set:
+                            continue
 
-            if not goal_reached or goal_state is None:
-                return {}
-            
-            # Backtrack using (position, interval) keys
-            plan,plan_action_cost = self.reconstruct_path(came_from,action_cost,goal_state)
-            self.plan[agent["name"]] = plan
-            self.plan_cost[agent["name"]] = goal_cost
-            self.action_cost[agent["name"]] = plan_action_cost
-            self.update_intervals([plan],[plan_action_cost],[agent["name"]])
-        self.cost = sum(self.plan_cost.values())
-        return self.get_plan()
+                        tentative_g_score = g_score.get(current_state_key, float('inf')) + cost
+                        if tentative_g_score < g_score.get(succ_key, float('inf')):
+                            came_from[succ_key]  = current
+                            g_score[succ_key] = tentative_g_score
+                            action_cost[succ_key] = time_taken
+                            if successor.position == goal:
+                                if self.verbose:
+                                    print("Plan successfully calculated!!")
+                                goal_reached = True
+                                goal_state = successor
+                                goal_cost = successor.time
+                                total_cost += goal_cost
+                                break
+
+                            f_score = g_score[succ_key] + self.get_heuristic(successor.position, goal)
+                            heapq.heappush(open_heap, (f_score, counter, successor))
+                            counter += 1
+
+                if not goal_reached or goal_state is None:
+                    success = False
+                    break
+                
+                # Backtrack using (position, interval) keys
+                plan,plan_action_cost = self.reconstruct_path(came_from,action_cost,goal_state)
+                self.plan[agent["name"]] = plan
+                self.plan_cost[agent["name"]] = goal_cost
+                self.action_cost[agent["name"]] = plan_action_cost
+                self.update_intervals([plan],[plan_action_cost],[agent["name"]])
+     
+            if success and  total_cost < best_solution_cost:
+                best_solution_cost = total_cost
+                best_solution = self.get_plan()
+                best_success = True
+        self.total_time += time.time() - st
+        self.total_iterations = iterations
+        solution =best_solution if best_success else {}
+        solution_info["runtime"] = self.total_time
+        solution_info["total_iterations"] = self.total_iterations
+        solution_info["success"] = best_success
+        return solution,solution_info
             
     def reconstruct_path(self, came_from, came_from_action_cost, current):
         total_path = deque([current])
@@ -225,37 +260,28 @@ class SippPlanner(SippGraph):
             path_list = []
             if self.radius == 0:
                 setpoint = plan[0]
-                temp_dict = {"x":setpoint.position[0], "y":setpoint.position[1], "t":setpoint.time}
+                temp_dict = {"t":setpoint.time,"x":setpoint.position[0], "y":setpoint.position[1]}
                 path_list.append(temp_dict)
 
                 for i in range(len(plan)-1):
                     for j in range(int(plan[i+1].time - plan[i].time-1)):
+                        t = plan[i].time
                         x = plan[i].position[0]
                         y = plan[i].position[1]
-                        t = plan[i].time
                         setpoint = plan[i]
-                        temp_dict = {"x":x, "y":y, "t":t+j+1}
+                        temp_dict = {"t":t,"x":x, "y":y}
                         path_list.append(temp_dict)
                     setpoint = plan[i+1]
-                    temp_dict = {"x":setpoint.position[0], "y":setpoint.position[1], "t":setpoint.time}
+                    temp_dict = {"t":setpoint.time,"x":setpoint.position[0], "y":setpoint.position[1]}
                     path_list.append(temp_dict)
             else:
                 for action,state in zip(action_cost,plan):
-                    temp_dict = {"x":state.position[0], "y":state.position[1], "t":state.time}
+                    temp_dict = {"t":state.time,"x":state.position[0], "y":state.position[1]}
                     path_list.append(temp_dict)
 
                     action_wait_cost, action_move_cost = action
                     if action_wait_cost > 1e-10:
-                        temp_dict = {"x":state.position[0], "y":state.position[1], "t":state.time+action_wait_cost}
+                        temp_dict = {"t":state.time+action_wait_cost,"x":state.position[0], "y":state.position[1]}
                         path_list.append(temp_dict)
             solution[agent] = path_list
         return solution
-
-    def compute_solution_cost(self, solution = None):
-        if solution is None:
-            return self.cost
-        cost = 0
-        for agent, path in solution.items():
-            cost += float(path[-1]["t"]) - float(path[0]["t"])
-        return cost
-        

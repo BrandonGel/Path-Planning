@@ -144,6 +144,7 @@ class LaCAM:
         starts: Config,
         goals: Config,
         time_limit_ms: int = 3000,
+        max_iterations: int = None,
         deadline: Deadline | None = None,
         flg_star: bool = True,
         seed: int = 0,
@@ -178,6 +179,9 @@ class LaCAM:
         self.flg_star: bool = flg_star
         self.rng: np.random.Generator = np.random.default_rng(seed=seed)
         self.verbose = verbose
+        self.max_iterations = max_iterations if max_iterations is not None and max_iterations > 0 else float('inf')
+        self.total_time = 0
+        self.total_iterations = 0
         return self._solve()
 
     def _solve(self) -> Configs:
@@ -209,9 +213,15 @@ class LaCAM:
         OPEN.appendleft(N_init)
         EXPLORED[N_init.Q] = N_init
 
+        iterations = 0
         # main loop
         while len(OPEN) > 0 and not self.deadline.is_expired:
             N: HighLevelNode = OPEN[0]
+
+            if self.max_iterations is not None and iterations >= self.max_iterations:
+                if self.verbose:
+                    print(f"Search terminated: max iterations of {self.max_iterations} reached.")
+                break
 
             # goal check
             if N_goal is None and N.Q == self.goals:
@@ -219,6 +229,7 @@ class LaCAM:
                 self.info(1, f"initial solution found, cost={N_goal.g}")
                 # no refinement -> terminate
                 if not self.flg_star:
+                    iterations += 1
                     break
 
             # lower bound check
@@ -278,6 +289,7 @@ class LaCAM:
                 N.neighbors.add(N_new)
                 OPEN.appendleft(N_new)
                 EXPLORED[Q_to] = N_new
+            iterations += 1
 
         # categorize result
         if N_goal is not None and len(OPEN) == 0:
@@ -292,6 +304,8 @@ class LaCAM:
         else:
             self.info(1, "failure due to timeout")
             self.cost = float('inf')
+        self.total_time = self.deadline.elapsed/1000.0
+        self.total_iterations = iterations
         return self.backtrack(N_goal)
 
     @staticmethod
@@ -443,25 +457,30 @@ class LaCAM:
 
     def get_solution_dict(self, solution: Configs) -> dict:
         solution_dict = {}
-        for i in range(self.num_agents):
-            solution_dict.update({f'agent_{i}': []})
-            for j in range(len(solution)):
-                if self.graph_map.dim == 2:
-                    solution_dict[f'agent_{i}'].append({
-                        't': j,
-                        'x': solution[j][i][0],
-                        'y': solution[j][i][1]
-                    })
-                elif self.graph_map.dim == 3:
-                    solution_dict[f'agent_{i}'].append({
-                        't': j,
-                        'x': solution[j][i][0],
-                        'y': solution[j][i][1],
-                        'z': solution[j][i][2]
-                    })
-                else:
-                    raise ValueError(f"Invalid dimension: {self.graph_map.dim}")
-        return solution_dict
+        solution_info = {}
+        solution_info["runtime"] = self.total_time
+        solution_info["total_iterations"] = self.total_iterations
+        solution_info["success"] = True if self.cost < float('inf') else False
+        if self.cost < float('inf'):
+            for i in range(self.num_agents):
+                solution_dict.update({f'agent_{i}': []})
+                for j in range(len(solution)):
+                    if self.graph_map.dim == 2:
+                        solution_dict[f'agent_{i}'].append({
+                            't': j,
+                            'x': solution[j][i][0],
+                            'y': solution[j][i][1]
+                        })
+                    elif self.graph_map.dim == 3:
+                        solution_dict[f'agent_{i}'].append({
+                            't': j,
+                            'x': solution[j][i][0],
+                            'y': solution[j][i][1],
+                            'z': solution[j][i][2]
+                        })
+                    else:
+                        raise ValueError(f"Invalid dimension: {self.graph_map.dim}")
+        return solution_dict, solution_info
     
     def compute_solution_cost(self, solution: dict) -> int:
         cost = 0
