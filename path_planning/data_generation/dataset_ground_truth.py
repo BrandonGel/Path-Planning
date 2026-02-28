@@ -38,6 +38,12 @@ def gen_input(
     bounds: List[List[float]],
     nb_obstacles: int,
     nb_agents: int,
+    road_map_name: str,
+    discrete_space: bool,
+    num_samples: int,
+    num_neighbors: int,
+    min_edge_len: float,
+    max_edge_len: float,
     resolution: float = 1.0,
     mapf_solver_name: str = "cbs",
     max_attempts: int = 10000,
@@ -68,6 +74,12 @@ def gen_input(
         "timeout": timeout,
         "max_attempts": max_attempts,
         "mapf_solver_name": mapf_solver_name,
+        "road_map_name": road_map_name,
+        "discrete_space": discrete_space,
+        "num_samples": num_samples,
+        "num_neighbors": num_neighbors,
+        "min_edge_len": min_edge_len,
+        "max_edge_len": max_edge_len,
     }
 
     total_cells = dimensions[0] * dimensions[1]
@@ -173,7 +185,7 @@ def process_single_permutation(args: Tuple) -> Tuple[bool, int]:
     inpt_copy["agents"] = agents
 
     # Generate solution
-    perm_path = case_path / f"perm_{perm_id}" / mapf_solver_name
+    perm_path = case_path / f"perm_{perm_id}" / inpt["road_map_name"] / mapf_solver_name
     success = data_gen(
         inpt_copy,
         perm_path,
@@ -211,20 +223,51 @@ def data_gen(
     bounds = param["map"]["bounds"]
     resolution = param["map"]["resolution"]
     agents = param["agents"]
-    map_ = GraphSampler(
-        bounds=bounds, resolution=resolution, start=[], goal=[], use_discrete_space=True
-    )
-    map_.set_obstacle_map(obstacles)
+    road_map_name = param["road_map_name"]
 
+    #TODO: this line will have to be changed as well
+    if road_map_name == 'grid':
+        map_ = GraphSampler(
+            bounds=bounds, resolution=resolution, start=[], goal=[], use_discrete_space=True
+        )
+        map_.set_parameters(sample_num=0, num_neighbors=4.0, min_edge_len=1e-10, max_edge_len=1.1)
+    elif road_map_name == 'prm' or road_map_name == 'planar' or road_map_name == 'rrg':
+        map_ = GraphSampler(
+            bounds=bounds,
+            resolution=resolution,
+            start=[],
+            goal=[],
+            use_discrete_space=param["discrete_space"],
+            sample_num=param["num_samples"],
+            min_edge_len=param["min_edge_len"],
+            max_edge_len=param["max_edge_len"],
+            num_neighbors=param["num_neighbors"]
+        )
+    else:
+        print("Invalid road map name provided")
+    
+    map_.set_obstacle_map(obstacles)
     map_.inflate_obstacles(radius=0)
-    map_.set_parameters(sample_num=0, num_neighbors=4.0, min_edge_len=1e-10, max_edge_len=1.1)
+    # map_.set_parameters(sample_num=0, num_neighbors=4.0, min_edge_len=1e-10, max_edge_len=1.1)
 
     start = [agent["start"] for agent in agents]
     goal = [agent["goal"] for agent in agents]
     map_.set_start(start)
     map_.set_goal(goal)
-    nodes = map_.generateRandomNodes(generate_grid_nodes=True)
-    road_map = map_.generate_roadmap(nodes)
+
+    #TODO: these are the lines that need to be changed to implement map type
+    if road_map_name == 'grid':
+        nodes = map_.generateRandomNodes(generate_grid_nodes=True)
+        road_map = map_.generate_roadmap(nodes)
+    elif road_map_name == 'prm':
+        nodes = map_.generateRandomNodes()
+        road_map = map_.generate_roadmap(nodes)
+    elif road_map_name == 'planar':
+        nodes = map_.generateRandomNodes(generate_grid_nodes=True)
+        road_map = map_.generate_planar_map(nodes)
+    else:
+        print("Invalid road map name provided")
+    
 
     start = [s.current for s in map_.get_start_nodes()]
     goal = [g.current for g in map_.get_goal_nodes()]
@@ -258,12 +301,12 @@ def process_single_case(args: Tuple) -> Tuple[float, float, int]:
     Process a single case in parallel (including all its permutations).
 
     Args:
-        args: Tuple of (case_id, path, config, seed)
+        args: Tuple of (case_id, path, config, all)
 
     Returns:
         Tuple of (successful_ratio, failed_ratio, case_id)
     """
-    case_id, path, config = args
+    case_id, path, config, all = args
 
     # Generate random instance
     inpt = gen_input(
@@ -274,6 +317,12 @@ def process_single_case(args: Tuple) -> Tuple[float, float, int]:
         mapf_solver_name=config["mapf_solver_name"],
         max_attempts=config["max_attempts"],
         timeout=config["timeout"],
+        road_map_name = config["road_map_name"],
+        discrete_space = config["discrete_space"],
+        num_samples = config["num_samples"],
+        num_neighbors = config["num_neighbors"],
+        min_edge_len = config["min_edge_len"],
+        max_edge_len = config["max_edge_len"]
     )
     timeout = config["timeout"]
     max_attempts = config["max_attempts"]
@@ -287,8 +336,9 @@ def process_single_case(args: Tuple) -> Tuple[float, float, int]:
         with open(input_path / "input.yaml", "w") as f:
             yaml.safe_dump(inpt, f)
     else:
-        with open(input_path / "input.yaml", "r") as f:
-            inpt = yaml.load(f, Loader=yaml.FullLoader)
+        if not all:
+            with open(input_path / "input.yaml", "r") as f:
+                inpt = yaml.load(f, Loader=yaml.FullLoader)
 
     case_path = input_path / "ground_truth"
     case_path.mkdir(parents=True, exist_ok=True)
@@ -368,7 +418,7 @@ def process_single_case(args: Tuple) -> Tuple[float, float, int]:
         
         if len(perm_ids_unfinished) > 0:
             perm_id = perm_ids_unfinished[0]
-        task = (inpt_copy, start_goal_index.copy(), case_path, perm_id, timeout, max_attempts,mapf_solver_name)
+        task = (inpt_copy, start_goal_index.copy(), case_path, perm_id, timeout, max_attempts, mapf_solver_name)
         success, _ = process_single_permutation(task)
         
         total_attempts += 1
@@ -392,7 +442,7 @@ def process_single_case(args: Tuple) -> Tuple[float, float, int]:
     
     return successful_ratio, failed_ratio, case_id
 
-def create_solutions(path: Path, num_cases: int, config: Dict,num_workers: int = cpu_count()):
+def create_solutions(path: Path, num_cases: int, config: Dict, all:bool, num_workers: int = cpu_count()):
     """
     Create multiple MAPF instances and their solutions with parallel processing.
 
@@ -410,7 +460,7 @@ def create_solutions(path: Path, num_cases: int, config: Dict,num_workers: int =
     # Prepare case tasks
     case_tasks = []
     for i in range(0, num_cases):
-        task = (i, path, config)
+        task = (i, path, config, all)
         case_tasks.append(task)
 
     # Process cases in parallel
