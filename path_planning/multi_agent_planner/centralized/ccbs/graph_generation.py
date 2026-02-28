@@ -252,10 +252,10 @@ class Environment(SippBaseEnvironment):
             times = [p.time for p in plan]
             n = len(plan)
             if n >= 2:
-                move_costs = ac_arr[:-1, 1].reshape(-1, 1)
+                move_costs = ac_arr[:,1].reshape(-1,1)
                 denom = np.where(move_costs != 0, move_costs, 1.0)
-                vel_arr = np.zeros((n - 1, pos_arr.shape[1]), dtype=np.float64)
-                np.divide(np.diff(pos_arr, axis=0), denom, out=vel_arr, where=move_costs != 0)
+                vel_arr = np.zeros((n, pos_arr.shape[1]), dtype=np.float64)
+                vel_arr[:-1] = np.diff(pos_arr, axis=0)/denom[:-1]
             else:
                 vel_arr = np.zeros((0, pos_arr.shape[1]), dtype=np.float64)
             agent_data[agent] = {"pos": pos_arr, "vel": vel_arr, "times": times, "ac": list(ac), "plan": plan}
@@ -265,7 +265,6 @@ class Environment(SippBaseEnvironment):
             d2 = agent_data[agent_2]
             plan_1 = d1["plan"]
             plan_2 = d2["plan"]
-            result = Conflict()
             action_cost_1 = d1["ac"]
             action_cost_2 = d2["ac"]
 
@@ -351,7 +350,6 @@ class Environment(SippBaseEnvironment):
                 else:
                     t2_interval = [(t_start, t_start),(t_start, t_end)]
 
-                pass
                 for it1_idx, t1_int in enumerate(t1_interval):
                     for it2_idx, t2_int in enumerate(t2_interval):
                         if t1_int[0] == t1_int[1] or t2_int[0] == t2_int[1]:
@@ -395,7 +393,6 @@ class Environment(SippBaseEnvironment):
                 else:
                     t2_interval = [(t_start, t_start),(t_start, t_end)]
 
-                pass
                 for it1_idx, t1_int in enumerate(t1_interval):
                     for it2_idx, t2_int in enumerate(t2_interval):
                         if t1_int[0] == t1_int[1] or t2_int[0] == t2_int[1]:
@@ -404,7 +401,7 @@ class Environment(SippBaseEnvironment):
                         overlapping_vertices_2it = overlapping_vertices_2[it2_idx]
                         overlapping_edges_1it = overlapping_edges_1[it1_idx]
                         overlapping_edges_2it = overlapping_edges_2[it2_idx]
-                    
+                        result = Conflict()
                         if it1_idx == 0 and it2_idx == 0:
                             if v2_now not in overlapping_vertices_1it or v1_now not in overlapping_vertices_2it:
                                 continue

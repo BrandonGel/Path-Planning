@@ -65,8 +65,12 @@ class CCBS(object):
         return solution_tuple
 
     def search(self):
+        st = time.time()
+        iterations = 1
+        success = False
         start = HighLevelNode()
         start.constraint_dict = {}
+        solution = {}
         solution_info = {}
         for agent in self.env.agent_dict.keys():
             start.constraint_dict[agent] = deepcopy(Constraints())
@@ -75,16 +79,17 @@ class CCBS(object):
         if not start.solution:
             if self.verbose:
                 print("No initial solution found")
-            return {}
+            self.total_time = min(self.time_limit, time.time() - st) 
+            self.total_iterations = min(self.max_iterations, iterations)
+            solution_info["runtime"] = self.total_time
+            solution_info["total_iterations"] = self.total_iterations
+            solution_info["success"] = success
+            return {},solution_info
 
         start.cost = sum(start.solution_cost.values())
 
         # Add start node to heap
         heapq.heappush(self.open_list, (start.cost, next(self.counter), start))
-
-        st = time.time()
-        iterations = 0
-        success = False
         while self.open_list:
             iterations += 1
             if self.time_limit is not None and (time.time() - st) > self.time_limit:
@@ -113,14 +118,9 @@ class CCBS(object):
             if not conflict_list:
                 if self.verbose:
                     print("solution found")
-                self.total_time = min(self.time_limit, time.time() - st) 
-                self.total_iterations = min(self.max_iterations, iterations)
-                solution = self.generate_plan(P.solution, P.solution_action_cost)
                 success = True
-                solution_info["runtime"] = self.total_time
-                solution_info["total_iterations"] = self.total_iterations
-                solution_info["success"] = success
-                return solution,solution_info
+                solution = self.generate_plan(P.solution, P.solution_action_cost)
+                break
 
             constraint_dict = self.env.create_constraints_from_conflict(conflict_list[0])
             for agent in constraint_dict.keys():
@@ -163,7 +163,7 @@ class CCBS(object):
         solution_info["runtime"] = self.total_time
         solution_info["total_iterations"] = self.total_iterations
         solution_info["success"] = success
-        return {},solution_info
+        return solution,solution_info
 
     def generate_plan(self, solution, solution_action_cost):
         plan = {}
@@ -172,13 +172,13 @@ class CCBS(object):
             for state, action in zip(path, solution_action_cost[agent]):
                 wait_time, move_time = action
                 if len(state.position) == 2:
-                    path_dict_list.append({'t':state.time+wait_time, 'x':state.position[0], 'y':state.position[1]})
                     if wait_time > 0:
                         path_dict_list.append({'t':state.time+wait_time, 'x':state.position[0], 'y':state.position[1]})
+                    path_dict_list.append({'t':state.time+wait_time+move_time, 'x':state.position[0], 'y':state.position[1]})
                 elif len(state.position) == 3:
-                    path_dict_list.append({'t':state.time+wait_time, 'x':state.position[0], 'y':state.position[1], 'z':state.position[2]})
                     if wait_time > 0:
                         path_dict_list.append({'t':state.time+wait_time, 'x':state.position[0], 'y':state.position[1], 'z':state.position[2]})
+                    path_dict_list.append({'t':state.time+wait_time+move_time, 'x':state.position[0], 'y':state.position[1], 'z':state.position[2]})
                 else:
                     raise ValueError(f"Invalid position dimension: {len(state.position)}")
             plan[agent] = path_dict_list

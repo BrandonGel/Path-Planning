@@ -120,8 +120,12 @@ class ICBS(CBS):
         return costs, paths
 
     def search(self):
+        st = time.time()
+        iterations = 1
+        success = False
         start = HighLevelNode()
         start.constraint_dict = {}
+        solution_info = {}
         for agent in self.env.agent_dict.keys():
             start.constraint_dict[agent] = Constraints()
 
@@ -129,29 +133,32 @@ class ICBS(CBS):
         if not start.solution:
             if self.verbose:
                 print("No initial solution found")
-            return {}
+            self.total_time = min(self.time_limit, time.time() - st) 
+            self.total_iterations = min(self.max_iterations, iterations)
+            solution_info["runtime"] = self.total_time
+            solution_info["total_iterations"] = self.total_iterations
+            solution_info["success"] = success
+            return {},solution_info
 
         start.cost = sum(start.solution_cost.values())
 
         # Add start node to heap
         heapq.heappush(self.open_list, (start.cost, next(self.counter), start))
-
-        st = time.time()
-        iterations = 0
         while self.open_list:
+            iterations += 1
             if self.time_limit is not None and (time.time() - st) > self.time_limit:
                 if self.verbose:
                     print(
                         f"Search terminated: time limit of {self.time_limit} seconds exceeded."
                     )
-                return {}
+                break
 
             if self.max_iterations is not None and iterations >= self.max_iterations:
                 if self.verbose:
                     print(
                         f"Search terminated: max iterations of {self.max_iterations} reached."
                     )
-                return {}
+                break
 
             _, _, P = heapq.heappop(self.open_list)
 
@@ -170,9 +177,9 @@ class ICBS(CBS):
             if not conflict_list:
                 if self.verbose:
                     print("solution found")
-                self.total_time = min(self.time_limit, time.time() - st) 
-                self.total_iterations = min(self.max_iterations, iterations+1)
-                return self.generate_plan(P.solution)
+                success = True
+                solution = self.generate_plan(P.solution)
+                break
 
             # 1. Prioritize Conflicts (Cardinal, Semi, Non)
             best_conflict, best_costs, best_paths, score = self._get_best_conflict(P, conflict_list)
@@ -206,10 +213,12 @@ class ICBS(CBS):
             
             # Branching (if no bypass)
             self._branch(P, best_conflict, best_costs)
-            iterations += 1
         self.total_time = min(self.time_limit, time.time() - st) 
         self.total_iterations = min(self.max_iterations, iterations)
-        return {}
+        solution_info["runtime"] = self.total_time
+        solution_info["total_iterations"] = self.total_iterations
+        solution_info["success"] = success
+        return solution,solution_info
 
 
     def _get_updated_constraints(self, P, agent, conflict):

@@ -114,8 +114,8 @@ class SippGraph(object):
         self.use_constraint_sweep = use_constraint_sweep
         self._constraint_sweep_cache = {}  # (p1, p2, r) -> (nodes, edges, start_nodes)
         self.heuristic_type = heuristic_type
-        self.init_graph()
-        self.init_intervals(dynamic_obstacles)
+        self.dynamic_obstacles = dynamic_obstacles
+        self.reset_graph()
         self._valid_neighbours_cache = {}
         self.time_limit = time_limit if time_limit is not None and time_limit > 0 else float('inf')
         self.max_iterations = max_iterations if max_iterations is not None and max_iterations > 0 else 1
@@ -272,3 +272,7 @@ class SippGraph(object):
             self._constraint_sweep_cache[key] = self.graph_map.get_constraint_sweep(p1, p2,v, r, use_interval=True,get_time_interval=True)
         return self._constraint_sweep_cache[key]
     
+    def reset_graph(self):
+        self.sipp_graph = {}
+        self.init_graph()
+        self.init_intervals(self.dynamic_obstacles)

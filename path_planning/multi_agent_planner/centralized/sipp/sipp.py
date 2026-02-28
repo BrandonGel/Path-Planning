@@ -154,13 +154,15 @@ class SippPlanner(SippGraph):
 
     def compute_plan(self):
         solution_info = {}
+        solution = {}
         st = time.time()
         best_solution = None
         best_solution_cost = float('inf')
-        best_success = True
+        best_success = False
         iterations = 0
         for _ in range(self.max_iterations):
             self.shuffle_agents()
+            self.reset_graph()
             iterations += 1
             success = True
             total_cost = 0
@@ -234,7 +236,7 @@ class SippPlanner(SippGraph):
                 best_solution = self.get_plan()
                 best_success = True
         self.total_time += time.time() - st
-        self.total_iterations = iterations
+        self.total_iterations = min(self.max_iterations, iterations)
         solution =best_solution if best_success else {}
         solution_info["runtime"] = self.total_time
         solution_info["total_iterations"] = self.total_iterations

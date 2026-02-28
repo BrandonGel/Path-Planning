@@ -10,43 +10,43 @@ from typing import Tuple
 import numpy as np
 import time
 
-def solve_mapf(map_, agents, mapf_solver_name:str, timeout:float=60.0, max_attempts:int=10000, agent_radius:float=0.0, agent_velocity:float=0.0) -> Tuple[dict, float]:
-    mapf_solver_name = mapf_solver_name.lower()
-    if 'cbs' in mapf_solver_name:
-        CBS,Environment = get_mapf_solver(mapf_solver_name)
-        env = Environment(map_, agents,radius=agent_radius,velocity=agent_velocity)
-        cbs = CBS(env, time_limit=timeout, max_iterations=max_attempts)
-        start_time = time.time()
-        solution = cbs.search()
-        runtime = time.time() - start_time
-        cost = env.compute_solution_cost(solution)
-        return solution, runtime, cost
-    elif 'lacam' in mapf_solver_name:
+def solve_mapf(map_, agents,mapf_solver_config:dict) -> Tuple[dict, float]:
+    mapf_solver_name = mapf_solver_config['mapf_solver_name'].lower()
+    agent_radius = mapf_solver_config['agent_radius']
+    agent_velocity = mapf_solver_config['agent_velocity']
+    time_limit = mapf_solver_config['time_limit']
+    max_iterations = mapf_solver_config['max_iterations']
+    heuristic_type = mapf_solver_config['heuristic_type']
+    if mapf_solver_name == 'cbs':
+        env = Environment(map_, agents, radius=agent_radius, use_constraint_sweep=True,heuristic_type=heuristic_type)
+        cbs = CBS(env,time_limit=time_limit,max_iterations=max_iterations,verbose=False)
+        solution,solution_info = cbs.search()
+    elif mapf_solver_name == 'icbs':
+        env = IEnvironment(map_, agents, radius=agent_radius, use_constraint_sweep=True,heuristic_type=heuristic_type)
+        icbs = ICBS(env,time_limit=time_limit,max_iterations=max_iterations,verbose=False)
+        solution, solution_info = icbs.search()
+    elif mapf_solver_name == 'lacam':
         starts,goals = set_starts_goals_config(map_.start,map_.goal)
-        if agent_radius > 0 or agent_velocity > 0:
-            assert False, "Agent radius and velocity are not supported for LaCAM"
         planner = LaCAM()
-        st = time.time()
-        solution_config = planner.solve(map_, starts, goals,seed=0,time_limit_ms=timeout*1000,verbose=0)
-        if not is_valid_mapf_solution(map_, starts, goals, solution_config):
-            print("Solution is not valid")
-        ft = time.time()
-        solution = planner.get_solution_dict(solution_config)
-        cost = planner.compute_solution_cost(solution)
-        runtime = ft - st
-        return solution, runtime, cost
-    elif 'sipp' in mapf_solver_name:
-        st = time.time()
-        sipp_planner = SippPlanner(map_,{},agents,agent_radius,agent_velocity)
-        if sipp_planner.compute_plan():
-            solution = sipp_planner.get_plan()
-            cost = sipp_planner.compute_solution_cost()
-            runtime = time.time() - st
-            return solution, runtime, cost
-        else:
-            return None, None, None
+        solution_config = planner.solve(map_, starts, goals,seed=0,time_limit_ms=1000*time_limit,max_iterations=max_iterations,verbose=0)
+        solution, solution_info = planner.get_solution_dict(solution_config)
+    elif mapf_solver_name == 'lacam_random':
+        starts,goals = set_starts_goals_config(map_.start,map_.goal)
+        planner = LaCAM_random()
+        solution_config = planner.solve(map_, starts, goals,seed=0,time_limit_ms=1000*time_limit,max_iterations=max_iterations,verbose=0)
+        solution, solution_info = planner.get_solution_dict(solution_config)
+    elif mapf_solver_name == 'sipp':
+        dynamic_obstacles = dict()
+        sipp_planner = SippPlanner(map_,dynamic_obstacles,agents,agent_radius,agent_velocity,heuristic_type=heuristic_type,time_limit=time_limit,max_iterations=max_iterations)
+        solution,solution_info = sipp_planner.compute_plan()
+    elif mapf_solver_name == 'ccbs':
+        env = CCBS_Environment(map_,{}, agents, radius=agent_radius, velocity=agent_velocity, use_constraint_sweep=True,heuristic_type=heuristic_type)
+        ccbs = CCBS(env,time_limit=time_limit,max_iterations=max_iterations,verbose=False)
+        solution, solution_info = ccbs.search()
     else:
         raise ValueError(f"Invalid algorithm: {mapf_solver_name}")
+    summary = summarize_solution(solution,solution_info,mapf_solver_config)
+    return summary
 
 
 def get_mapf_solver(mapf_solver_name:str) -> Tuple[CBS,Environment]:
@@ -86,7 +86,7 @@ def computer_solution_cost(solution:dict):
             flowtime += dist_travel.sum().item()
             total_travel_time += travel_time.sum().item()
             total_wait_time += wait_time.sum().item()
-            makespan = max(makespan, path[-1]["t"] - path[0]["t"],makespan)
+            makespan = max(makespan, path[-1]["t"] - path[0]["t"])
 
             cost_dict[agent] = {}
             cost_dict[agent]["path_length"] = dist_travel.sum().item()
@@ -101,11 +101,17 @@ def computer_solution_cost(solution:dict):
     all_cost_dict["success"] = success
     return cost_dict, all_cost_dict
 
-def summarize_solution(solution,solution_info):
+def summarize_solution(solution,solution_info,mapf_solver_config):
     agent_cost, total_cost = computer_solution_cost(solution)
     summary = {}
     summary["schedule"] = solution
     summary["schedule_cost"] = agent_cost
     summary.update(total_cost)
     summary.update(solution_info)
+    summary["mapf_solver_name"] = mapf_solver_config["mapf_solver_name"]
+    summary["agent_radius"] = mapf_solver_config["agent_radius"]
+    summary["agent_velocity"] = mapf_solver_config["agent_velocity"]
+    summary["time_limit"] = mapf_solver_config["time_limit"]
+    summary["max_iterations"] = mapf_solver_config["max_iterations"]
+    summary["heuristic_type"] = mapf_solver_config["heuristic_type"]
     return summary
