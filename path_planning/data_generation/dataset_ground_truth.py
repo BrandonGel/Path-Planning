@@ -40,7 +40,7 @@ def gen_input(
     nb_agents: int,
     road_map_type: str,
     discrete_space: bool,
-    num_samples: int,
+    sample_num: int,
     num_neighbors: int,
     min_edge_len: float,
     max_edge_len: float,
@@ -73,7 +73,7 @@ def gen_input(
         "max_iterations": max_iterations,
         "road_map_type": road_map_type,
         "discrete_space": discrete_space,
-        "num_samples": num_samples,
+        "sample_num": sample_num,
         "num_neighbors": num_neighbors,
         "min_edge_len": min_edge_len,
         "max_edge_len": max_edge_len,
@@ -156,97 +156,166 @@ def gen_input(
 
     return input_dict
 
-def data_gen(
-    input_dict: Dict,
-    output_path: Path,
-    mapf_solver_config: dict = None,
-    ) -> bool:
-    """
-    Generate solution for given MAPF instance.
-
-    Args:
-        input_dict: MAPF instance configuration
-        output_path: Path to save solution
-
-    Returns:
-        True if solution found, False otherwise
-    """
-    output_path.mkdir(parents=True, exist_ok=True)
-
-    param = input_dict
-    obstacles = np.array(param["map"]["obstacles"])
+def create_map(param: Dict, ground_truth_path: Path):
     bounds = param["map"]["bounds"]
     resolution = param["map"]["resolution"]
-    agents = param["agents"]
-    road_map_type = param["road_map_type"]
-
-    if road_map_type == 'grid':
-        map_ = GraphSampler(
-            bounds=bounds, resolution=resolution, start=[], goal=[], use_discrete_space=True
-        )
-        map_.set_parameters(sample_num=0, num_neighbors=4.0, min_edge_len=1e-10, max_edge_len=1.1)
-    elif road_map_type == 'prm' or road_map_type == 'planar' or road_map_type == 'rrg':
-        map_ = GraphSampler(
-            bounds=bounds,
-            resolution=resolution,
-            start=[],
-            goal=[],
-            use_discrete_space=param["discrete_space"],
-            sample_num=param["num_samples"],
-            min_edge_len=param["min_edge_len"],
-            max_edge_len=param["max_edge_len"],
-            num_neighbors=param["num_neighbors"]
-        )
+    graph_file = ground_truth_path / "graph_sampler.pkl"
+    if graph_file.exists():
+        map_ = GraphSampler(bounds=bounds, resolution=resolution, start=[], goal=[])
+        map_.load_graph_sampler(graph_file)
     else:
-        print("Invalid road map name provided")
-    
-    map_.set_obstacle_map(obstacles)
-    map_.inflate_obstacles(radius=0)
+        obstacles = np.array(param["map"]["obstacles"])
+        agents = param["agents"]
+        road_map_type = param["road_map_type"]
+        if road_map_type == 'grid':
+            map_ = GraphSampler(
+                bounds=bounds, resolution=resolution, start=[], goal=[], use_discrete_space=True
+            )
+            map_.set_parameters(sample_num=0, num_neighbors=4.0, min_edge_len=1e-10, max_edge_len=1.1)
+        elif road_map_type == 'prm' or road_map_type == 'planar' or road_map_type == 'rrg':
+            map_ = GraphSampler(
+                bounds=bounds,
+                resolution=resolution,
+                start=[],
+                goal=[],
+                use_discrete_space=param["discrete_space"],
+                sample_num=param["sample_num"],
+                min_edge_len=param["min_edge_len"],
+                max_edge_len=param["max_edge_len"],
+                num_neighbors=param["num_neighbors"]
+            )
+        else:
+            print("Invalid road map name provided")
+        
+        map_.set_obstacles(obstacles=obstacles)
+        map_.set_inflation_radius(radius=0)
 
-    start = [agent["start"] for agent in agents]
-    goal = [agent["goal"] for agent in agents]
-    map_.set_start(start)
-    map_.set_goal(goal)
+        start = [agent["start"] for agent in agents]
+        goal = [agent["goal"] for agent in agents]
+        map_.set_start(start)
+        map_.set_goal(goal)
 
-    if road_map_type == 'grid':
-        nodes = map_.generateRandomNodes(generate_grid_nodes=True)
-        road_map = map_.generate_roadmap(nodes)
-    elif road_map_type == 'prm':
-        nodes = map_.generateRandomNodes()
-        road_map = map_.generate_roadmap(nodes)
-    elif road_map_type == 'planar':
-        nodes = map_.generateRandomNodes()
-        road_map = map_.generate_planar_map(nodes)
-    elif road_map_type == 'rrg':
-        # TODO: Implement RRG generation
-        nodes = map_.generateRandomNodes()
-        road_map = map_.generate_rrg(nodes)
+        if road_map_type == 'grid':
+            nodes = map_.generateRandomNodes(generate_grid_nodes=True)
+            road_map = map_.generate_roadmap(nodes)
+        elif road_map_type == 'prm':
+            nodes = map_.generateRandomNodes()
+            road_map = map_.generate_roadmap(nodes)
+        elif road_map_type == 'planar':
+            nodes = map_.generateRandomNodes()
+            road_map = map_.generate_planar_map(nodes)
+        elif road_map_type == 'rrg':
+            # TODO: Implement RRG generation
+            nodes = map_.generateRandomNodes()
+            road_map = map_.generate_rrg(nodes)
+        else:
+            print("Invalid road map name provided")
+        map_.save_graph_sampler(graph_file)
+    return map_
+
+def process_single_case_map_generation(args: Tuple) -> Optional[int]:
+    """
+    Generate map and permutations for a single case (no solving).
+    Saves input.yaml, graph_sampler.pkl, and case-level agents/perm_{id}/agents.yaml.
+    Used so all MAPF solvers can later run on the same map and task config.
+
+    Args:
+        args: Tuple of (case_id, path, config)
+
+    Returns:
+        case_id on success, None on failure
+    """
+    case_id, path, config = args
+    case_path = path / f"case_{case_id}"
+    roadmap_path = case_path / config.get("road_map_type", "grid")
+    roadmap_path.mkdir(parents=True, exist_ok=True)
+    input_file = roadmap_path / "input.yaml"
+
+    inpt = gen_input(
+        bounds=config.get("bounds", [[0, 32.0], [0, 32.0]]),
+        nb_obstacles=config.get("nb_obstacles", 0.1),
+        nb_agents=config.get("nb_agents", 4),
+        resolution=config.get("resolution", 1.0),
+        max_iterations=config.get("max_iterations", 10000),
+        time_limit=config.get("time_limit", 60),
+        road_map_type=config.get("road_map_type", "grid"),
+        discrete_space=config.get("use_discrete_space", True),
+        sample_num=config.get("sample_num", 0),
+        num_neighbors=config.get("num_neighbors", 4.0),
+        min_edge_len=config.get("min_edge_len", 1e-10),
+        max_edge_len=config.get("max_edge_len", 1 + 1e-10),
+    )
+    if inpt is None:
+        return None
+    with open(input_file, "w") as f:
+        yaml.safe_dump(inpt, f)
+
+    ground_truth_path = roadmap_path / "ground_truth"
+    ground_truth_path.mkdir(parents=True, exist_ok=True)
+
+    # Build and save graph once
+    create_map(inpt, ground_truth_path)
+
+    # Generate and save permutation agent configs
+    nb_permutations = config["nb_permutations"]
+    nb_permutations_tries = config.get("nb_permutations_tries", nb_permutations * 2)
+    max_permutations = math.factorial(2 * config["nb_agents"])
+    if nb_permutations > max_permutations:
+        nb_permutations = max_permutations
+
+    start_goal_index = np.arange(0, config["nb_agents"] * 2, 1)
+    unique_permutations = set()
+    total_attempts = 0
+
+    while len(unique_permutations) < nb_permutations and total_attempts < nb_permutations_tries:
+        max_unique_attempts = 1000
+        unique_attempts = 0
+        while tuple(start_goal_index) in unique_permutations:
+            start_goal_index = np.random.permutation(start_goal_index)
+            unique_attempts += 1
+            if unique_attempts >= max_unique_attempts:
+                break
+        if unique_attempts >= max_unique_attempts:
+            break
+
+        unique_permutations.add(tuple(start_goal_index))
+        agents_shuffled = shuffle_agents_goals(inpt, start_goal_index)
+
+        perm_id = len(unique_permutations) - 1
+        agents_dir = case_path / "agents"
+        perm_path = agents_dir / f"perm_{perm_id}"
+        agents_file = perm_path / "agents.yaml"
+        perm_path.mkdir(parents=True, exist_ok=True)
+        with open(agents_file, "w") as f:
+            yaml.safe_dump({"agents": agents_shuffled}, f)
+
+        total_attempts += 1
+        start_goal_index = np.random.permutation(start_goal_index)
+
+    return case_id
+
+def create_maps(path: Path, num_cases: int, config: Dict, num_workers: int = cpu_count()) -> None:
+    """
+    Generate maps and permutations for all cases (no solving).
+    Saves input.yaml, graph_sampler.pkl, and case-level agents/perm_{id}/agents.yaml per case
+    so create_solutions can later run all solvers on the same maps.
+    """
+    path = Path(path)
+    path.mkdir(parents=True, exist_ok=True)
+    set_global_seed(config.get("seed", 42))
+
+    case_tasks = [(i, path, config) for i in range(num_cases)]
+
+    if num_workers > 1 and len(case_tasks) > 1:
+        with Pool(processes=num_workers) as pool:
+            list(tqdm(
+                pool.imap_unordered(process_single_case_map_generation, case_tasks),
+                total=len(case_tasks),
+                desc="Generating maps",
+            ))
     else:
-        print("Invalid road map name provided")
-    
-
-    start = [s.current for s in map_.get_start_nodes()]
-    goal = [g.current for g in map_.get_goal_nodes()]
-    agents = [
-        {"start": start[i], "name": agent["name"], "goal": goal[i]}
-        for i, agent in enumerate(agents)
-    ]
-
-    solution_summary = solve_mapf(map_, agents, mapf_solver_config)
-
-    agent_radius = mapf_solver_config.get("agent_radius", 0.0)
-    agent_velocity = mapf_solver_config.get("agent_velocity", 0.0)
-
-    solution_file = output_path / f"solution_radius{agent_radius}_velocity{agent_velocity}.yaml"
-    with open(solution_file, "w") as f:
-        yaml.safe_dump(solution_summary, f)
-
-    # Write input parameters file
-    parameters_file = output_path / "input.yaml"
-    with open(parameters_file, "w") as f:
-        yaml.safe_dump(param, f)
-
-    return True
+        for task in tqdm(case_tasks, desc="Generating maps"):
+            process_single_case_map_generation(task)
 
 def process_single_permutation(args: Tuple, delete_failed_path: bool = True) -> Tuple[bool, int]:
     """
@@ -259,21 +328,36 @@ def process_single_permutation(args: Tuple, delete_failed_path: bool = True) -> 
         Tuple of (success: bool, perm_id: int)
     """
     (
-        inpt,
+        param,
+        map_,
         mapf_path,
         mapf_solver_config,
     ) = args
 
     # Generate solution
-    success = data_gen(
-        inpt,
-        mapf_path,
-        mapf_solver_config=mapf_solver_config,
-    )
+    mapf_path.mkdir(parents=True, exist_ok=True)
+    agents = [
+        {"start": tuple(agent['start']), "name": agent["name"], "goal": tuple(agent['goal'])}
+        for i, agent in enumerate(param["agents"])
+    ]
+
+    solution_summary = solve_mapf(map_, agents, mapf_solver_config)
+    success = solution_summary["success"]
+
+    agent_radius = mapf_solver_config.get("agent_radius", 0.0)
+    agent_velocity = mapf_solver_config.get("agent_velocity", 0.0)
+
+    # Write input parameters file
+    parameters_file = mapf_path / "input.yaml"
+    with open(parameters_file, "w") as f:
+        yaml.safe_dump(param, f)
+
+    solution_file = mapf_path / f"solution_radius{agent_radius}_velocity{agent_velocity}.yaml"
+    with open(solution_file, "w") as f:
+        yaml.safe_dump(solution_summary, f)
 
     if not success and mapf_path.exists() and delete_failed_path:
         shutil.rmtree(mapf_path)
-
     return success
 
 def process_single_case(args: Tuple) -> Tuple[float, float, int]:
@@ -286,38 +370,18 @@ def process_single_case(args: Tuple) -> Tuple[float, float, int]:
     Returns:
         Tuple of (successful_ratio, failed_ratio, case_id)
     """
-    case_id, path, config, all = args
-
-    # Generate random instance
-    inpt = gen_input(
-        bounds=config.get("bounds", [[0,32.0],[0,32.0]]),
-        nb_obstacles=config.get("nb_obstacles", 0.1),
-        nb_agents=config.get("nb_agents", 4),
-        resolution=config.get("resolution", 1.0),
-        max_iterations=config.get("max_iterations", 10000),
-        time_limit=config.get("time_limit", 60),
-        road_map_type = config.get("road_map_type", "grid"),
-        discrete_space = config.get("use_discrete_space", True),
-        num_samples = config.get("num_samples", 0),
-        num_neighbors = config.get("num_neighbors", 4.0),
-        min_edge_len = config.get("min_edge_len", 1e-10),
-        max_edge_len = config.get("max_edge_len", 1 + 1e-10)
-    )
-    if inpt is None:
-        return 0.0, 1.0, case_id
-    
-    case_path = path / f"case_{case_id}" 
-    roadmap_path = case_path / config.get("road_map_type", "grid") 
+    case_id, path, config, all, verbose = args
+    case_path = path / f"case_{case_id}"
+    roadmap_path = case_path / config.get("road_map_type", "grid")
     roadmap_path.mkdir(parents=True, exist_ok=True)
-    if not (roadmap_path / "input.yaml").exists():
-        with open(roadmap_path / "input.yaml", "w") as f:
-            yaml.safe_dump(inpt, f)
-    else:
-        if not all:
-            with open(roadmap_path / "input.yaml", "r") as f:
-                inpt = yaml.load(f, Loader=yaml.FullLoader)
-
+    input_file = roadmap_path / "input.yaml"
     ground_truth_path = roadmap_path / "ground_truth"
+    graph_sampler_exists = ground_truth_path.exists() and (ground_truth_path / "graph_sampler.pkl").exists()
+    delete_failed_path = config.get("delete_failed_path", False)
+
+    assert input_file.exists(), f"Input file {input_file} does not exist"
+    with open(input_file, "r") as f:
+        inpt = yaml.load(f, Loader=yaml.FullLoader)
     ground_truth_path.mkdir(parents=True, exist_ok=True)
 
     # Prepare permutation generation
@@ -326,12 +390,13 @@ def process_single_case(args: Tuple) -> Tuple[float, float, int]:
     agent_start_goals = dict(zip(agent_start_goals, range(len(agent_start_goals))))
     nb_permutations = config["nb_permutations"]
     nb_permutations_tries = config.get("nb_permutations_tries", nb_permutations * 2)
+    nb_permutations_tries = nb_permutations_tries if not delete_failed_path else nb_permutations
 
     # Ensure tries >= permutations
     if nb_permutations_tries < nb_permutations:
         print(f"Warning: nb_permutations_tries ({nb_permutations_tries}) < nb_permutations ({nb_permutations})")
         print(f"Setting nb_permutations_tries to {nb_permutations * 2}")
-        nb_permutations_tries = nb_permutations * 2
+        nb_permutations_tries = nb_permutations * 2 if not delete_failed_path else nb_permutations
 
     # Check max permutations
     max_permutations = math.factorial(2 * config["nb_agents"])
@@ -351,93 +416,87 @@ def process_single_case(args: Tuple) -> Tuple[float, float, int]:
     mapf_solver_name = config.get("mapf_solver_name", "cbs")
     agent_radius = config.get("agent_radius", 0.0)
     agent_velocity = config.get("agent_velocity", 0.0)
-    delete_failed_path = config.get("delete_failed_path", True)
+    delete_failed_path = config.get("delete_failed_path", False)
 
     perm_ids_unfinished = []
-    for perm_id in range(nb_permutations):
-        perm_path = ground_truth_path / f"perm_{perm_id}"
-        mapf_path = perm_path / mapf_solver_name
-        solution_file = mapf_path / f"solution_radius{agent_radius}_velocity{agent_velocity}.yaml"
-        if not solution_file.exists():
-            perm_ids_unfinished.append(perm_id)
-        else:
-            with open(mapf_path / "input.yaml", "r") as f:
-                perm_input = yaml.load(f, Loader=yaml.FullLoader)
-            starts = [tuple(agent["start"]) for agent in perm_input["agents"]]
-            goals = [tuple(agent["goal"]) for agent in perm_input["agents"]]
-            perm_start_goals = starts + goals
-            unique_permutations.add(tuple([agent_start_goals[pos] for pos in perm_start_goals]))
+    if graph_sampler_exists:
+        for perm_id in range(nb_permutations):
+            perm_path = ground_truth_path / f"perm_{perm_id}"
+            mapf_path = perm_path / mapf_solver_name
+            solution_file = mapf_path / f"solution_radius{agent_radius}_velocity{agent_velocity}.yaml"
+            if not solution_file.exists():
+                perm_ids_unfinished.append(perm_id)
+            else:
+                # Count as successful (same perm already solved)
+                try:
+                    with open(mapf_path / "input.yaml", "r") as f:
+                        perm_input = yaml.load(f, Loader=yaml.FullLoader)
+                    starts = [tuple(agent["start"]) for agent in perm_input["agents"]]
+                    goals = [tuple(agent["goal"]) for agent in perm_input["agents"]]
+                    perm_start_goals = starts + goals
+                    unique_permutations.add(tuple([agent_start_goals[pos] for pos in perm_start_goals]))
+                except Exception:
+                    pass
     successful_permutations = len(unique_permutations)
-    print(f"Case {case_id}: Started with {nb_permutations-len(perm_ids_unfinished)}/{nb_permutations} permutations (max {nb_permutations_tries} attempts)")
+    if verbose:
+        print(f"Case {case_id}: Started with {nb_permutations-len(perm_ids_unfinished)} permutations (max {nb_permutations_tries} attempts)")
 
-    # Generate permutations until we have enough successes or max attempts reached
-    while successful_permutations < nb_permutations and total_attempts < nb_permutations_tries or (not delete_failed_path and total_attempts < nb_permutations_tries + len(perm_ids_unfinished)):
-        # Generate unique permutation
-        max_unique_attempts = 1000
-        unique_attempts = 0
-        while tuple(start_goal_index) in unique_permutations:
-            start_goal_index = np.random.permutation(start_goal_index)
-            unique_attempts += 1
-            if unique_attempts >= max_unique_attempts:
-                print(f"Case {case_id}: Cannot generate more unique permutations after {unique_attempts} attempts")
-                break
-        
-        # If we couldn't find a unique permutation, stop
-        if unique_attempts >= max_unique_attempts:
-            break
-        
-        # Record this permutation
-        unique_permutations.add(tuple(start_goal_index))
-        
-        # Verify start/goal uniqueness
-        agents_shuffled = shuffle_agents_goals(inpt, start_goal_index)
-        starts = [tuple(agent["start"]) for agent in agents_shuffled]
-        goals = [tuple(agent["goal"]) for agent in agents_shuffled]
-        
+    map_ = create_map(inpt, ground_truth_path)
 
-        # Try to generate solution for this permutation
-        inpt_copy = copy.deepcopy(inpt)
-        inpt_copy["agents"] = agents_shuffled
-        
+    mapf_solver_config = {
+        "mapf_solver_name": config.get("mapf_solver_name", "cbs"),
+        "time_limit": config.get("time_limit", 60),
+        "agent_radius": config.get("agent_radius", 0.0),
+        "agent_velocity": config.get("agent_velocity", 0.0),
+        "max_iterations": config.get("max_iterations", 10000),
+        "heuristic_type": config.get("heuristic_type", "manhattan"),
+    }
+
+    while (successful_permutations < nb_permutations and total_attempts < nb_permutations_tries): 
+
+        # Determine perm_id first so agents_file and mapf_path use the correct permutation
         if len(perm_ids_unfinished) > 0:
             perm_id = perm_ids_unfinished[0]
         else:
             perm_id = total_attempts % nb_permutations
-        mapf_solver_config= {
-            'mapf_solver_name': config.get("mapf_solver_name", "cbs"),
-            'time_limit': config.get("time_limit", 60),
-            'agent_radius': config.get("agent_radius", 0.0),
-            'agent_velocity': config.get("agent_velocity", 0.0),
-            'max_iterations': config.get("max_iterations", 10000),
-            'heuristic_type': config.get("heuristic_type", "manhattan"),
-        }
-        mapf_path =ground_truth_path / f"perm_{perm_id}" / mapf_solver_config['mapf_solver_name']
-        task = (inpt_copy, mapf_path, mapf_solver_config)
+
+        max_unique_attempts = 1000
+        unique_attempts = 0
+
+        agents_file = case_path / "agents" / f"perm_{perm_id}" / "agents.yaml"
+        assert agents_file.exists(), f"Agents file {agents_file} does not exist"
+        with open(agents_file, "r") as f:
+            agents_shuffled = yaml.load(f, Loader=yaml.FullLoader)["agents"]
+
+
+        inpt_copy = copy.deepcopy(inpt)
+        inpt_copy["agents"] = agents_shuffled
+
+        mapf_path = ground_truth_path / f"perm_{perm_id}" / mapf_solver_config["mapf_solver_name"]
+        task = (inpt_copy, map_, mapf_path, mapf_solver_config)
         success = process_single_permutation(task, delete_failed_path=delete_failed_path)
-        
+
         total_attempts += 1
-        
         if success:
             successful_permutations += 1
-            if len(perm_ids_unfinished) > 0:
-                perm_ids_unfinished.pop(0)
         else:
             failed_permutations += 1
-        
-        # Shuffle for next iteration
+        if (delete_failed_path or not success) and len(perm_ids_unfinished) > 0:
+            perm_ids_unfinished.pop(0)
+
         start_goal_index = np.random.permutation(start_goal_index)
-            
 
     # Summary
-    print(f"Case {case_id}: Completed with {successful_permutations}/{nb_permutations} successful permutations")
-    print(f"Case {case_id}: Total attempts: {total_attempts}, Failed: {failed_permutations}")
+    if verbose:
+        print(f"Case {case_id}: Completed with {successful_permutations}/{nb_permutations} successful permutations")
+        print(f"Case {case_id}: Total attempts: {total_attempts}, Failed: {failed_permutations}")
 
     successful_ratio = successful_permutations / nb_permutations if nb_permutations > 0 else 0.0
     failed_ratio = 1.0 - successful_ratio
     
     return successful_ratio, failed_ratio, case_id
 
-def create_solutions(path: Path, num_cases: int, config: Dict, all:bool, num_workers: int = cpu_count()):
+def create_solutions(path: Path, num_cases: int, config: Dict, all:bool, num_workers: int = cpu_count(), verbose: bool = True):
     """
     Create multiple MAPF instances and their solutions with parallel processing.
 
@@ -448,14 +507,15 @@ def create_solutions(path: Path, num_cases: int, config: Dict, all:bool, num_wor
     """
     path = Path(path)
     path.mkdir(parents=True, exist_ok=True)
-    print(f"Generating solutions for {num_cases} cases")
+    if verbose:
+        print(f"Generating solutions for {num_cases} cases")
 
     set_global_seed(config.get("seed", 42))
     
     # Prepare case tasks
     case_tasks = []
     for i in range(0, num_cases):
-        task = (i, path, config, all)
+        task = (i, path, config, all,verbose)
         case_tasks.append(task)
 
     # Process cases in parallel
@@ -485,10 +545,11 @@ def create_solutions(path: Path, num_cases: int, config: Dict, all:bool, num_wor
 
     # Print summary
     total_permutations = num_cases * config.get("nb_permutations", 1)
-    print(f"Generation complete: {successful:.2f} successful cases, {failed:.2f} failed cases")
-    print(f"Total Successful permutations: {int(successful * total_permutations)}")
-    print(f"Total Failed permutations: {int(failed * total_permutations)}")
-    print(f"Cases stored in {path} f")
+    if verbose:
+        print(f"Generation complete: {successful:.2f} successful cases, {failed:.2f} failed cases")
+        print(f"Total Successful permutations: {int(successful * total_permutations)}")
+        print(f"Total Failed permutations: {int(failed * total_permutations)}")
+        print(f"Cases stored in {path} for {num_cases} cases")
 
 def create_path_parameter_directory(base_path: Path, config: Dict,dump_config: bool = True):
     """
