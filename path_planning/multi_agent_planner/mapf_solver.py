@@ -93,6 +93,15 @@ def computer_solution_cost(solution:dict):
             cost_dict[agent]["flowtime"] = travel_time.sum().item()
             cost_dict[agent]["wait_time"] = wait_time.sum().item()
             cost_dict[agent]["makespan"] = path[-1]["t"] - path[0]["t"]
+        solution_temp = {}
+        for agent, path in solution.items():
+            solution_temp[agent] = []
+            for state in path:
+                for key, value in state.items():
+                    if isinstance(value, (int, float, np.floating, np.integer)):
+                        state[key] = float(value)
+                solution_temp[agent].append(state)
+        solution = solution_temp
     all_cost_dict = {}
     all_cost_dict["path_length"] = flowtime
     all_cost_dict["flowtime"] = total_travel_time
