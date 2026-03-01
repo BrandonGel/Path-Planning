@@ -6,14 +6,14 @@ from collections import deque
 import numpy as np
 
 class SIPP():
-    def __init__(self, env:SippBaseEnvironment, max_iterations=-1,verbose=False):
+    def __init__(self, env:SippBaseEnvironment, sipp_max_iterations=10000,verbose=False):
         self.env = env # Access to get_conflicts logic
         self.agent_dict = env.agent_dict
         self.get_heuristic = env.get_heuristic
         self.is_at_goal = env.is_at_goal
         self.get_successors = env.get_successors
         self.get_initial_state = env.get_initial_state
-        self.max_iterations = max_iterations if max_iterations > 0 or max_iterations is None else float("inf")
+        self.sipp_max_iterations = sipp_max_iterations if sipp_max_iterations > 0 or sipp_max_iterations is None else float("inf")
         self.verbose = verbose
 
     def reconstruct_path(self, came_from, came_from_action_cost, current):
@@ -49,7 +49,7 @@ class SIPP():
         heapq.heappush(open_heap, (f_start, conflicts_count[initial_state_key], counter, initial_state))
         counter += 1
 
-        while open_heap and len(closed_set) < self.max_iterations:
+        while open_heap and len(closed_set) < self.sipp_max_iterations:
             _, _, _, current = heapq.heappop(open_heap)
             current_state_key = (current.position, current.interval)
             if current_state_key in closed_set:

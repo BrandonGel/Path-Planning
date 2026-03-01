@@ -20,7 +20,7 @@ import math
 from path_planning.multi_agent_planner.data_type import HEURISTIC_TYPE
 
 class SippPlanner(SippGraph):
-    def __init__(self, graph_map: GraphSampler,dynamic_obstacles:dict = {},agents:list = [],radius:float = 0.0,velocity:float = 0.0,use_constraint_sweep:bool = True, heuristic_type: str = 'manhattan',time_limit: float | None = None, max_iterations: int | None = None,verbose: bool = False):
+    def __init__(self, graph_map: GraphSampler,dynamic_obstacles:dict = {},agents:list = [],radius:float = 0.0,velocity:float = 0.0,use_constraint_sweep:bool = True, heuristic_type: str = 'manhattan',time_limit: float | None = None, max_iterations: int | None = None,verbose: bool = False,sipp_max_iterations: int = 10000):
         SippGraph.__init__(self,graph_map,dynamic_obstacles,radius,velocity,use_constraint_sweep,heuristic_type,time_limit,max_iterations,verbose)
         self.agents = agents
         self.agent_names = [agent["name"] for agent in agents]
@@ -30,6 +30,7 @@ class SippPlanner(SippGraph):
         self._mtime_cache = {}
         self.max_permutations = math.factorial(len(agents))
         self.max_iterations = min(self.max_iterations , self.max_permutations)
+        self.sipp_max_iterations = sipp_max_iterations if sipp_max_iterations > 0 or sipp_max_iterations is None else float("inf")
         if heuristic_type not in HEURISTIC_TYPE or heuristic_type is None:
             self.heuristic_type = HEURISTIC_TYPE["manhattan"]
         else:
@@ -188,7 +189,9 @@ class SippPlanner(SippGraph):
                 goal_reached = False
                 goal_state   = None
                 goal_cost = float('inf')
-                while open_heap and not goal_reached:
+                low_level_iterations = 0
+                while open_heap and not goal_reached and low_level_iterations < self.sipp_max_iterations:
+                    low_level_iterations += 1
                     _, _, current = heapq.heappop(open_heap)
                     current_state_key = (current.position, current.interval)
                     if current_state_key in closed_set:

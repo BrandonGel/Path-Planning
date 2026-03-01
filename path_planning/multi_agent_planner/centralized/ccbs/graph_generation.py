@@ -120,7 +120,7 @@ class Constraints(object):
             " MC: " + str([str(mc) for mc in self.move_constraints])
 
 class Environment(SippBaseEnvironment):
-    def __init__(self, graph_map: GraphSampler,dynamic_obstacles:dict = {},agents:list = [],sipp_max_iterations=-1,radius:float = 0.0,velocity:float = 0.0,use_constraint_sweep:bool = True,heuristic_type : str = 'manhattan',time_limit: float | None = None, max_iterations: int | None = None,verbose: bool = False):
+    def __init__(self, graph_map: GraphSampler,dynamic_obstacles:dict = {},agents:list = [],sipp_max_iterations=10000,radius:float = 0.0,velocity:float = 0.0,use_constraint_sweep:bool = True,heuristic_type : str = 'manhattan',time_limit: float | None = None, max_iterations: int | None = None,verbose: bool = False):
         self.agents = agents
         self.agent_dict = {}
         self.make_agent_dict()

@@ -16,7 +16,7 @@ class IEnvironment(Environment):
         self,
         graph_map,
         agents,
-        astar_max_iterations=-1,
+        astar_max_iterations=10000,
         radius=0.0,
         velocity=0.0,
         use_constraint_sweep=True,

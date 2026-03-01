@@ -101,7 +101,7 @@ class Constraints(object):
             "EC: " + str([str(ec) for ec in self.edge_constraints])
 
 class Environment(object):
-    def __init__(self, graph_map:GraphSampler, agents, astar_max_iterations=-1, radius = 0.0, velocity = 0.0, use_constraint_sweep=True,heuristic_type: str = 'manhattan'):
+    def __init__(self, graph_map:GraphSampler, agents, astar_max_iterations=10000, radius = 0.0, velocity = 0.0, use_constraint_sweep=True,heuristic_type: str = 'manhattan'):
         self.graph_map = graph_map
         if radius > 0:
             self.graph_map.set_constraint_sweep()
@@ -337,6 +337,7 @@ class CBS(object):
         success = False
         start = HighLevelNode()
         start.constraint_dict = {}
+        solution = {}
         solution_info = {}
 
         for agent in self.env.agent_dict.keys():
@@ -351,7 +352,7 @@ class CBS(object):
             solution_info["runtime"] = self.total_time
             solution_info["total_iterations"] = self.total_iterations
             solution_info["success"] = success
-            return {},solution_info
+            return solution,solution_info
 
         start.cost = sum(start.solution_cost.values())
 
@@ -419,7 +420,7 @@ class CBS(object):
         solution_info["runtime"] = self.total_time
         solution_info["total_iterations"] = self.total_iterations
         solution_info["success"] = success
-        return {},solution_info
+        return solution,solution_info
 
     def _get_state_key(self, node):
         """Generate a hashable state key for closed set checking."""
