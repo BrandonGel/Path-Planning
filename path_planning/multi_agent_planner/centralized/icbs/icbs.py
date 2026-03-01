@@ -125,6 +125,7 @@ class ICBS(CBS):
         success = False
         start = HighLevelNode()
         start.constraint_dict = {}
+        solution = {}
         solution_info = {}
         for agent in self.env.agent_dict.keys():
             start.constraint_dict[agent] = Constraints()
@@ -138,7 +139,7 @@ class ICBS(CBS):
             solution_info["runtime"] = self.total_time
             solution_info["total_iterations"] = self.total_iterations
             solution_info["success"] = success
-            return {},solution_info
+            return solution,solution_info
 
         start.cost = sum(start.solution_cost.values())
 

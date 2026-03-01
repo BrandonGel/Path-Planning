@@ -127,7 +127,7 @@ class Environment(SippBaseEnvironment):
         SippBaseEnvironment.__init__(self, graph_map, dynamic_obstacles,agents,radius,velocity,use_constraint_sweep,heuristic_type,time_limit,max_iterations,verbose)
         assert radius > 0, "Radius must be greater than 0 for CCBS"
         assert velocity > 0, "Velocity must be greater than 0 for CCBS"
-        self.sipp = SIPP(self, max_iterations=sipp_max_iterations,verbose=verbose)
+        self.sipp = SIPP(self, sipp_max_iterations=sipp_max_iterations, verbose=verbose)
         self.collision_radius = (2 * radius) ** 2
         self.constraints = Constraints()
         self.constraint_dict = {agent["name"]: Constraints() for agent in agents}
