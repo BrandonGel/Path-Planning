@@ -21,6 +21,22 @@ from multiprocessing import Pool, cpu_count
 import shutil
 import copy
 
+
+def _to_native_yaml(obj):
+    """Convert numpy scalars/arrays in nested structures to native Python for YAML serialization."""
+    if isinstance(obj, dict):
+        return {k: _to_native_yaml(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_to_native_yaml(v) for v in obj]
+    if isinstance(obj, (np.floating, np.float32, np.float64)):
+        return float(obj)
+    if isinstance(obj, (np.integer, np.int32, np.int64)):
+        return int(obj)
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    return obj
+
+
 def shuffle_agents_goals(inpt: Dict, agent_goal_index: List[int]) -> Dict:
     """
     Shuffle the goals of the agents.
@@ -156,11 +172,11 @@ def gen_input(
 
     return input_dict
 
-def create_map(param: Dict, ground_truth_path: Path):
+def create_map(param: Dict, ground_truth_path: Path, generate_new_graph: bool = False):
     bounds = param["map"]["bounds"]
     resolution = param["map"]["resolution"]
     graph_file = ground_truth_path / "graph_sampler.pkl"
-    if graph_file.exists():
+    if graph_file.exists() and not generate_new_graph:
         map_ = GraphSampler(bounds=bounds, resolution=resolution, start=[], goal=[])
         map_.load_graph_sampler(graph_file)
     else:
@@ -225,36 +241,40 @@ def process_single_case_map_generation(args: Tuple) -> Optional[int]:
     Returns:
         case_id on success, None on failure
     """
-    case_id, path, config = args
+    case_id, path, config,generate_new_graph = args
     case_path = path / f"case_{case_id}"
     roadmap_path = case_path / config.get("road_map_type", "grid")
     roadmap_path.mkdir(parents=True, exist_ok=True)
     input_file = roadmap_path / "input.yaml"
 
-    inpt = gen_input(
-        bounds=config.get("bounds", [[0, 32.0], [0, 32.0]]),
-        nb_obstacles=config.get("nb_obstacles", 0.1),
-        nb_agents=config.get("nb_agents", 4),
-        resolution=config.get("resolution", 1.0),
-        max_iterations=config.get("max_iterations", 10000),
-        time_limit=config.get("time_limit", 60),
-        road_map_type=config.get("road_map_type", "grid"),
-        discrete_space=config.get("use_discrete_space", True),
-        sample_num=config.get("sample_num", 0),
-        num_neighbors=config.get("num_neighbors", 4.0),
-        min_edge_len=config.get("min_edge_len", 1e-10),
-        max_edge_len=config.get("max_edge_len", 1 + 1e-10),
-    )
-    if inpt is None:
-        return None
-    with open(input_file, "w") as f:
-        yaml.safe_dump(inpt, f)
-
+    if generate_new_graph or not input_file.exists():
+        inpt = gen_input(
+            bounds=config.get("bounds", [[0, 32.0], [0, 32.0]]),
+            nb_obstacles=config.get("nb_obstacles", 0.1),
+            nb_agents=config.get("nb_agents", 4),
+            resolution=config.get("resolution", 1.0),
+            max_iterations=config.get("max_iterations", 10000),
+            time_limit=config.get("time_limit", 60),
+            road_map_type=config.get("road_map_type", "grid"),
+            discrete_space=config.get("use_discrete_space", True),
+            sample_num=config.get("sample_num", 0),
+            num_neighbors=config.get("num_neighbors", 4.0),
+            min_edge_len=config.get("min_edge_len", 1e-10),
+            max_edge_len=config.get("max_edge_len", 1 + 1e-10),
+        )
+        with open(input_file, "w") as f:
+            yaml.safe_dump(_to_native_yaml(inpt), f)
+    else:
+        with open(input_file, "r") as f:
+            inpt = yaml.load(f, Loader=yaml.FullLoader)
+        if inpt is None:    
+            print(f"Failed to load input for case {case_id}")
+            assert False, f"Failed to load input for case {case_id}"
     ground_truth_path = roadmap_path / "ground_truth"
     ground_truth_path.mkdir(parents=True, exist_ok=True)
 
     # Build and save graph once
-    create_map(inpt, ground_truth_path)
+    create_map(inpt, ground_truth_path, generate_new_graph)
 
     # Generate and save permutation agent configs
     nb_permutations = config["nb_permutations"]
@@ -287,14 +307,14 @@ def process_single_case_map_generation(args: Tuple) -> Optional[int]:
         agents_file = perm_path / "agents.yaml"
         perm_path.mkdir(parents=True, exist_ok=True)
         with open(agents_file, "w") as f:
-            yaml.safe_dump({"agents": agents_shuffled}, f)
+            yaml.safe_dump(_to_native_yaml({"agents": agents_shuffled}), f)
 
         total_attempts += 1
         start_goal_index = np.random.permutation(start_goal_index)
 
     return case_id
 
-def create_maps(path: Path, num_cases: int, config: Dict, num_workers: int = cpu_count()) -> None:
+def create_maps(path: Path, num_cases: int, config: Dict, num_workers: int = cpu_count(), generate_new_graph: bool = False) -> None:
     """
     Generate maps and permutations for all cases (no solving).
     Saves input.yaml, graph_sampler.pkl, and case-level agents/perm_{id}/agents.yaml per case
@@ -304,7 +324,7 @@ def create_maps(path: Path, num_cases: int, config: Dict, num_workers: int = cpu
     path.mkdir(parents=True, exist_ok=True)
     set_global_seed(config.get("seed", 42))
 
-    case_tasks = [(i, path, config) for i in range(num_cases)]
+    case_tasks = [(i, path, config, generate_new_graph) for i in range(num_cases)]
 
     if num_workers > 1 and len(case_tasks) > 1:
         with Pool(processes=num_workers) as pool:
@@ -350,11 +370,11 @@ def process_single_permutation(args: Tuple, delete_failed_path: bool = True) -> 
     # Write input parameters file
     parameters_file = mapf_path / "input.yaml"
     with open(parameters_file, "w") as f:
-        yaml.safe_dump(param, f)
+        yaml.safe_dump(_to_native_yaml(param), f)
 
     solution_file = mapf_path / f"solution_radius{agent_radius}_velocity{agent_velocity}.yaml"
     with open(solution_file, "w") as f:
-        yaml.safe_dump(solution_summary, f)
+        yaml.safe_dump(_to_native_yaml(solution_summary), f)
 
     if not success and mapf_path.exists() and delete_failed_path:
         shutil.rmtree(mapf_path)
@@ -390,13 +410,13 @@ def process_single_case(args: Tuple) -> Tuple[float, float, int]:
     agent_start_goals = dict(zip(agent_start_goals, range(len(agent_start_goals))))
     nb_permutations = config["nb_permutations"]
     nb_permutations_tries = config.get("nb_permutations_tries", nb_permutations * 2)
-    nb_permutations_tries = nb_permutations_tries if not delete_failed_path else nb_permutations
+    nb_permutations_tries = nb_permutations_tries if delete_failed_path else nb_permutations
 
     # Ensure tries >= permutations
     if nb_permutations_tries < nb_permutations:
         print(f"Warning: nb_permutations_tries ({nb_permutations_tries}) < nb_permutations ({nb_permutations})")
         print(f"Setting nb_permutations_tries to {nb_permutations * 2}")
-        nb_permutations_tries = nb_permutations * 2 if not delete_failed_path else nb_permutations
+        nb_permutations_tries = nb_permutations * 2 if delete_failed_path else nb_permutations
 
     # Check max permutations
     max_permutations = math.factorial(2 * config["nb_agents"])
@@ -468,7 +488,6 @@ def process_single_case(args: Tuple) -> Tuple[float, float, int]:
         with open(agents_file, "r") as f:
             agents_shuffled = yaml.load(f, Loader=yaml.FullLoader)["agents"]
 
-
         inpt_copy = copy.deepcopy(inpt)
         inpt_copy["agents"] = agents_shuffled
 
@@ -481,7 +500,7 @@ def process_single_case(args: Tuple) -> Tuple[float, float, int]:
             successful_permutations += 1
         else:
             failed_permutations += 1
-        if (delete_failed_path or not success) and len(perm_ids_unfinished) > 0:
+        if (not delete_failed_path or not success) and len(perm_ids_unfinished) > 0:
             perm_ids_unfinished.pop(0)
 
         start_goal_index = np.random.permutation(start_goal_index)
@@ -521,14 +540,17 @@ def create_solutions(path: Path, num_cases: int, config: Dict, all:bool, num_wor
     # Process cases in parallel
     successful = 0
     failed = 0
-
+    solver_name = config.get("mapf_solver_name", "cbs")
+    agent_radius = config.get("agent_radius", 0.0)
+    agent_velocity = config.get("agent_velocity", 0.0)
+    solution_file_name = f"solution_radius{round(agent_radius, 3)}_velocity{round(agent_velocity, 2)}.yaml"
     if num_workers > 1 and len(case_tasks) > 1:
         with Pool(processes=num_workers) as pool:
             results = []
             for result in tqdm(
                 pool.imap_unordered(process_single_case, case_tasks),
                 total=len(case_tasks),
-                desc="Generating cases",
+                desc=f"{solver_name} {solution_file_name}",
             ):
                 results.append(result)
 
@@ -538,7 +560,7 @@ def create_solutions(path: Path, num_cases: int, config: Dict, all:bool, num_wor
             failed += failed_ratio
     else:
         # Sequential fallback
-        for task in tqdm(case_tasks, desc="Generating cases"):
+        for task in tqdm(case_tasks, desc=f"{solver_name} {solution_file_name}"):
             successful_ratio, failed_ratio, case_id = process_single_case(task)
             successful += successful_ratio
             failed += failed_ratio
@@ -572,5 +594,5 @@ def create_path_parameter_directory(base_path: Path, config: Dict,dump_config: b
 
     if dump_config:
         with open(path / "config.yaml", "w") as f:
-            yaml.safe_dump(config, f)
+            yaml.safe_dump(_to_native_yaml(config), f)
     return path
