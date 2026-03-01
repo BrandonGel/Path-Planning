@@ -11,7 +11,7 @@ def check_time_anomaly(solution,verbose: bool = True):
             no_anomaly = False
     if no_anomaly and verbose:
         print("No time anomaly detected")
-        
+    return no_anomaly
 
 
 def check_velocity_anomaly(solution,is_using_constant_speed: bool = False,verbose: bool = True  ):
@@ -32,6 +32,7 @@ def check_velocity_anomaly(solution,is_using_constant_speed: bool = False,verbos
             no_anomaly = False
     if no_anomaly and verbose:
         print("No velocity anomaly detected")
+    return no_anomaly
 
 
 def check_collision(solution, r, verbose: bool = True):
