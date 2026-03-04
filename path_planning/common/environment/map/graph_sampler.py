@@ -552,7 +552,49 @@ class GraphSampler(Grid):
         self.edges, self.edge_indices_dict,self.edge_weights  = self.calculate_edges(planar_map,edge_weights)
         return planar_map
 
-    def generate_custom_roadmap(self, nodes_indices: List[int],edge_indices: List[Tuple[int,int]]):
+    def prune_graph_sampler(self,prune_nodes_indices: List[int],prune_edges_indices: List[Tuple[int,int]], prune_edge_weights: List[float]):
+        return
+
+    def generate_custom_nodes(self,points: List[int]):
+        num_nodes = 0
+        nodes = []
+        for ii in range(len(points)):
+            pos = points[ii]
+            if self.use_discrete_space:
+                pixel = tuple(self.world_to_map(pos)) # Convert to discrete space but not into int
+            else:
+                pixel = tuple(pos)
+            node = Node(pos,None,0,0)
+            if self.is_expandable(tuple(pixel)):
+                nodes.append(node)
+                self.node_index_dict[node] = len(nodes) - 1
+                num_nodes += 1
+        if len(nodes) < len(points):
+            print(f"Warning: number of nodes is less than number of points")
+        for start in self.start:
+            node = Node(tuple(start),None,0,0)
+            if node in self.node_index_dict:
+                self.start_nodes_index[node] = self.node_index_dict[node]
+                continue
+            nodes.append(node)
+            self.node_index_dict[node] = len(nodes) - 1
+            self.start_nodes_index[node] = len(nodes) - 1
+        for goal in self.goal:
+            node = Node(tuple(goal),None,0,0)
+            if node in self.node_index_dict:
+                self.goal_nodes_index[node] = self.node_index_dict[node]
+                continue
+            nodes.append(node)
+            self.node_index_dict[node] = len(nodes) - 1
+            self.goal_nodes_index[node] = len(nodes) - 1
+        
+        # Update total node count after all nodes are added
+        self.num_total_nodes = len(nodes)
+        self.cost_matrix = cdist(np.array([node.current for node in nodes]), np.array([node.current for node in nodes]), metric='euclidean')
+        self.nodes = nodes
+        return nodes
+
+    def generate_custom_roadmap(self,edge_indices: List[Tuple[int,int]]):
         road_map = [[] for ii in range(len(self.nodes))]
         edge_weights = [[] for ii in range(len(self.nodes))]
         edge_list = {}
@@ -690,6 +732,9 @@ class GraphSampler(Grid):
         with open(path, 'rb') as f:
             data = pickle.load(f)
 
+        self._load_from_dict(data)
+
+    def _load_from_dict(self, data: dict):
         self.use_discrete_space = data["use_discrete_space"]
         self.set_start(data["start"])
         self.set_goal(data["goal"])
@@ -708,9 +753,9 @@ class GraphSampler(Grid):
         # Set up node index dict
         self.node_index_dict = {node: i for i, node in enumerate(self.nodes)}
         self.cost_matrix = cdist(np.array([node.current for node in self.nodes]), np.array([node.current for node in self.nodes]), metric='euclidean')
-        self.start_nodes_index = {node: i for i, node in enumerate(self.nodes) if node.current in self.start}
-        self.goal_nodes_index = {node: i for i, node in enumerate(self.nodes) if node.current in self.goal}
-        self.grid_nodes_index = {node: i for i, node in enumerate(self.nodes) if node.current in self.grid_points}
+        self.start_nodes_index = {Node(tuple(start),None,0,0):self.node_index_dict[Node(tuple(start),None,0,0)] for start in self.start}
+        self.goal_nodes_index = {Node(tuple(goal),None,0,0):self.node_index_dict[Node(tuple(goal),None,0,0)] for goal in self.goal}
+        self.grid_nodes_index = {Node(tuple(grid_point),None,0,0):self.node_index_dict[Node(tuple(grid_point),None,0,0)] for grid_point in self.grid_points}
 
         # Calculate edges (must happen before get_start/goal_nodes_with_all_edges)
         self.road_map = data["road_map"]
@@ -729,6 +774,94 @@ class GraphSampler(Grid):
 
         points = np.array([samp.current for samp in self.nodes])
         self.sample_kd_tree = KDTree(points)
+
+    def create_pruned_copy(self, kept_node_indices: np.ndarray):
+        """
+        Create a pruned copy of the current GraphSampler that only contains
+        the nodes whose indices are in kept_node_indices and edges between them.
+        """
+        if kept_node_indices is None or len(kept_node_indices) == 0:
+            raise ValueError("kept_node_indices must be a non-empty array of node indices.")
+
+        kept_node_indices = np.asarray(kept_node_indices, dtype=int)
+        kept_set = set(int(i) for i in kept_node_indices.tolist())
+        sorted_kept = sorted(kept_set)
+
+        # Mapping from old node index -> new node index
+        old_to_new = {old_idx: new_idx for new_idx, old_idx in enumerate(sorted_kept)}
+
+        # Pruned nodes (preserve order according to sorted_kept)
+        pruned_nodes = [self.nodes[old_idx] for old_idx in sorted_kept]
+
+        # Pruned grid points: only keep grid nodes whose indices remain
+        pruned_grid_points = []
+        for grid_node, idx in self.grid_nodes_index.items():
+            if idx in kept_set:
+                pruned_grid_points.append(grid_node.current)
+
+        # Edges and edge weights restricted to kept nodes
+        pruned_road_map = []
+        pruned_road_map_edge_weights = []
+        has_edge_weights = self.road_map_edge_weights is not None and len(self.road_map_edge_weights) > 0
+
+        for old_i in sorted_kept:
+            neighbors = []
+            weights = []
+            if old_i < len(self.road_map):
+                for nbr_idx, old_j in enumerate(self.road_map[old_i]):
+                    if old_j in kept_set:
+                        neighbors.append(old_to_new[old_j])
+                        if has_edge_weights:
+                            weights.append(self.road_map_edge_weights[old_i][nbr_idx])
+            pruned_road_map.append(neighbors)
+            if has_edge_weights:
+                pruned_road_map_edge_weights.append(weights)
+
+        if not has_edge_weights:
+            pruned_road_map_edge_weights = [[] for _ in pruned_road_map]
+
+        # Determine how many non start/goal nodes remain (treat grid_points as non start/goal)
+        # This mirrors how num_total_nodes is tracked: sample_num + len(start) + len(goal).
+        pruned_sample_num = len(pruned_grid_points)
+
+        pruned_data = {
+            "start": self.start,
+            "goal": self.goal,
+            "sample_num": pruned_sample_num,
+            "num_neighbors": self.num_neighbors,
+            "min_edge_length": self.min_edge_length,
+            "max_edge_length": self.max_edge_length,
+            "use_discrete_space": self.use_discrete_space,
+            "grid_points": pruned_grid_points,
+            "nodes": pruned_nodes,
+            "obstacles": self.obstacles,
+            "inflation_radius": self.inflation_radius,
+            "track_with_link": self.track_with_link,
+            "road_map": pruned_road_map,
+            "road_map_edge_weights": pruned_road_map_edge_weights,
+            "use_constraint_sweep": self.use_constraint_sweep,
+            "record_sweep": self.record_sweep,
+            "use_exact_collision_check": self.use_exact_collision_check,
+        }
+
+        # Create a new GraphSampler instance with the same geometric configuration
+        resolution = getattr(self, "resolution", 1.0)
+        pruned_sampler = GraphSampler(
+            bounds=self.bounds,
+            resolution=resolution,
+            start=[],
+            goal=[],
+            sample_num=0,
+            num_neighbors=self.num_neighbors,
+            min_edge_len=self.min_edge_length,
+            max_edge_len=self.max_edge_length,
+            use_discrete_space=self.use_discrete_space,
+            use_constraint_sweep=self.use_constraint_sweep,
+            record_sweep=self.record_sweep,
+            use_exact_collision_check=self.use_exact_collision_check,
+        )
+        pruned_sampler._load_from_dict(pruned_data)
+        return pruned_sampler
 
 
     def plan(self):

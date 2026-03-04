@@ -169,16 +169,16 @@ class CCBS(object):
         plan = {}
         for agent, path in solution.items():
             path_dict_list = []
-            for state, action in zip(path, solution_action_cost[agent]):
+            for i, (state, action) in enumerate(zip(path, solution_action_cost[agent])):
                 wait_time, move_time = action
                 if len(state.position) == 2:
+                    path_dict_list.append({'t':state.time, 'x':state.position[0], 'y':state.position[1]})
                     if wait_time > 0:
                         path_dict_list.append({'t':state.time+wait_time, 'x':state.position[0], 'y':state.position[1]})
-                    path_dict_list.append({'t':state.time+wait_time+move_time, 'x':state.position[0], 'y':state.position[1]})
                 elif len(state.position) == 3:
+                    path_dict_list.append({'t':state.time, 'x':state.position[0], 'y':state.position[1], 'z':state.position[2]})
                     if wait_time > 0:
                         path_dict_list.append({'t':state.time+wait_time, 'x':state.position[0], 'y':state.position[1], 'z':state.position[2]})
-                    path_dict_list.append({'t':state.time+wait_time+move_time, 'x':state.position[0], 'y':state.position[1], 'z':state.position[2]})
                 else:
                     raise ValueError(f"Invalid position dimension: {len(state.position)}")
             plan[agent] = path_dict_list

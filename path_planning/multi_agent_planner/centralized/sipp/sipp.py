@@ -88,6 +88,18 @@ class SippPlanner(SippGraph):
             return None
         return arrive_t
 
+    def check_goal_safe_forever(self, successor,depart_t):
+        goal_pos = successor.position
+        goal_t = successor.time
+        goal_vertex_safe_forever = self.sipp_graph[goal_pos].is_in_safe_interval(goal_t,float('inf'))
+        neighbour_list = self.get_valid_neighbours(goal_pos)
+        edge_safe_forever = True
+        for neighbour_pos in neighbour_list:
+            edge_safe_forever &= self.sipp_graph[(neighbour_pos,goal_pos)].is_in_safe_interval(depart_t,float('inf'))
+            if not edge_safe_forever:
+                break
+        return goal_vertex_safe_forever and edge_safe_forever
+
     def get_successors(self, state):
         successors = []
         costs = []
@@ -161,6 +173,7 @@ class SippPlanner(SippGraph):
         best_solution_cost = float('inf')
         best_success = False
         iterations = 0
+        self.max_iterations = len(self.agents)
         for _ in range(self.max_iterations):
             self.shuffle_agents()
             self.reset_graph()
@@ -171,6 +184,9 @@ class SippPlanner(SippGraph):
                 start = tuple(agent["start"])
                 goal = tuple(agent["goal"])
 
+                if len(self.sipp_graph[start].interval_list) == 0 or len(self.sipp_graph[goal].interval_list) == 0:
+                    success = False
+                    break
                 initial_state = State(start, 0, self.sipp_graph[start].interval_list[0])
                 initial_state_key = (start, initial_state.interval)
 
@@ -210,7 +226,11 @@ class SippPlanner(SippGraph):
                             came_from[succ_key]  = current
                             g_score[succ_key] = tentative_g_score
                             action_cost[succ_key] = time_taken
+                            
                             if successor.position == goal:
+                                goal_safe_forever = self.check_goal_safe_forever(successor,current.time)
+                                if not goal_safe_forever:
+                                    continue
                                 if self.verbose:
                                     print("Plan successfully calculated!!")
                                 goal_reached = True

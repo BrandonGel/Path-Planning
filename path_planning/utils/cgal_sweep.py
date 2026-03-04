@@ -289,7 +289,6 @@ class CGAL_Sweep:
             # Query R-tree for edges whose bounding boxes overlap with query point
             candidate_edge_indices = list(self.edge_rtree.intersection(query_bbox))
             # Check exact distance for candidate edges
-            # overlapping_edges = {self.edge_indices[edge_idx]: (0, float('inf')) for edge_idx in candidate_edge_indices if squared_distance(traversal_seg, self.edges[edge_idx])**0.5 < r}
 
             if get_time_interval:
                 candidate_edge_indices = np.array([edge_idx for edge_idx in candidate_edge_indices if squared_distance(traversal_seg, self.edges[edge_idx])**0.5 < r], dtype=int)
@@ -320,9 +319,10 @@ class CGAL_Sweep:
                 L = np.linalg.norm(a_to_b, axis=1)
                 lower_s = s_start*L
                 upper_s = s_end*L
-                lower_t = - lower_s/velocity if velocity != 0.0 else - lower_s/L
-                upper_t= lower_t
-                overlapping_edges = {(src_indices[ii], tgt_indices[ii]): (float(lower_t[ii]), float(upper_t[ii])) for ii in range(len(candidate_edge_indices))}
+                lower_ta =  - lower_s/velocity if velocity != 0.0 else - lower_s/L
+                lower_tb =  - upper_s/velocity if velocity != 0.0 else  - upper_s/L
+                lower_t = np.minimum(lower_ta, lower_tb)
+                overlapping_edges = {(src_indices[ii], tgt_indices[ii]): (float(lower_t[ii]), float('inf')) for ii in range(len(candidate_edge_indices))}
             else:
                 candidate_edge_indices = np.array(candidate_edge_indices, dtype=int)
                 src_indices = np.array([self.edge_indices[i][0] for i in candidate_edge_indices], dtype=int)
@@ -478,18 +478,24 @@ class CGAL_Sweep:
                 start_seg_pos = np.where(all_starts < 0, get_seg_proj(tau_start, a_to_b, seg_len_sq), start_seg_pos)
                 end_seg_pos = np.where(all_ends > tdur, get_seg_proj(tau_end, a_to_b, seg_len_sq), end_seg_pos)
 
-                no_collision = (tau_start >= tau_end) | (all_starts == np.inf)
+                no_collision = np.atleast_1d((tau_start >= tau_end) | (all_starts == np.inf))
                 tau_start[no_collision], tau_end[no_collision] = np.nan, np.nan
                 start_seg_pos[no_collision], end_seg_pos[no_collision] = np.nan, np.nan
 
                 L = np.linalg.norm(a_to_b, axis=1)
                 lower_s = start_seg_pos*L
                 upper_s = end_seg_pos*L
-                lower_ta = tau_start - lower_s/velocity if velocity != 0.0 else tau_start - lower_s/L
-                lower_tb = tau_end - upper_s/velocity if velocity != 0.0 else tau_end - upper_s/L
+                lower_ta =  - lower_s/velocity if velocity != 0.0 else - lower_s/L
+                lower_tb =  - upper_s/velocity if velocity != 0.0 else  - upper_s/L
                 lower_t = np.minimum(lower_ta, lower_tb)
-                upper_t= np.maximum(0, lower_tb,lower_tb)
-                overlapping_edges = {(src_indices[ii], tgt_indices[ii]): (float(lower_t[ii]), float(upper_t[ii])) for ii in range(len(candidate_edge_indices)) if not no_collision[ii]}
+                # lower_ta = tau_start - lower_s/velocity if velocity != 0.0 else tau_start - lower_s/L
+                # lower_tb = tau_end - upper_s/velocity if velocity != 0.0 else tau_end - upper_s/L
+                # lower_t = np.minimum(lower_ta, lower_tb)
+                # upper_t= np.maximum(0, lower_tb,lower_tb)
+                # upper_t= np.maximum(0, lower_tb,lower_tb)
+                # overlapping_edges = {(src_indices[ii], tgt_indices[ii]): (float(lower_t[ii]), float(upper_t[ii])) for ii in range(len(candidate_edge_indices)) if not no_collision[ii]}
+                upper_t = tdur
+                overlapping_edges = {(src_indices[ii], tgt_indices[ii]): (float(lower_t[ii]), float(upper_t)) for ii in range(len(candidate_edge_indices)) if not no_collision[ii]}
             else:
                 candidate_edge_indices = np.array(candidate_edge_indices, dtype=int)
                 src_indices = np.array([self.edge_indices[i][0] for i in candidate_edge_indices], dtype=int)

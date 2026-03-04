@@ -41,12 +41,6 @@ from multiprocessing import cpu_count
 import random
 import numpy as np
 
-# Set seeding so that randomness is deterministic
-random.seed(0)
-np.random.seed(0)
-
-
-
 if __name__ == "__main__":
     """Main entry point for dataset generation."""
 

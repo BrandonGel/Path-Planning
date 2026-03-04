@@ -9,6 +9,7 @@ from path_planning.multi_agent_planner.centralized.lacam.utility import set_star
 from typing import Tuple
 import numpy as np
 import time
+from path_planning.utils.checker import check_collision
 
 def solve_mapf(map_, agents,mapf_solver_config:dict) -> Tuple[dict, float]:
     mapf_solver_name = mapf_solver_config['mapf_solver_name'].lower()
@@ -45,6 +46,10 @@ def solve_mapf(map_, agents,mapf_solver_config:dict) -> Tuple[dict, float]:
         solution, solution_info = ccbs.search()
     else:
         raise ValueError(f"Invalid algorithm: {mapf_solver_name}")
+    if agent_radius != 0 and solution_info["success"]:
+        collisions = check_collision(solution, agent_radius, verbose=False)
+        if collisions:
+            solution_info["success"] = False
     summary = summarize_solution(solution,solution_info,mapf_solver_config)
     return summary
 

@@ -56,7 +56,7 @@ class SippNode(object):
                 # Check for a right remnant
                 if b_end < s_end:
                     interval_list.append((b_end, s_end))
-        self.interval_list = sorted(interval_list)
+        self.interval_list = sorted([(start, end) for start, end in interval_list if end-start > 1e-6])
 
     def is_in_safe_interval(self, depart_t, arrive_t= None):
         if arrive_t is None:
@@ -184,12 +184,12 @@ class SippGraph(object):
     def update_intervals(self,plans: List[List[State]] | List[State] | State,action_costs: List[List[Tuple[float,float]]] | List[Tuple[float,float]] | Tuple[float,float],dyn_names: List[str]):
         if not plans or len(plans) == 0: return
         for plan,action_cost,dyn_name in zip(plans,action_costs,dyn_names):
-            dyn_plan = []
-            for i in range(len(plan)):
-                dyn_plan.append(State(position=plan[i].position, t=plan[i].time))
-                if action_cost[i][0] > 0:
-                    dyn_plan.append(State(position=plan[i].position, t=plan[i].time + action_cost[i][0]))
-            self.dyn_obstacles[dyn_name] = dyn_plan
+            # dyn_plan = []
+            # for i in range(len(plan)):
+            #     dyn_plan.append(State(position=plan[i].position, t=plan[i].time))
+            #     if action_cost[i][0] > 0:
+            #         dyn_plan.append(State(position=plan[i].position, t=plan[i].time + action_cost[i][0]))
+            # self.dyn_obstacles[dyn_name] = dyn_plan
             # for location in schedule:
             for i in range(len(plan)):
                 location = plan[i]
@@ -223,7 +223,7 @@ class SippGraph(object):
                         for edge_pos, edge_interval in overlapping_edges.items():
                             t_start,t_end = edge_interval
                             t1 = max(0,t+t_start)
-                            t2 = max(0,t0+t_end)                        
+                            t2 = max(0,t0)                        
                             if t1 == 0 and t2 == 0:
                                 continue
                             self.sipp_graph[edge_pos].split_interval(t1, t2)
@@ -245,7 +245,10 @@ class SippGraph(object):
                     
                 else:
                     t1 = t
-                    t2 = t1 + 1 if not last_t else float('inf')
+                    if self.velocity > 0:
+                        t2 = t1 + 1/self.velocity
+                    else:
+                        t2 = t1 + 1 if not last_t else float('inf')
                     self.sipp_graph[position].split_interval(t1, t2,1)
 
     def is_valid_position(self, position):

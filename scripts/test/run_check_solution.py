@@ -1,91 +1,183 @@
-import os
-import yaml
-from pathlib import Path
-import numpy as np
 import argparse
+import os
+from pathlib import Path
+
+import numpy as np
+import yaml
+from multiprocessing import Pool, cpu_count
 from tqdm import tqdm
-from path_planning.utils.checker import check_time_anomaly, check_velocity_anomaly, check_collision
 
-parser = argparse.ArgumentParser()
-parser.add_argument(
-    "-s",
-    "--path",
-    type=str,
-    default="/home/bho36/Dropbox/Team_Path_Planning/brandon_graph_data/test",
-    help="file path with the results from run_all_solvers.py",
-)
-parser.add_argument(
-    "-v",
-    "--verbose",
-    type=bool,
-    default=False,
-    help="verbose",
-)
-args = parser.parse_args()
-base_path = Path(args.path)
-verbose = args.verbose
-# raw_data[map_section][agents_obst_section] = solver -> road_type -> radius -> velocity -> case -> perm -> metrics
-# summary[map_section][agents_obst_section] = road_type/solver -> stats
-raw_data_by_section = {}
-summary_by_section = {}
+from path_planning.utils.checker import check_solution_full
 
-# Loop through the two-level config folder structure
-for config1 in tqdm(sorted(os.listdir(base_path)), desc=f"{base_path}", position=0, leave=True):
-    config1_path = base_path / config1
-    if not config1_path.is_dir():
-        continue
 
-    for config2 in tqdm(sorted(os.listdir(config1_path)), desc=f"{config1_path}", position=1, leave=True):
-        config2_path = config1_path / config2
-        if not config2_path.is_dir():
+def _parse_radius_velocity(sol_file: Path) -> tuple[float, float]:
+    """Extract radius and velocity from a solution filename."""
+    name = sol_file.name
+    radius_str = name.split("radius")[1].split("_")[0]
+    velocity_str = name.split("velocity")[1].split(".")[0]
+    return float(radius_str), float(velocity_str)
+
+
+def check_solution_worker(args):
+    """
+    Worker for multiprocessing.
+
+    Parameters
+    ----------
+    args : tuple
+        (sol_file: Path, radius: float, velocity: float, verbose: bool)
+
+    Returns
+    -------
+    has_anomaly : bool
+    sol_file : Path
+    result : dict | None
+        Result dict from check_solution_full, or {"error": str} on failure.
+    """
+    sol_file, radius, velocity, verbose = args
+    try:
+        with open(sol_file, "r") as f:
+            data = yaml.safe_load(f)
+        if not data or "schedule" not in data:
+            return True, sol_file, {"error": "Missing 'schedule' in YAML"}
+
+        solution = data["schedule"]
+        result = check_solution_full(
+            solution,
+            r=radius,
+            is_using_constant_speed=(velocity != 0),
+            verbose=verbose,
+        )
+
+        has_anomaly = (
+            not result["no_time_anomaly"]
+            or not result["no_velocity_anomaly"]
+            or bool(result["collisions"])
+        )
+        return has_anomaly, sol_file, result
+    except Exception as e:
+        return True, sol_file, {"error": str(e)}
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "-s",
+        "--path",
+        type=str,
+        default="/home/bho36/Dropbox/Team_Path_Planning/brandon_graph_data/test",
+        help="base path with the results from run_all_solvers.py",
+    )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        type=bool,
+        default=False,
+        help="print detailed messages from individual checks",
+    )
+    parser.add_argument(
+        "-solver",
+        "--solver",
+        type=str,
+        default="all",
+        choices=["all", "cbs", "icbs", "lacam", "lacam_random", "sipp", "ccbs"],
+        help="solver to check (all = every solver under perm directories)",
+    )
+    parser.add_argument(
+        "-w",
+        "--num_workers",
+        type=int,
+        default=None,
+        help="number of parallel workers (default: cpu_count())",
+    )
+    args = parser.parse_args()
+
+    base_path = Path(args.path)
+    verbose = args.verbose
+
+    if not base_path.exists():
+        raise FileNotFoundError(f"Base path {base_path} does not exist")
+
+    # Collect all solution files in a single pass
+    all_sol_files = list(base_path.rglob("solution_radius*_velocity*.yaml"))
+    if not all_sol_files:
+        print(f"No solution files found under {base_path}")
+        raise SystemExit(0)
+
+    solver_filter = None if args.solver == "all" else args.solver
+
+    filtered_sol_files = []
+    for f in all_sol_files:
+        # Solver directory is the parent of the solution file
+        solver_name = f.parent.name
+        if solver_filter is not None and solver_name != solver_filter:
             continue
+        filtered_sol_files.append(f)
 
-        raw_data = {}
+    if not filtered_sol_files:
+        print(f"No solution files found for solver={args.solver} under {base_path}")
+        raise SystemExit(0)
 
-        # config2_path / case_{id} / {road_map_type} / ground_truth / perm_{id} / {solver} / solution_radius*_velocity*.yaml
-        for case_name in tqdm(sorted(os.listdir(config2_path)), desc="Case", position=2, leave=False):
-            case_path = config2_path / case_name
-            if not case_path.is_dir() or not case_name.startswith("case_"):
-                continue
+    # Build tasks for workers
+    tasks = []
+    for sol_file in filtered_sol_files:
+        radius, velocity = _parse_radius_velocity(sol_file)
+        tasks.append((sol_file, radius, velocity, verbose))
 
-            for road_map_type in tqdm(sorted(os.listdir(case_path)), desc="Road", position=3, leave=False):
-                road_path = case_path / road_map_type
-                if not road_path.is_dir():
-                    continue
-                gt_path = road_path / "ground_truth"
-                if not gt_path.is_dir():
-                    continue
+    num_workers = args.num_workers if args.num_workers is not None else cpu_count()
+    num_workers = max(1, num_workers)
 
-                for perm_name in tqdm(sorted(os.listdir(gt_path)), desc="Perm", position=4, leave=False):
-                    perm_path = gt_path / perm_name
-                    if not perm_path.is_dir() or not perm_name.startswith("perm_"):
-                        continue
+    print(
+        f"Checking {len(tasks)} solution files "
+        f"for solver={args.solver} with {num_workers} worker(s)..."
+    )
 
-                    for solver in tqdm(sorted(os.listdir(perm_path)), desc="Solver", position=5, leave=False):
-                        solver_path = perm_path / solver
-                        if not solver_path.is_dir():
-                            continue
+    anomalies = []
 
-                        sol_files = list(solver_path.glob("solution_radius*_velocity*.yaml"))
-                        if not sol_files:
-                            continue
+    def handle_result(result, verbose: bool = False):
+        has_anomaly, sol_file, info = result
+        if not has_anomaly:
+            return
+        anomalies.append((sol_file, info))
+        if verbose:
+            print("--------------------------------")
+            print(f"Anomaly detected for {sol_file}")
+            if info is None:
+                print("Unknown error (no info returned)")
+            elif "error" in info:
+                print(f"Error while checking solution: {info['error']}")
+            else:
+                # Interpret anomaly details
+                if not info.get("no_time_anomaly", True):
+                    print("Time anomaly detected")
+                if not info.get("no_velocity_anomaly", True):
+                    print("Velocity anomaly detected")
+                collisions = info.get("collisions", {})
+                if collisions:
+                    print(f"Collision: {collisions}")
+                    # If a collision was found, mark the solution as unsuccessful in-place.
+                    try:
+                        with open(sol_file, "r") as f:
+                            data = yaml.safe_load(f) or {}
+                        if isinstance(data, dict):
+                            data["success"] = False
+                            with open(sol_file, "w") as f:
+                                yaml.safe_dump(data, f)
+                    except Exception as e:
+                        print(f"Warning: failed to update 'success' flag in {sol_file}: {e}")
+            print("--------------------------------")
 
-                        for sol_file in tqdm(sol_files, desc="Files", position=6, leave=False):
-                            radius = sol_file.name.split("radius")[1].split("_")[0]
-                            velocity = sol_file.name.split("velocity")[1].split(".")[0]
-                            with open(sol_file, "r") as f:
-                                data = yaml.safe_load(f)
-                            solution = data['schedule']
+    if num_workers > 1 and len(tasks) > 1:
+        with Pool(processes=num_workers) as pool:
+            for result in tqdm(
+                pool.imap_unordered(check_solution_worker, tasks),
+                total=len(tasks),
+                desc="Checking solutions",
+            ):
+                handle_result(result, verbose=verbose)
+    else:
+        for task in tqdm(tasks, desc="Checking solutions"):
+            result = check_solution_worker(task)
+            handle_result(result, verbose=verbose)
 
-                            no_time_anomaly = check_time_anomaly(solution,verbose)
-                            no_velocity_anomaly = check_velocity_anomaly(solution,is_using_constant_speed=(velocity != 0),verbose=verbose)
-                            collisions = check_collision(solution, float(radius),verbose)
-                            if not no_time_anomaly or not no_velocity_anomaly or not len(collisions) == 0:
-                                print("--------------------------------")
-                                print(f"Anomaly detected for {sol_file}")
-                                print(f"Radius: {radius}, Velocity: {velocity}")
-                                print(f"Time anomaly: { not no_time_anomaly}")
-                                print(f"Velocity anomaly: { not no_velocity_anomaly}")
-                                print(f"Collision: {collisions}")
-                                print("--------------------------------")
-                                collisions = check_collision(solution, float(radius),verbose)
+    print(f"Finished checking. Total anomalies: {len(anomalies)}")

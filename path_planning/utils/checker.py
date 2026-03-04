@@ -122,7 +122,7 @@ def check_collision(solution, r, verbose: bool = True):
                 eps = 1e-9
                 if a < eps:
                     # Relative velocity ~ 0: distance approximately constant over this slice.
-                    if c <= collision_radius_sq + eps:
+                    if c + eps <= collision_radius_sq:
                         # Entire local interval is colliding.
                         local_start, local_end = 0.0, duration
                     else:
@@ -130,7 +130,7 @@ def check_collision(solution, r, verbose: bool = True):
                 else:
                     A = a
                     B = b
-                    C = c - collision_radius_sq
+                    C = c - collision_radius_sq + eps
                     disc = B * B - 4 * A * C
                     if disc < -eps:
                         # No real roots -> always outside or always inside; but since
@@ -183,3 +183,47 @@ def check_solution(solution):
     check_time_anomaly(solution)
     check_velocity_anomaly(solution)
     check_collision(solution, 1.0)
+
+
+def check_solution_full(
+    solution,
+    r: float,
+    is_using_constant_speed: bool = False,
+    verbose: bool = True,
+):
+    """
+    Run all anomaly checks (time, velocity, collision) in one call.
+
+    Parameters
+    ----------
+    solution : dict
+        Mapping agent_name -> list of waypoints {"t", "x", "y"}.
+    r : float
+        Agent radius.
+    is_using_constant_speed : bool, optional
+        Whether to enforce constant speed in `check_velocity_anomaly`.
+    verbose : bool, optional
+        Whether to print detailed messages from the underlying checks.
+
+    Returns
+    -------
+    result : dict
+        {
+            "no_time_anomaly": bool,
+            "no_velocity_anomaly": bool,
+            "collisions": dict,  # as returned by check_collision
+        }
+    """
+    no_time_anomaly = check_time_anomaly(solution, verbose=verbose)
+    no_velocity_anomaly = check_velocity_anomaly(
+        solution,
+        is_using_constant_speed=is_using_constant_speed,
+        verbose=verbose,
+    )
+    collisions = check_collision(solution, r, verbose=verbose)
+
+    return {
+        "no_time_anomaly": no_time_anomaly,
+        "no_velocity_anomaly": no_velocity_anomaly,
+        "collisions": collisions,
+    }

@@ -20,6 +20,8 @@ from tqdm import tqdm
 from multiprocessing import Pool, cpu_count
 import shutil
 import copy
+import math
+from itertools import product
 
 
 def _to_native_yaml(obj):
@@ -63,6 +65,7 @@ def gen_input(
     resolution: float = 1.0,
     max_iterations: int = 10000,
     time_limit: int = 60,
+    agent_radius: float = 0.0,
     ) -> Optional[Dict]:
     """
     Generate random MAPF instance with agents and obstacles.
@@ -75,6 +78,7 @@ def gen_input(
     Returns:
         Dictionary with agent and map configuration, or None if generation fails
     """
+    # TODO: need to modify it for resolution other than 1.0
     map_ = GraphSampler(bounds=bounds, resolution=resolution, start=[], goal=[])
     dimensions = list(map_.shape)
     input_dict = {
@@ -93,9 +97,18 @@ def gen_input(
         "num_neighbors": num_neighbors,
         "min_edge_len": min_edge_len,
         "max_edge_len": max_edge_len,
+        "agent_radius": agent_radius,
+        "resolution": resolution,
     }
-
-    total_cells = dimensions[0] * dimensions[1]
+    total_cells = int(math.prod(dimensions))
+    num_dims = len(dimensions)
+    num_cells_to_inflate = int(agent_radius/0.5)
+    # no_resolution_dimensions = [int(dim*resolution) for dim in dimensions]
+    # total_cells = int(math.prod(no_resolution_dimensions)) 
+    # resolution_cells = int(1/resolution)
+    # resolution_cells_shape = (resolution_cells,) * num_dims
+    # num_resolution_cells = resolution_cells**num_dims
+    # total_cells = int(math.prod(no_resolution_dimensions)) 
     if 0 < nb_obstacles < 1:
         nb_obstacles = int(total_cells * nb_obstacles)
     required_cells = nb_obstacles + 2 * nb_agents  # obstacles + starts + goals
@@ -108,24 +121,20 @@ def gen_input(
     # Use set for O(1) lookup
     occupied_positions = set()
 
+    # TODO: Only for 2D cases
     def get_random_position(
-        exclude_set: set, max_attempts: int = 1000
+        exclude_set: set, max_attempts: int = 1000,
     ) -> Optional[Tuple[int, int]]:
         """Get random position not in exclude set."""
         # For sparse boards, use random sampling
         if len(exclude_set) < total_cells * 0.7:
             for _ in range(max_attempts):
-                pos = (
-                    np.random.randint(0, dimensions[0]),
-                    np.random.randint(0, dimensions[1]),
-                )
+                pos = tuple(np.random.randint(0, dimensions[ii]) for ii in range(num_dims))
                 if pos not in exclude_set:
                     return pos
         else:
             # For dense boards, sample from available positions
-            all_positions = {
-                (x, y) for x in range(dimensions[0]) for y in range(dimensions[1])
-            }
+            all_positions = set(product(*(range(d) for d in dimensions)))
             available = list(all_positions - exclude_set)
             if available:
                 return available[np.random.randint(0, len(available))]
@@ -134,6 +143,7 @@ def gen_input(
 
     # Place obstacles
     obstacles = []
+    # cell_indices = np.unravel_index(np.arange(num_resolution_cells),resolution_cells_shape )
     for _ in range(nb_obstacles):
         obs_pos = get_random_position(occupied_positions)
         if obs_pos is None:
@@ -141,10 +151,23 @@ def gen_input(
                 f"Failed to place all obstacles (placed {len(obstacles)}/{nb_obstacles})"
             )
             return None
-
-        obstacles.append(obs_pos)
+        
         occupied_positions.add(obs_pos)
+        obstacles.append(obs_pos)
         input_dict["map"]["obstacles"].append(obs_pos)
+        # for i in range(num_resolution_cells):
+        #     resolution_obs_pos = tuple(int(cell_indices[j][i] + obs_pos[j]//resolution) for j in range(num_dims))
+        #     obstacles.append(resolution_obs_pos)
+        #     input_dict["map"]["obstacles"].append(resolution_obs_pos)
+    
+    if agent_radius > 0 and num_cells_to_inflate > 0:
+        offset_range = range(-num_cells_to_inflate, num_cells_to_inflate + 1)
+        for obs_pos in obstacles:
+            for offset in product(*(offset_range for _ in range(num_dims))):
+                inflated_obs_pos = tuple(obs_pos[j] + offset[j] for j in range(num_dims))
+                occupied_positions.add(inflated_obs_pos)
+            
+
 
     # Place agents
     for agent_id in range(nb_agents):
@@ -154,6 +177,11 @@ def gen_input(
             print(f"Failed to place agent {agent_id} start position")
             return None
         occupied_positions.add(start_pos)
+        if agent_radius > 0 and num_cells_to_inflate > 0:
+            offset_range = range(-num_cells_to_inflate, num_cells_to_inflate + 1)
+            for offset in product(*(offset_range for _ in range(num_dims))):
+                inflated_obs_pos = tuple(start_pos[j] + offset[j] for j in range(num_dims))
+                occupied_positions.add(inflated_obs_pos)
 
         # Get goal position (can overlap with other goals but not starts/obstacles)
         goal_pos = get_random_position(occupied_positions)
@@ -161,7 +189,14 @@ def gen_input(
             print(f"Failed to place agent {agent_id} goal position")
             return None
         occupied_positions.add(goal_pos)
+        if agent_radius > 0 and num_cells_to_inflate > 0:
+            offset_range = range(-num_cells_to_inflate, num_cells_to_inflate + 1)
+            for offset in product(*(offset_range for _ in range(num_dims))):
+                inflated_obs_pos = tuple(goal_pos[j] + offset[j] for j in range(num_dims))
+                occupied_positions.add(inflated_obs_pos)
 
+        start_pos = tuple(int(start_pos[j]*resolution) for j in range(num_dims))
+        goal_pos = tuple(int(goal_pos[j]*resolution) for j in range(num_dims))
         input_dict["agents"].append(
             {
                 "start": list(start_pos),
@@ -172,10 +207,9 @@ def gen_input(
 
     return input_dict
 
-def create_map(param: Dict, ground_truth_path: Path, generate_new_graph: bool = False):
+def create_map(param: Dict, generate_new_graph: bool = False,graph_file: Path ="graph_sampler.pkl" ):
     bounds = param["map"]["bounds"]
     resolution = param["map"]["resolution"]
-    graph_file = ground_truth_path / "graph_sampler.pkl"
     if graph_file.exists() and not generate_new_graph:
         map_ = GraphSampler(bounds=bounds, resolution=resolution, start=[], goal=[])
         map_.load_graph_sampler(graph_file)
@@ -185,9 +219,12 @@ def create_map(param: Dict, ground_truth_path: Path, generate_new_graph: bool = 
         road_map_type = param["road_map_type"]
         if road_map_type == 'grid':
             map_ = GraphSampler(
-                bounds=bounds, resolution=resolution, start=[], goal=[], use_discrete_space=True
+                bounds=bounds, resolution=resolution, start=[], goal=[], use_discrete_space=True,
+                sample_num=0,
+                min_edge_len=1e-10,
+                max_edge_len=(1+1e-10)*param['resolution'],
+                num_neighbors=4.0
             )
-            map_.set_parameters(sample_num=0, num_neighbors=4.0, min_edge_len=1e-10, max_edge_len=1.1)
         elif road_map_type == 'prm' or road_map_type == 'planar' or road_map_type == 'rrg':
             map_ = GraphSampler(
                 bounds=bounds,
@@ -204,7 +241,7 @@ def create_map(param: Dict, ground_truth_path: Path, generate_new_graph: bool = 
             print("Invalid road map name provided")
         
         map_.set_obstacles(obstacles=obstacles)
-        map_.set_inflation_radius(radius=0)
+        map_.set_inflation_radius(radius=param["agent_radius"]+np.sqrt(2)/2*param["resolution"])
 
         start = [agent["start"] for agent in agents]
         goal = [agent["goal"] for agent in agents]
@@ -241,9 +278,10 @@ def process_single_case_map_generation(args: Tuple) -> Optional[int]:
     Returns:
         case_id on success, None on failure
     """
-    case_id, path, config,generate_new_graph = args
+    case_id, path, config,generate_new_graph,graph_file = args
+    set_global_seed(config.get("seed", 42) + case_id)
     case_path = path / f"case_{case_id}"
-    roadmap_path = case_path / config.get("road_map_type", "grid")
+    roadmap_path = case_path / config.get("road_map_type", "grid")/ f'radius{config.get("agent_radius", 0.0)}'
     roadmap_path.mkdir(parents=True, exist_ok=True)
     input_file = roadmap_path / "input.yaml"
 
@@ -261,6 +299,7 @@ def process_single_case_map_generation(args: Tuple) -> Optional[int]:
             num_neighbors=config.get("num_neighbors", 4.0),
             min_edge_len=config.get("min_edge_len", 1e-10),
             max_edge_len=config.get("max_edge_len", 1 + 1e-10),
+            agent_radius=config.get("agent_radius", 0.0),
         )
         with open(input_file, "w") as f:
             yaml.safe_dump(_to_native_yaml(inpt), f)
@@ -272,9 +311,11 @@ def process_single_case_map_generation(args: Tuple) -> Optional[int]:
             assert False, f"Failed to load input for case {case_id}"
     ground_truth_path = roadmap_path / "ground_truth"
     ground_truth_path.mkdir(parents=True, exist_ok=True)
+    if graph_file is None:
+        graph_file = ground_truth_path / "graph_sampler.pkl"
 
     # Build and save graph once
-    create_map(inpt, ground_truth_path, generate_new_graph)
+    create_map(inpt, generate_new_graph,graph_file)
 
     # Generate and save permutation agent configs
     nb_permutations = config["nb_permutations"]
@@ -322,9 +363,8 @@ def create_maps(path: Path, num_cases: int, config: Dict, num_workers: int = cpu
     """
     path = Path(path)
     path.mkdir(parents=True, exist_ok=True)
-    set_global_seed(config.get("seed", 42))
 
-    case_tasks = [(i, path, config, generate_new_graph) for i in range(num_cases)]
+    case_tasks = [(i, path, config, generate_new_graph,None) for i in range(num_cases)]
 
     if num_workers > 1 and len(case_tasks) > 1:
         with Pool(processes=num_workers) as pool:
@@ -352,6 +392,7 @@ def process_single_permutation(args: Tuple, delete_failed_path: bool = True) -> 
         map_,
         mapf_path,
         mapf_solver_config,
+        solution_name_suffix
     ) = args
 
     # Generate solution
@@ -372,7 +413,7 @@ def process_single_permutation(args: Tuple, delete_failed_path: bool = True) -> 
     with open(parameters_file, "w") as f:
         yaml.safe_dump(_to_native_yaml(param), f)
 
-    solution_file = mapf_path / f"solution_radius{agent_radius}_velocity{agent_velocity}.yaml"
+    solution_file = mapf_path / f"{solution_name_suffix}_radius{round(agent_radius, 3)}_velocity{round(agent_velocity, 2)}.yaml"
     with open(solution_file, "w") as f:
         yaml.safe_dump(_to_native_yaml(solution_summary), f)
 
@@ -390,8 +431,9 @@ def process_single_case(args: Tuple) -> Tuple[float, float, int]:
     Returns:
         Tuple of (successful_ratio, failed_ratio, case_id)
     """
-    case_id, path, config, all, verbose = args
+    case_id, path, config, all, graph_file,verbose = args
     case_path = path / f"case_{case_id}"
+    set_global_seed(config.get("seed", 42) + case_id)
     roadmap_path = case_path / config.get("road_map_type", "grid")
     roadmap_path.mkdir(parents=True, exist_ok=True)
     input_file = roadmap_path / "input.yaml"
@@ -437,13 +479,19 @@ def process_single_case(args: Tuple) -> Tuple[float, float, int]:
     agent_radius = config.get("agent_radius", 0.0)
     agent_velocity = config.get("agent_velocity", 0.0)
     delete_failed_path = config.get("delete_failed_path", False)
+    if graph_file is None:
+        graph_file = ground_truth_path / "graph_sampler.pkl"
+        solution_name_suffix = "solution"
+    else:
+        solution_name_suffix = "solution_" + graph_file.stem
 
     perm_ids_unfinished = []
     if graph_sampler_exists:
         for perm_id in range(nb_permutations):
             perm_path = ground_truth_path / f"perm_{perm_id}"
             mapf_path = perm_path / mapf_solver_name
-            solution_file = mapf_path / f"solution_radius{agent_radius}_velocity{agent_velocity}.yaml"
+            # Use the same rounded naming convention as when writing solution files
+            solution_file = mapf_path / f"{solution_name_suffix}_radius{round(agent_radius, 3)}_velocity{round(agent_velocity, 2)}.yaml"
             if not solution_file.exists():
                 perm_ids_unfinished.append(perm_id)
             else:
@@ -460,8 +508,7 @@ def process_single_case(args: Tuple) -> Tuple[float, float, int]:
     successful_permutations = len(unique_permutations)
     if verbose:
         print(f"Case {case_id}: Started with {nb_permutations-len(perm_ids_unfinished)} permutations (max {nb_permutations_tries} attempts)")
-
-    map_ = create_map(inpt, ground_truth_path)
+    map_ = create_map(inpt, graph_file = graph_file)
 
     mapf_solver_config = {
         "mapf_solver_name": config.get("mapf_solver_name", "cbs"),
@@ -484,15 +531,34 @@ def process_single_case(args: Tuple) -> Tuple[float, float, int]:
         unique_attempts = 0
 
         agents_file = case_path / "agents" / f"perm_{perm_id}" / "agents.yaml"
-        assert agents_file.exists(), f"Agents file {agents_file} does not exist"
-        with open(agents_file, "r") as f:
-            agents_shuffled = yaml.load(f, Loader=yaml.FullLoader)["agents"]
+        if agents_file.exists():
+            with open(agents_file, "r") as f:
+                agents_shuffled = yaml.load(f, Loader=yaml.FullLoader)["agents"]
+        else:
+            # Generate a new (unique) agent permutation for this perm_id, then persist it.
+            while unique_attempts < max_unique_attempts:
+                start_goal_index = np.random.permutation(start_goal_index)
+                perm_key = tuple(start_goal_index.tolist())
+                if perm_key not in unique_permutations:
+                    unique_permutations.add(perm_key)
+                    agents_shuffled = shuffle_agents_goals(inpt, start_goal_index)
+                    break
+                unique_attempts += 1
+            else:
+                raise RuntimeError(
+                    f"Unable to generate a unique permutation for {case_path} after {max_unique_attempts} attempts"
+                )
+
+            perm_path = agents_file.parent
+            perm_path.mkdir(parents=True, exist_ok=True)
+            with open(agents_file, "w") as f:
+                yaml.safe_dump(_to_native_yaml({"agents": agents_shuffled}), f)
 
         inpt_copy = copy.deepcopy(inpt)
         inpt_copy["agents"] = agents_shuffled
 
         mapf_path = ground_truth_path / f"perm_{perm_id}" / mapf_solver_config["mapf_solver_name"]
-        task = (inpt_copy, map_, mapf_path, mapf_solver_config)
+        task = (inpt_copy, map_, mapf_path, mapf_solver_config, solution_name_suffix)
         success = process_single_permutation(task, delete_failed_path=delete_failed_path)
 
         total_attempts += 1
@@ -515,7 +581,7 @@ def process_single_case(args: Tuple) -> Tuple[float, float, int]:
     
     return successful_ratio, failed_ratio, case_id
 
-def create_solutions(path: Path, num_cases: int, config: Dict, all:bool, num_workers: int = cpu_count(), verbose: bool = True):
+def create_solutions(path: Path, num_cases: int, config: Dict, all:bool, num_workers: int = cpu_count(),graph_files: Optional[List[Path]] = None, verbose: bool = True):
     """
     Create multiple MAPF instances and their solutions with parallel processing.
 
@@ -528,13 +594,18 @@ def create_solutions(path: Path, num_cases: int, config: Dict, all:bool, num_wor
     path.mkdir(parents=True, exist_ok=True)
     if verbose:
         print(f"Generating solutions for {num_cases} cases")
-
-    set_global_seed(config.get("seed", 42))
     
+    if graph_files is not None and len(graph_files) > 0:
+        assert len(graph_files) == num_cases, "Number of graph files must match number of cases"
+
     # Prepare case tasks
     case_tasks = []
     for i in range(0, num_cases):
-        task = (i, path, config, all,verbose)
+        if graph_files is not None:
+            graph_file = graph_files[i]
+        else:
+            graph_file = None
+        task = (i, path, config, all, graph_file,verbose)
         case_tasks.append(task)
 
     # Process cases in parallel
