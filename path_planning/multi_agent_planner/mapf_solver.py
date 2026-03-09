@@ -50,7 +50,7 @@ def solve_mapf(map_, agents,mapf_solver_config:dict) -> Tuple[dict, float]:
         collisions = check_collision(solution, agent_radius, verbose=False)
         if collisions:
             solution_info["success"] = False
-    summary = summarize_solution(solution,solution_info,mapf_solver_config)
+    summary = summarize_solution(solution,solution_info,mapf_solver_config,map_)
     return summary
 
 
@@ -115,7 +115,7 @@ def computer_solution_cost(solution:dict):
     all_cost_dict["success"] = success
     return cost_dict, all_cost_dict
 
-def summarize_solution(solution,solution_info,mapf_solver_config):
+def summarize_solution(solution,solution_info,mapf_solver_config,map_):
     agent_cost, total_cost = computer_solution_cost(solution)
     summary = {}
     summary["schedule"] = solution
@@ -128,4 +128,6 @@ def summarize_solution(solution,solution_info,mapf_solver_config):
     summary["time_limit"] = mapf_solver_config["time_limit"]
     summary["max_iterations"] = mapf_solver_config["max_iterations"]
     summary["heuristic_type"] = mapf_solver_config["heuristic_type"]
+    summary["num_nodes"] = len(map_.nodes)
+    summary["num_edges"] = len(map_.edges)
     return summary

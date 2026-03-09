@@ -13,9 +13,9 @@ from path_planning.utils.checker import check_solution_full
 def _parse_radius_velocity(sol_file: Path) -> tuple[float, float]:
     """Extract radius and velocity from a solution filename."""
     name = sol_file.name
-    radius_str = name.split("radius")[1].split("_")[0]
-    velocity_str = name.split("velocity")[1].split(".")[0]
-    return float(radius_str), float(velocity_str)
+    radius = float(str(sol_file).split('radius')[1].split('/')[0])
+    velocity_str = name.split("velocity")[1].split(".yaml")[0]
+    return float(radius), float(velocity_str)
 
 
 def check_solution_worker(args):
@@ -65,7 +65,7 @@ if __name__ == "__main__":
         "-s",
         "--path",
         type=str,
-        default="/home/bho36/Dropbox/Team_Path_Planning/brandon_graph_data/test",
+        default="/home/bho36/Dropbox/Team_Path_Planning/brandon_graph_data/test/",
         help="base path with the results from run_all_solvers.py",
     )
     parser.add_argument(
@@ -99,7 +99,7 @@ if __name__ == "__main__":
         raise FileNotFoundError(f"Base path {base_path} does not exist")
 
     # Collect all solution files in a single pass
-    all_sol_files = list(base_path.rglob("solution_radius*_velocity*.yaml"))
+    all_sol_files = list(base_path.rglob("solution_*.yaml"))
     if not all_sol_files:
         print(f"No solution files found under {base_path}")
         raise SystemExit(0)
@@ -121,7 +121,7 @@ if __name__ == "__main__":
     # Build tasks for workers
     tasks = []
     for sol_file in filtered_sol_files:
-        radius, velocity = _parse_radius_velocity(sol_file)
+        radius,velocity = _parse_radius_velocity(sol_file)
         tasks.append((sol_file, radius, velocity, verbose))
 
     num_workers = args.num_workers if args.num_workers is not None else cpu_count()

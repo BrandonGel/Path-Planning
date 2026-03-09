@@ -78,11 +78,12 @@ if __name__ == "__main__":
     # Array with all algorithms to run
     mapf_solvers = ["cbs", "icbs","lacam","lacam_random", "sipp"]
     # mapf_solvers = ["cbs"]
-    # road_map_types = ["grid","prm", "planar"]    
-    # road_map_types = ["prm", "planar"]    
-    road_map_types = ["grid"]    
-    # agent_radii = [0.0, round(sqrt(2)/4, 3), 1.0]
-    agent_radii = [1.0]
+    road_map_types = ["grid","prm", "planar"]    
+    # road_map_types = ["planar"]    
+    # road_map_types = ["prm"]    
+    # road_map_types = ["grid"]    
+    agent_radii = [0.0, round(sqrt(2)/4, 3), 1.0]
+    # agent_radii = [1.0]
     agent_velocities = [0.0, 1.0]
     # agent_velocities = [0.0]
 
@@ -103,7 +104,7 @@ if __name__ == "__main__":
             'heuristic_type': 'euclidean',
     }
 
-    for num_agents in [16]:
+    for num_agents in [1]:
         # For each road map type: first create maps and permutations, then run all solvers on the same maps
         for road_map_type in road_map_types:
             

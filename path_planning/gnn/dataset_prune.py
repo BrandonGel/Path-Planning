@@ -8,6 +8,7 @@ import numpy as np
 from typing import Dict, List, Tuple, Optional
 from path_planning.multi_agent_planner.mapf_solver import solve_mapf
 from path_planning.common.environment.map.graph_sampler import GraphSampler
+from path_planning.common.environment.node import Node
 from path_planning.utils.util import set_global_seed
 import math
 from tqdm import tqdm
@@ -76,7 +77,7 @@ def get_prune_mechanism(prune_mechanism: dict = None):
 
         def get_prune_value(out:np.ndarray) -> np.ndarray:
             assert isinstance(out, np.ndarray), "out must be a numpy array"
-            threshold = 0
+            threshold = 1.0
             if mode_func is not None:
                 threshold = mode_func(out)
                 if std_scale is not None:
@@ -277,6 +278,162 @@ def normalize_data(map_: GraphSampler):
     
     return data
 
+def heterodata_to_graph_sampler(
+    data: HeteroData,
+    bounds: np.ndarray,
+    resolution: float = 1.0,
+) -> GraphSampler:
+    """
+    Reconstruct a GraphSampler from a PyG HeteroData graph.
+
+    Assumptions:
+    - `data` was produced by `normalize_data(map_)` (or follows the same schema).
+    - `data['node'].x[:, :dims]` are normalized coordinates where normalization used
+      `np.max(bounds)` as in `normalize_data`.
+    - `data['node','to','node'].edge_index` provides node indices (0..N-1).
+
+    This function preserves node ordering so that `edge_index` indices remain valid.
+    """
+    if "node" not in data.node_types:
+        raise ValueError("HeteroData must contain node type 'node'.")
+
+    bounds_arr = np.asarray(bounds)
+    if bounds_arr.ndim != 2 or bounds_arr.shape[1] != 2:
+        raise ValueError("bounds must have shape (dims, 2) like [[min,max], ...].")
+    dims = int(bounds_arr.shape[0])
+
+    x = data["node"].x.detach().cpu().numpy()
+    if x.shape[1] < dims:
+        raise ValueError(f"data['node'].x must have at least {dims} columns for positions.")
+
+    scale = float(np.max(bounds_arr))
+    coords = x[:, :dims] * scale
+    num_nodes = int(coords.shape[0])
+
+    # Identify start/goal nodes via the one-hot columns (if present)
+    start_indices: List[int] = []
+    goal_indices: List[int] = []
+    if x.shape[1] >= dims + 2:
+        start_indices = np.where(x[:, dims] > 0.5)[0].astype(int).tolist()
+        goal_indices = np.where(x[:, dims + 1] > 0.5)[0].astype(int).tolist()
+
+    start = [tuple(coords[i]) for i in start_indices]
+    goal = [tuple(coords[i]) for i in goal_indices]
+
+    # Build Node list preserving order (critical for edge_index alignment)
+    nodes = [Node(tuple(coords[i]), None, 0, 0) for i in range(num_nodes)]
+
+    # Build undirected adjacency and weights (mirror generate_custom_roadmap)
+    road_map: List[List[int]] = [[] for _ in range(num_nodes)]
+    road_map_edge_weights: List[List[float]] = [[] for _ in range(num_nodes)]
+    edge_set = set()
+
+    if ("node", "to", "node") not in data.edge_types:
+        raise ValueError("HeteroData must contain edge type ('node','to','node').")
+    edge_index = data["node", "to", "node"].edge_index.detach().cpu().numpy()
+    if edge_index.shape[0] != 2:
+        raise ValueError("edge_index must have shape (2, E).")
+
+    for u, v in edge_index.T.tolist():
+        u = int(u)
+        v = int(v)
+        if u == v:
+            continue
+        if u < 0 or v < 0 or u >= num_nodes or v >= num_nodes:
+            continue
+        e = (u, v)
+        if e in edge_set or (v, u) in edge_set:
+            continue
+        edge_set.add(e)
+        edge_set.add((v, u))
+
+        w = float(np.linalg.norm(coords[u] - coords[v]))
+        road_map[u].append(v)
+        road_map[v].append(u)
+        road_map_edge_weights[u].append(w)
+        road_map_edge_weights[v].append(w)
+
+    # Treat non-start/goal nodes as sampled/grid points for bookkeeping
+    start_goal_set = set(start_indices) | set(goal_indices)
+    grid_points = [tuple(coords[i]) for i in range(num_nodes) if i not in start_goal_set]
+
+    sampler_data = {
+        "start": start,
+        "goal": goal,
+        "sample_num": len(grid_points),
+        "num_neighbors": 0.0,
+        "min_edge_length": 0.0,
+        "max_edge_length": 0.0,
+        "use_discrete_space": True,
+        "grid_points": grid_points,
+        "nodes": nodes,
+        "obstacles": [],
+        "inflation_radius": 0.0,
+        "track_with_link": False,
+        "road_map": road_map,
+        "road_map_edge_weights": road_map_edge_weights,
+        "use_constraint_sweep": False,
+        "record_sweep": False,
+        "use_exact_collision_check": True,
+    }
+
+    sampler = GraphSampler(bounds=bounds_arr, resolution=resolution, start=[], goal=[])
+    sampler._load_from_dict(sampler_data)
+    return sampler
+
+def unnormalize_data(data: HeteroData, map_: GraphSampler) -> GraphSampler:
+    """
+    Project node features in a HeteroData object back into the GraphSampler.
+
+    This is the inverse of the coordinate scaling done in normalize_data:
+    - data['node'].x[:, :dims] stores normalized positions in [0, 1]
+      (divided by max(map_.bounds)).
+    - Here we rescale them back to world coordinates and write them into
+      the corresponding GraphSampler nodes (in-place).
+
+    Args:
+        data: HeteroData produced by normalize_data(map_) (possibly modified).
+        map_: Original GraphSampler to update.
+
+    Returns:
+        The same GraphSampler instance with updated node coordinates.
+    """
+    dims = map_.dim
+    bounds = np.max(map_.bounds)
+
+    # Extract (possibly modified) normalized positions and unscale
+    x = data["node"].x.detach().cpu().numpy()
+    coords = x[:, :dims] * bounds
+
+    # Update GraphSampler node coordinates to match unnormalized positions
+    for idx, node in enumerate(map_.get_nodes()):
+        node.current = tuple(coords[idx])
+
+    return map_
+
+def prune_map(map_: GraphSampler, prune_value: np.ndarray, k_hop: int = 0) -> GraphSampler:
+    # Get indices with prune_value == 1
+    nodes_idx = np.where(prune_value == 1)[0]
+    # Expand to include neighboring nodes
+    if k_hop > 0:
+        for _ in range(k_hop):
+            nodes_idx_set = set(nodes_idx.tolist())
+            for node_i in nodes_idx:
+                if node_i < len(map_.road_map):
+                    nodes_idx_set.update(map_.road_map[node_i])
+            nodes_idx = np.array(list(nodes_idx_set))
+
+    # Always keep start and goal nodes
+    start_indices = set(map_.start_nodes_index.values())
+    goal_indices = set(map_.goal_nodes_index.values())
+    kept_indices = np.array(
+        list(set(int(i) for i in nodes_idx.tolist()) | start_indices | goal_indices),
+        dtype=int,
+    )
+
+    # Create and save pruned graph sampler
+    pruned_map = map_.create_pruned_copy(kept_indices)
+    return pruned_map, kept_indices
 
 def process_single_case_gnn(
         case_id: int,
@@ -287,6 +444,7 @@ def process_single_case_gnn(
         config: Dict,
         device: torch.device,
         prune_mechanism: dict = None,
+        k_hop: int = 0,
     ) -> int:
     """
     Load graph_sampler.pkl for one case, run GNN inference for each permutation, save predictions.
@@ -305,7 +463,8 @@ def process_single_case_gnn(
     """
     base_path = Path(base_path)
     case_path = base_path / f"case_{case_id}"
-    ground_truth_path = case_path / road_map_type / "ground_truth"
+    agent_radius = round(config.get("agent_radius", 0.0), 3)    
+    ground_truth_path = case_path / road_map_type / f"radius{agent_radius}" / "ground_truth"
     graph_file = ground_truth_path / "graph_sampler.pkl"
     agents_dir = case_path / "agents"
 
@@ -340,7 +499,7 @@ def process_single_case_gnn(
     else:
         pred = out.cpu().numpy()    
 
-    gnn_sampler_path = case_path / road_map_type / "gnn" /gnn_folder_name
+    gnn_sampler_path = case_path / road_map_type / f"radius{agent_radius}" / "gnn" /gnn_folder_name
     gnn_sampler_path.mkdir(parents=True, exist_ok=True)
     np.save(gnn_sampler_path / "predictions.npy", pred)
 
@@ -350,20 +509,8 @@ def process_single_case_gnn(
         prune_value = get_prune_mechanism(prune_mechanism)(pred)
         np.save(gnn_sampler_path / f"predictions_{prune_name}.npy" , prune_value)
 
-        # Get indices with prune_value == 1
-        nodes_idx = np.where(prune_value == 1)[0]
-
-        # Always keep start and goal nodes
-        start_indices = set(map_.start_nodes_index.values())
-        goal_indices = set(map_.goal_nodes_index.values())
-        kept_indices = np.array(
-            list(set(int(i) for i in nodes_idx.tolist()) | start_indices | goal_indices),
-            dtype=int,
-        )
-
-        # Create and save pruned graph sampler
-        pruned_map = map_.create_pruned_copy(kept_indices)
-        pruned_map.save_graph_sampler(str(gnn_sampler_path / f"graph_sampler_{prune_name}.pkl"))
+        map_pruned, kept_indices = prune_map(map_, prune_value, k_hop)
+        map_pruned.save_graph_sampler(str(gnn_sampler_path / f"graph_sampler_{prune_name}_k{k_hop}.pkl"))
 
     return 1
 
@@ -378,6 +525,7 @@ def create_gnn_maps(
     road_map_type: Optional[str] = None,
     verbose: bool = True,
     prune_mechanism: dict = None,
+    k_hop: int = 0,
 ) -> None:
     """
     Load all graph_sampler.pkl under path, normalize to HeteroData, run GNN inference,
@@ -404,7 +552,8 @@ def create_gnn_maps(
     sample_data = None
     for case_id in range(num_cases):
         case_path = path / f"case_{case_id}"
-        ground_truth_path = case_path / road_map_type / "ground_truth"
+        agent_radius = round(map_config.get("agent_radius", 0.0), 3)
+        ground_truth_path = case_path / road_map_type / f"radius{agent_radius}" / "ground_truth"
         graph_file = ground_truth_path / "graph_sampler.pkl"
         agents_dir = case_path / "agents"
         if not graph_file.exists() or not agents_dir.exists():
@@ -443,6 +592,7 @@ def create_gnn_maps(
             config=merged_config,
             device=device,
             prune_mechanism=prune_mechanism,
+            k_hop=k_hop,
         )
         total_perms += n
 

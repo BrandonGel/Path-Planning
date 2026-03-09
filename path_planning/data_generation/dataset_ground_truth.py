@@ -344,7 +344,7 @@ def process_single_case_map_generation(args: Tuple) -> Optional[int]:
 
         perm_id = len(unique_permutations) - 1
         agents_dir = case_path / "agents"
-        perm_path = agents_dir / f"perm_{perm_id}"
+        perm_path = agents_dir / f"radius{config.get('agent_radius', 0.0)}" / f"perm_{perm_id}"
         agents_file = perm_path / "agents.yaml"
         perm_path.mkdir(parents=True, exist_ok=True)
         with open(agents_file, "w") as f:
@@ -405,15 +405,15 @@ def process_single_permutation(args: Tuple, delete_failed_path: bool = True) -> 
     solution_summary = solve_mapf(map_, agents, mapf_solver_config)
     success = solution_summary["success"]
 
-    agent_radius = mapf_solver_config.get("agent_radius", 0.0)
-    agent_velocity = mapf_solver_config.get("agent_velocity", 0.0)
+    agent_velocity = round(mapf_solver_config.get("agent_velocity", 0.0), 2)
 
     # Write input parameters file
     parameters_file = mapf_path / "input.yaml"
-    with open(parameters_file, "w") as f:
-        yaml.safe_dump(_to_native_yaml(param), f)
+    if not os.path.exists(parameters_file):
+        with open(parameters_file, "w") as f:
+            yaml.safe_dump(_to_native_yaml(param), f)
 
-    solution_file = mapf_path / f"{solution_name_suffix}_radius{round(agent_radius, 3)}_velocity{round(agent_velocity, 2)}.yaml"
+    solution_file = mapf_path / f"{solution_name_suffix}_velocity{round(agent_velocity, 2)}.yaml"
     with open(solution_file, "w") as f:
         yaml.safe_dump(_to_native_yaml(solution_summary), f)
 
@@ -434,7 +434,8 @@ def process_single_case(args: Tuple) -> Tuple[float, float, int]:
     case_id, path, config, all, graph_file,verbose = args
     case_path = path / f"case_{case_id}"
     set_global_seed(config.get("seed", 42) + case_id)
-    roadmap_path = case_path / config.get("road_map_type", "grid")
+    agent_radius = round(config.get("agent_radius", 0.0), 3)
+    roadmap_path = case_path / config.get("road_map_type", "grid") / f"radius{agent_radius}"
     roadmap_path.mkdir(parents=True, exist_ok=True)
     input_file = roadmap_path / "input.yaml"
     ground_truth_path = roadmap_path / "ground_truth"
@@ -476,8 +477,8 @@ def process_single_case(args: Tuple) -> Tuple[float, float, int]:
     total_attempts = 0
     perm_id = 0
     mapf_solver_name = config.get("mapf_solver_name", "cbs")
-    agent_radius = config.get("agent_radius", 0.0)
-    agent_velocity = config.get("agent_velocity", 0.0)
+    agent_radius = round(config.get("agent_radius", 0.0), 3)
+    agent_velocity = round(config.get("agent_velocity", 0.0), 2)
     delete_failed_path = config.get("delete_failed_path", False)
     if graph_file is None:
         graph_file = ground_truth_path / "graph_sampler.pkl"
@@ -491,7 +492,7 @@ def process_single_case(args: Tuple) -> Tuple[float, float, int]:
             perm_path = ground_truth_path / f"perm_{perm_id}"
             mapf_path = perm_path / mapf_solver_name
             # Use the same rounded naming convention as when writing solution files
-            solution_file = mapf_path / f"{solution_name_suffix}_radius{round(agent_radius, 3)}_velocity{round(agent_velocity, 2)}.yaml"
+            solution_file = mapf_path / f"{solution_name_suffix}_velocity{round(agent_velocity, 2)}.yaml"
             if not solution_file.exists():
                 perm_ids_unfinished.append(perm_id)
             else:
@@ -530,7 +531,7 @@ def process_single_case(args: Tuple) -> Tuple[float, float, int]:
         max_unique_attempts = 1000
         unique_attempts = 0
 
-        agents_file = case_path / "agents" / f"perm_{perm_id}" / "agents.yaml"
+        agents_file = case_path / "agents" /f"radius{agent_radius}" / f"perm_{perm_id}" / "agents.yaml"
         if agents_file.exists():
             with open(agents_file, "r") as f:
                 agents_shuffled = yaml.load(f, Loader=yaml.FullLoader)["agents"]
@@ -611,10 +612,9 @@ def create_solutions(path: Path, num_cases: int, config: Dict, all:bool, num_wor
     # Process cases in parallel
     successful = 0
     failed = 0
-    solver_name = config.get("mapf_solver_name", "cbs")
-    agent_radius = config.get("agent_radius", 0.0)
-    agent_velocity = config.get("agent_velocity", 0.0)
-    solution_file_name = f"solution_radius{round(agent_radius, 3)}_velocity{round(agent_velocity, 2)}.yaml"
+    solver_name = config.get("mapf_solver_name", "cbs")    
+    agent_velocity = round(config.get("agent_velocity", 0.0), 2)
+    solution_file_name = f"solution_velocity{agent_velocity}.yaml"
     if num_workers > 1 and len(case_tasks) > 1:
         with Pool(processes=num_workers) as pool:
             results = []

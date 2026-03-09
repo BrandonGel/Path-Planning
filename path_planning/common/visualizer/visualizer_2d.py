@@ -133,6 +133,7 @@ class Visualizer2D(BaseVisualizer2D):
                         linewidth: float = 1.0, 
                         node_alpha: float = 1.0,
                         edge_alpha: float = 0.3,
+                        cmap: mcolors.Colormap = None,
                         map_frame: bool = True) -> None:
         """
         Plot the roadmap.
@@ -165,7 +166,7 @@ class Visualizer2D(BaseVisualizer2D):
                     self.ax.plot([x1, x2], [y1, y2], edge_color, linewidth=linewidth, alpha=edge_alpha, zorder=self.zorder['road_map'])
 
         # Plot all nodes
-        self.ax.scatter(x_coords, y_coords, c=node_color, s=node_size, alpha=node_alpha, zorder=self.zorder['road_map'], label='Sample nodes')
+        self.ax.scatter(x_coords, y_coords, c=node_color, s=node_size, alpha=node_alpha, zorder=self.zorder['road_map'], label='Sample nodes', cmap=cmap)
         
         # Plot start nodes (handle both list and single value)
         if hasattr(map_, 'start') and map_.start is not None:

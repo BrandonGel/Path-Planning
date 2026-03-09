@@ -34,11 +34,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("-seed", "--seed", type=int, default=42, help="seed")
     parser.add_argument("-s","--path",type=str, default='/home/bho36/Dropbox/Team_Path_Planning/brandon_graph_data/test', help="input file containing map and obstacles")
-    parser.add_argument("-b","--bounds",type=float, nargs='+', default=[0,32.0,0,32.0], help="bounds of the map as x_min x_max y_min y_max (e.g., 0 32.0 0 32.0)")
-    parser.add_argument("-n","--nb_agents",type=int, default=4, help="number of agents")
-    parser.add_argument("-o","--nb_obstacles",type=float, default=0.1, help="number of obstacles or obstacle density")
+    parser.add_argument("-b","--bounds",type=float, nargs='+', default=[0,64.0,0,64.0], help="bounds of the map as x_min x_max y_min y_max (e.g., 0 32.0 0 32.0)")
+    parser.add_argument("-n","--nb_agents",type=int, default=8, help="number of agents")
+    parser.add_argument("-o","--nb_obstacles",type=float, default=0.05, help="number of obstacles or obstacle density")
     parser.add_argument("-p","--nb_permutations",type=int, default=10, help="number of permutations")
-    parser.add_argument("-pt","--nb_permutations_tries",type=int, default=128, help="number of permutations tries")
+    parser.add_argument("-pt","--nb_permutations_tries",type=int, default=10, help="number of permutations tries")
     parser.add_argument("-r","--resolution",type=float, default=1.0, help="resolution of the map")
     parser.add_argument("-c","--num_cases",type=int, default=25, help="number of cases to generate")
     parser.add_argument("-y","--config",type=str, default='', help="config file to use")
@@ -49,15 +49,17 @@ if __name__ == "__main__":
     parser.add_argument("-dp","--delete_failed_path",type=bool, default=False, help="delete failed path")
 
     parser.add_argument("-prune_mode","--prune_mode",type=str, default='mean', help="prune mode")
-    parser.add_argument("-prune_std_scale","--prune_std_scale",type=float, default=0.5, help="prune std scale")
+    parser.add_argument("-prune_std_scale","--prune_std_scale",type=float, default=0.0, help="prune std scale")
     parser.add_argument("-prune_value","--prune_value",type=float, default=0.5, help="prune value")
     parser.add_argument("-rf","--run_folder",type=str, default="logs/gatv2_compile/wandb/run-20260217_062327-z447mk1j", help="run folder")
     parser.add_argument("-cp_path","--checkpoint_path",type=str, default=None, help="checkpoint path")
     parser.add_argument("-cfg_path","--config_path",type=str, default=None, help="config path")
     parser.add_argument("-run_id","--run_id",type=str, default=None, help="run_id")
+    parser.add_argument("-k","--k_hop",type=int, default=1, help="use k-hop subgraph")
     args = parser.parse_args()
 
     # Convert bounds from flat list to nested list format
+    k_hop = args.k_hop
     if isinstance(args.bounds, list):
         if len(args.bounds) == 2:
             bounds = [[0, args.bounds[1]], [0, args.bounds[0]]]
@@ -85,10 +87,11 @@ if __name__ == "__main__":
     mapf_solvers = ["cbs", "icbs","lacam","lacam_random", "sipp"]
     # mapf_solvers = ["sipp"]
     road_map_types = ["grid","prm", "planar"]    
+    # road_map_types = ["grid"]    
     # road_map_types = ["prm"]    
-    agent_radii = [0, sqrt(2)/4]
+    agent_radii = [0.0, 1.0]
     # agent_radii = [sqrt(2)/4]
-    agent_velocities = [0, 1.0]
+    agent_velocities = [0.0, 1.0]
     # agent_velocities = [1.0]
 
     discrete_config = {
@@ -136,11 +139,12 @@ if __name__ == "__main__":
         else:
             map_config.update(continuous_config)
 
-        path = create_path_parameter_directory(base_path, map_config)
-        graph_files = [path / f"case_{case_id}" / road_map_type / "gnn" /gnn_folder_name/ f"graph_sampler_{prune_name}.pkl" for case_id in range(args.num_cases)]
-        # Phase 2: run each solver on the saved maps
-        for solver in mapf_solvers:
-            for agent_radius in agent_radii:
+        for agent_radius in agent_radii:
+            path = create_path_parameter_directory(base_path, map_config)
+            graph_files = [path / f"case_{case_id}" / road_map_type / f"radius{agent_radius}" / "gnn" /gnn_folder_name/ f"graph_sampler_{prune_name}_k{k_hop}.pkl" for case_id in range(args.num_cases)]
+            # Phase 2: run each solver on the saved maps
+            for solver in mapf_solvers:
+            
                 for agent_velocity in agent_velocities:
                     if 'lacam' in solver and (agent_radius != 0.0 or agent_velocity != 0.0 or road_map_type != "grid"):
                         continue
