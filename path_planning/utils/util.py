@@ -11,6 +11,7 @@ import torch
 import argparse
 from pathlib import Path
 from typing import List
+import random
 
 def convert_to_pixel(x,y):
     pixel_x = int(np.round(x))
@@ -177,6 +178,7 @@ def write_to_yaml(obj, filename: str):
         yaml.safe_dump(output_serializable, f, sort_keys=False)
 
 def set_global_seed(seed: int = 42):
+    random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)

@@ -96,3 +96,61 @@ def load_and_visualize_case(case_path: Path, show_static=True, show_animation=Tr
         temp_filename = f"temp_{case_path.name}_animation.gif"
         vis.animate(temp_filename, map_, schedule, road_map=road_map)
         print(f"Animation saved to: {temp_filename}")
+
+
+def load_and_visualize_solver_case(
+    solver_path: Path,
+    map_,
+    show_static: bool = True,
+    show_animation: bool = False,
+    show: bool = False,
+    map_frame: bool = False,
+):
+    """
+    Load and visualize a single solver result (valid solution only).
+    Used for run_visualize_solvers.py: solution lives in perm_{id}/{solver}/solution_radius*_velocity*.yaml.
+
+    Args:
+        solver_path: Path to the solver directory (contains input.yaml and solution_radius*_velocity*.yaml)
+        map_: GraphSampler instance (e.g. from create_map(..., load_graph_sampler=True))
+        show_static: Whether to plot static paths and save paths.png
+        show_animation: Whether to save an animation GIF
+        show: Whether to show the matplotlib figure
+        map_frame: Whether to use the map frame
+    """
+    sol_files = list(solver_path.glob("solution_radius*_velocity*.yaml"))
+    if not sol_files:
+        raise FileNotFoundError(f"No solution_radius*_velocity*.yaml in {solver_path}")
+    with open(sol_files[0], "r") as f:
+        solution_data = yaml.safe_load(f)
+    if not solution_data.get("success", False):
+        raise ValueError(f"Solution not successful: {solver_path}")
+
+    schedule = solution_data.get("schedule", {})
+    if not schedule:
+        raise ValueError(f"Empty schedule: {solver_path}")
+
+    label = f"{solver_path.parent.parent.name}/{solver_path.name}"
+
+    if show_static:
+        plt.close("all")
+        vis = Visualizer2D(figname=f"{label} - Static Paths", figsize=(8, 8))
+        vis.plot_grid_map(map_)
+        if hasattr(map_, "nodes") and hasattr(map_, "road_map") and map_.nodes and map_.road_map is not None:
+            vis.plot_road_map(map_, map_.nodes, map_.road_map, map_frame=map_frame)
+        for agent_name, trajectory in schedule.items():
+            path = np.array([[p["x"], p["y"]] for p in trajectory])
+            vis.plot_path(path, map_frame=map_frame)
+        plt.title(f"{label} - Static Paths")
+        vis.savefig(solver_path / "paths.png")
+        if show:
+            vis.show()
+        vis.close()
+
+    if show_animation and hasattr(map_, "road_map") and map_.road_map is not None:
+        plt.close("all")
+        vis = Visualizer2D(figsize=(8, 8))
+        combined_schedule = {"schedule": schedule}
+        gif_path = solver_path / "animation.gif"
+        vis.animate(str(gif_path), map_, combined_schedule, road_map=map_.road_map, map_frame=map_frame)
+        vis.close()

@@ -5,47 +5,19 @@ original author: Ashwin Bose (@atb033)
 description: This file implements the Conflict-based search algorithm for multi-agent path planning. Modified from the original implementation to work with the new common environment.
 """
 
-from path_planning.multi_agent_planner.centralized.cbs.cbs import Environment, Constraints, HighLevelNode, CBS,Conflict
 import heapq
 import time
-from path_planning.multi_agent_planner.centralized.icbs.a_star import AStar
-from path_planning.multi_agent_planner.data_type import HEURISTIC_TYPE
+from path_planning.multi_agent_planner.centralized.ccbs.graph_generation import Conflict, Constraints, Environment
+from path_planning.multi_agent_planner.centralized.sipp.graph_generation import SippNode
+from itertools import count, combinations
+from copy import deepcopy
+from path_planning.multi_agent_planner.centralized.ccbs.ccbs import CCBS
+from path_planning.multi_agent_planner.centralized.ccbs.ccbs import HighLevelNode
 
-class IEnvironment(Environment):
+class ICCBS(CCBS):
     def __init__(
         self,
-        graph_map,
-        agents,
-        astar_max_iterations=10000,
-        radius=0.0,
-        velocity=0.0,
-        use_constraint_sweep=True,
-        heuristic_type: str = 'manhattan',
-    ):
-        super().__init__(
-            graph_map,
-            agents,
-            astar_max_iterations,
-            radius,
-            velocity,
-            use_constraint_sweep,
-            heuristic_type,
-        )
-        self.a_star = AStar(self, astar_max_iterations,radius)
-
-    def compute_agent_solution(self, target_agent, curr_solution,curr_solution_cost):
-        self.constraints = self.constraint_dict.setdefault(target_agent, Constraints())
-        local_solution, local_cost = self.a_star.search(target_agent)
-        if not local_solution:
-            return False
-        curr_solution[target_agent] = local_solution
-        curr_solution_cost[target_agent] = local_cost
-        return curr_solution, curr_solution_cost
-
-class ICBS(CBS):
-    def __init__(
-        self,
-        environment: IEnvironment,
+        environment: Environment,
         time_limit: float | None = None,
         max_iterations: int | None = None,
         verbose: bool = False,
@@ -57,8 +29,14 @@ class ICBS(CBS):
                            enforced. If exceeded, the search terminates early
                            and returns an empty solution.
         """
-        super().__init__(environment, time_limit, max_iterations, verbose)
         self.env = environment
+        self.counter = count()
+        self.open_list = []
+        self.closed_set = set()
+        self.time_limit = time_limit
+        self.max_iterations = max_iterations
+        self.verbose = verbose
+        self.get_first_conflict = False
 
     def _get_best_conflict(self, P, conflict_list):
         best_conflict = None
@@ -67,7 +45,7 @@ class ICBS(CBS):
         best_paths = None
 
         for conflict in conflict_list:
-            costs, paths = self.get_conflict_cost(P, conflict)
+            costs, action_costs, paths = self.get_conflict_cost(P, conflict)
             c_vals = list(costs.values())
 
             # Scoring: Cardinal (0), Semi-Cardinal (1), Non-Cardinal (2)
@@ -79,14 +57,16 @@ class ICBS(CBS):
                 best_score = score
                 best_conflict = conflict
                 best_costs = costs
+                best_action_costs = action_costs
                 best_paths = paths
                 if score == 0: break  # Found cardinal, stop
 
-        return best_conflict, best_costs, best_paths, best_score
+        return best_conflict, best_costs, best_action_costs, best_paths, best_score
 
     def get_conflict_cost(self, P: HighLevelNode, conflict: Conflict):
         constraint_dict = self.env.create_constraints_from_conflict(conflict)
         costs = {}
+        action_costs = {}
         paths = {}
         
         # Save original constraint dict to restore after evaluation
@@ -98,8 +78,8 @@ class ICBS(CBS):
             for a in P.constraint_dict.keys():
                 if a == agent:
                     new_constraints = Constraints()
-                    new_constraints.vertex_constraints = P.constraint_dict[a].vertex_constraints.copy()
-                    new_constraints.edge_constraints = P.constraint_dict[a].edge_constraints.copy()
+                    new_constraints.wait_constraints = P.constraint_dict[a].wait_constraints.copy()
+                    new_constraints.move_constraints = P.constraint_dict[a].move_constraints.copy()
                     new_constraints.add_constraint(constraint_dict[agent])
                     temp_constraints[a] = new_constraints
                 else:
@@ -107,64 +87,61 @@ class ICBS(CBS):
 
             self.env.constraint_dict = temp_constraints
             self.env.constraints = self.env.constraint_dict.setdefault(agent, Constraints())
-            path, cost = self.env.a_star.search(agent)
+            path,action_cost,cost = self.env.compute_solution(
+                    affected_agent=agent,
+                    base_solution=P.solution,
+                    base_action_cost=P.solution_action_cost,
+                    base_cost=P.solution_cost,
+                )
+            
             if not path:
                 costs[agent] = float("inf")
+                action_costs[agent] = None
                 paths[agent] = None
             else:
-                costs[agent] = cost - P.solution_cost[agent]
-                paths[agent] = path
+                costs[agent] = cost[agent] - P.solution_cost[agent]
+                action_costs[agent] = action_cost[agent]
+                paths[agent] = path[agent]
         
         # Restore original constraint dict
         self.env.constraint_dict = original_constraint_dict
-        return costs, paths
+        return costs, action_costs, paths
 
     def search(self):
-        st = time.time()
-        iterations = 1
-        success = False
         start = HighLevelNode()
         start.constraint_dict = {}
-        solution = {}
-        solution_info = {}
         for agent in self.env.agent_dict.keys():
-            start.constraint_dict[agent] = Constraints()
+            start.constraint_dict[agent] = deepcopy(Constraints())
 
-        start.solution, start.solution_cost = self.env.compute_solution()
+        start.solution, start.solution_action_cost, start.solution_cost = self.env.compute_solution()
         if not start.solution:
             if self.verbose:
                 print("No initial solution found")
-            self.total_time = min(self.time_limit, time.time() - st) 
-            self.total_iterations = min(self.max_iterations, iterations)
-            solution_info["runtime"] = self.total_time
-            solution_info["total_iterations"] = self.total_iterations
-            solution_info["success"] = success
-            return solution,solution_info
+            return {}
 
         start.cost = sum(start.solution_cost.values())
 
         # Add start node to heap
         heapq.heappush(self.open_list, (start.cost, next(self.counter), start))
+
+        st = time.time()
+        iterations = 0
         while self.open_list:
-            iterations += 1
             if self.time_limit is not None and (time.time() - st) > self.time_limit:
                 if self.verbose:
                     print(
                         f"Search terminated: time limit of {self.time_limit} seconds exceeded."
                     )
-                break
+                return {}
 
             if self.max_iterations is not None and iterations >= self.max_iterations:
                 if self.verbose:
                     print(
                         f"Search terminated: max iterations of {self.max_iterations} reached."
                     )
-                break
+                return {}
 
-            _, _, P = heapq.heappop(self.open_list)
-
-            if P is None:
-                break
+            _, P_counter, P = heapq.heappop(self.open_list)
             state_key = self._get_state_key(P)
             if state_key in self.closed_set:
                 continue
@@ -172,21 +149,14 @@ class ICBS(CBS):
 
             self.env.constraint_dict = P.constraint_dict
 
-            # First improvement, we check all of the conflicts and grab the cardinal conflicts to solve first
-            conflict_list = self.env.get_conflicts(P.solution,get_first_conflict=False)
-
+            conflict_list = self.env.get_conflicts(P.solution, P.solution_action_cost,self.get_first_conflict)
             if not conflict_list:
                 if self.verbose:
                     print("solution found")
-                success = True
-                solution = self.generate_plan(P.solution)
-                break
+                return self.generate_plan(P.solution, P.solution_action_cost)
 
-            # 1. Prioritize Conflicts (Cardinal, Semi, Non)
-            best_conflict, best_costs, best_paths, score = self._get_best_conflict(P, conflict_list)
+            best_conflict, best_costs, best_action_costs, best_paths, score = self._get_best_conflict(P, conflict_list)
 
-            # 2. BYPASS STRATEGY
-            # If any agent can resolve the conflict with 0 cost increase, check for bypass
             bypass_found = False
             for agent, cost_inc in best_costs.items():
                 if cost_inc == 0:
@@ -194,33 +164,30 @@ class ICBS(CBS):
                     temp_constraints = self._get_updated_constraints(P, agent, best_conflict)
                     self.env.constraint_dict = temp_constraints
                     self.env.constraints = self.env.constraint_dict.setdefault(agent, Constraints())
-                    new_path, _ = self.env.a_star.search(agent, solution=P.solution)
-                    
+                    new_path, new_action_cost, _ = self.env.sipp.search(agent,solution=P.solution,solution_action_cost=P.solution_action_cost)
+
                     if new_path:
                         new_node = HighLevelNode()
                         new_node.solution = P.solution.copy()
                         new_node.solution_cost = P.solution_cost.copy()
+                        new_node.solution_action_cost = P.solution_action_cost.copy()
                         new_node.solution[agent] = new_path                        
+                        new_node.solution_action_cost[agent] = new_action_cost
                         new_node.cost = P.cost
                         new_node.constraint_dict = temp_constraints
                         
-                        if len(self.env.get_conflicts(new_node.solution, False)) < len(conflict_list):
+                        if len(self.env.get_conflicts(new_node.solution, new_node.solution_action_cost,self.get_first_conflict)) < len(conflict_list):
                             heapq.heappush(self.open_list, (new_node.cost, next(self.counter), new_node))
                             bypass_found = True
                             break
-            
             if bypass_found:
                 continue
             
-            # Branching (if no bypass)
             self._branch(P, best_conflict, best_costs)
-        self.total_time = min(self.time_limit, time.time() - st) 
-        self.total_iterations = min(self.max_iterations, iterations)
-        solution_info["runtime"] = self.total_time
-        solution_info["total_iterations"] = self.total_iterations
-        solution_info["success"] = success
-        return solution,solution_info
-
+            iterations += 1
+            # if iterations > 30:
+            #     break
+        return {}
 
     def _get_updated_constraints(self, P, agent, conflict):
         """Helper to create a new constraint dictionary for a specific branch/bypass."""
@@ -231,9 +198,9 @@ class ICBS(CBS):
             if a == agent:
                 # Deep copy and add new constraint for the target agent
                 nc = Constraints()
-                nc.vertex_constraints = P.constraint_dict[a].vertex_constraints.copy()
-                nc.edge_constraints = P.constraint_dict[a].edge_constraints.copy()
-                nc.add_constraint(conflict_constraints[agent])
+                nc.wait_constraints = P.constraint_dict[a].wait_constraints.copy()
+                nc.move_constraints = P.constraint_dict[a].move_constraints.copy()
+                nc.add_constraint(conflict_constraints[a])
                 new_constraints_dict[a] = nc
             else:
                 new_constraints_dict[a] = P.constraint_dict[a]
@@ -247,13 +214,20 @@ class ICBS(CBS):
             new_node = HighLevelNode()
             new_node.solution = P.solution.copy()
             new_node.solution_cost = P.solution_cost.copy()
+            new_node.solution_action_cost = P.solution_action_cost.copy()
             new_node.constraint_dict = self._get_updated_constraints(P, agent, conflict)
             
             self.env.constraint_dict = new_node.constraint_dict
+
             # Re-plan only the affected agent
-            res = self.env.compute_agent_solution(agent, new_node.solution, new_node.solution_cost)
+            res = self.env.compute_solution(
+                    affected_agent=agent,
+                    base_solution=P.solution,
+                    base_action_cost=P.solution_action_cost,
+                    base_cost=P.solution_cost,
+                )
             
             if res:
-                new_node.solution, new_node.solution_cost = res
+                new_node.solution, new_node.solution_action_cost, new_node.solution_cost = res
                 new_node.cost = sum(new_node.solution_cost.values())
                 heapq.heappush(self.open_list, (new_node.cost, next(self.counter), new_node))

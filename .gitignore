@@ -210,6 +210,8 @@ __marimo__/
 # Dataset
 benchmark/train
 benchmark/solutions/
+benchmark/sample
+benchmark/all
 logs/
 wandb/
 benchmark/

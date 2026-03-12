@@ -14,6 +14,7 @@ from math import fabs
 from itertools import count,combinations
 import numpy as np
 from path_planning.common.environment.map.graph_sampler import GraphSampler
+from path_planning.multi_agent_planner.data_type import HEURISTIC_TYPE
 
 class Location(object):
     def __init__(self, point:tuple = None):
@@ -100,13 +101,16 @@ class Constraints(object):
             "EC: " + str([str(ec) for ec in self.edge_constraints])
 
 class Environment(object):
-    def __init__(self, graph_map:GraphSampler, agents, astar_max_iterations=-1, radius = 0.0, velocity = 0.0, use_constraint_sweep=True):
+    def __init__(self, graph_map:GraphSampler, agents, astar_max_iterations=10000, radius = 0.0, velocity = 0.0, use_constraint_sweep=True,heuristic_type: str = 'manhattan'):
         self.graph_map = graph_map
         if radius > 0:
             self.graph_map.set_constraint_sweep()
         self.agents = agents
         self.agent_dict = {}
-
+        if heuristic_type not in HEURISTIC_TYPE or heuristic_type is None:
+            self.heuristic_type = HEURISTIC_TYPE["manhattan"]
+        else:
+            self.heuristic_type = HEURISTIC_TYPE[heuristic_type]
         self.make_agent_dict()
 
         self.constraints = Constraints()
@@ -245,7 +249,13 @@ class Environment(object):
 
     def admissible_heuristic(self, state, agent_name):
         goal = self.agent_dict[agent_name]["goal"]
-        return sum([fabs(state.location[i] - goal.location[i]) for i in range(len(state.location))])
+
+        if self.heuristic_type == HEURISTIC_TYPE["manhattan"]:
+            return sum([fabs(state.location[i] - goal.location[i]) for i in range(len(state.location))])
+        elif self.heuristic_type == HEURISTIC_TYPE["euclidean"]:
+            return sum([(state.location[i] - goal.location[i])**2 for i in range(len(state.location))])**0.5
+        else:
+            raise ValueError(f"Invalid heuristic type: {self.heuristic_type}")
 
     def is_at_goal(self, state, agent_name):
         goal_state = self.agent_dict[agent_name]["goal"]
@@ -285,21 +295,6 @@ class Environment(object):
             solution_cost[agent] = local_cost
         return solution, solution_cost
 
-    def compute_solution_cost(self, solution):
-        cost = 0
-        for agent, path in solution.items():
-            path_array = np.array([list(p.values())[1:] for p in path])
-            dist_travel = np.linalg.norm(path_array[1:] - path_array[:-1], axis=1)
-            travel_cost = dist_travel.sum()
-            wait_cost = (dist_travel == 0).sum()
-            cost += travel_cost + wait_cost
-        if isinstance(cost, np.float64) or isinstance(cost, np.float32) or isinstance(cost, np.int64) or isinstance(cost, np.int32):
-            return cost.item()
-        elif isinstance(cost, float) or isinstance(cost, int):
-            return cost
-        else:
-            raise ValueError(f"Invalid cost type: {type(cost)}")
-            
 class HighLevelNode(object):
     def __init__(self):
         self.solution = {}
@@ -330,13 +325,21 @@ class CBS(object):
         self.verbose = verbose
         self.open_list =  []  # for fast membership checks
         self.closed_set = set()
-        self.time_limit = time_limit
-        self.max_iterations = max_iterations
+        self.time_limit = time_limit if time_limit is not None and time_limit > 0 else float('inf')
+        self.max_iterations = max_iterations if max_iterations is not None and max_iterations > 0 else float('inf')
         self.counter = count()
-
+        self.total_time = 0
+        self.total_iterations = 0
+        
     def search(self):
+        st = time.time()
+        iterations = 1
+        success = False
         start = HighLevelNode()
         start.constraint_dict = {}
+        solution = {}
+        solution_info = {}
+
         for agent in self.env.agent_dict.keys():
             start.constraint_dict[agent] = Constraints()
 
@@ -344,26 +347,28 @@ class CBS(object):
         if not start.solution:
             if self.verbose:
                 print("No initial solution found")
-            return {}
+            self.total_time = min(self.time_limit, time.time() - st) 
+            self.total_iterations = min(self.max_iterations, iterations)
+            solution_info["runtime"] = self.total_time
+            solution_info["total_iterations"] = self.total_iterations
+            solution_info["success"] = success
+            return solution,solution_info
 
         start.cost = sum(start.solution_cost.values())
 
         # Add start node to heap
         heapq.heappush(self.open_list, (start.cost, next(self.counter), start))
-
-         
-        st = time.time()
-        iterations = 0
         while self.open_list :
+            iterations += 1
             if self.time_limit is not None and (time.time() - st) > self.time_limit:
                 if self.verbose:
                     print(f"Search terminated: time limit of {self.time_limit} seconds exceeded.")
-                return {}
+                break
 
             if self.max_iterations is not None and iterations >= self.max_iterations:
                 if self.verbose:
-                    print(f"Search terminated: max iterations of {self.max_iterations} reached.")
-                return {}
+                    print(f"Search terminated: max iterations of {self.max_iterations} reached.")                
+                break
 
             _, _, P = heapq.heappop(self.open_list)
 
@@ -380,7 +385,9 @@ class CBS(object):
             if not conflict_dict:
                 if self.verbose:
                     print("solution found")
-                return self.generate_plan(P.solution)
+                success = True
+                solution = self.generate_plan(P.solution)
+                break
             constraint_dict = self.env.create_constraints_from_conflict(conflict_dict)
             for agent in constraint_dict.keys():
                 new_node = HighLevelNode()
@@ -407,8 +414,13 @@ class CBS(object):
                     continue
                 new_node.cost = sum(new_node.solution_cost.values())
                 heapq.heappush(self.open_list, (new_node.cost, next(self.counter), new_node))
-            iterations += 1
-        return {}
+        
+        self.total_time = min(self.time_limit, time.time() - st) 
+        self.total_iterations = min(self.max_iterations, iterations)
+        solution_info["runtime"] = self.total_time
+        solution_info["total_iterations"] = self.total_iterations
+        solution_info["success"] = success
+        return solution,solution_info
 
     def _get_state_key(self, node):
         """Generate a hashable state key for closed set checking."""
@@ -418,6 +430,7 @@ class CBS(object):
             for agent, path in sorted(node.solution.items())
         )
         return solution_tuple
+   
     def generate_plan(self, solution):
         plan = {}
         for agent, path in solution.items():
@@ -431,3 +444,5 @@ class CBS(object):
                     raise ValueError(f"Invalid location dimension: {len(state.location)}")
             plan[agent] = path_dict_list
         return plan
+
+    

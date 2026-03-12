@@ -37,55 +37,6 @@ class HeteroData(HeteroDataBase):
         return {edge_type: getattr(self[edge_type], 'edge_weight', None) 
                 for edge_type in self.edge_index_dict.keys()}
 
-def add_self_loops_to_edge_type(data, edge_type, fill_value=0.0):
-    """
-    Adds self-loops to a specific edge type in a HeteroData object.
-
-    Args:
-        data (HeteroData): The input heterogeneous graph data.
-        edge_type (tuple): The edge type (src_node_type, edge_type, dst_node_type).
-        fill_value (float): The value to use for the self-loop edge attributes.
-    """
-    src_type, rel_type, dst_type = edge_type
-    
-    # 1. Isolate the specific edge type data
-    edge_index = data[edge_type].edge_index
-    
-    # Handle existing edge attributes if they exist
-    edge_attr_name = 'edge_attr' if 'edge_attr' in data[edge_type] else 'edge_weight'
-    edge_attr = data[edge_type][edge_attr_name] if edge_attr_name in data[edge_type] else None
-    
-    # Determine the number of nodes for source and destination types
-    num_src_nodes = data[src_type].num_nodes
-    num_dst_nodes = data[dst_type].num_nodes
-    
-    # Ensure source and destination nodes are the same for self-loops
-    if num_src_nodes != num_dst_nodes:
-        print(f"Cannot add self-loops to asymmetric edge type {edge_type}")
-        return data
-        
-    num_nodes = num_src_nodes
-
-    # 2. Add self-loops
-    # add_self_loops can return edge_attr, so we capture both
-    new_edge_index, new_edge_attr = add_self_loops(
-        edge_index,
-        edge_attr,
-        num_nodes=num_nodes,
-        fill_value=fill_value
-    )
-    
-    # Optionally, coalesce edges to remove duplicates if necessary
-    # (add_self_loops might add duplicate (i, i) if they already exist)
-    new_edge_index, new_edge_attr = coalesce(new_edge_index, new_edge_attr, num_nodes=num_nodes)
-
-    # 3. Update the HeteroData object
-    data[edge_type].edge_index = new_edge_index
-    if new_edge_attr is not None:
-        data[edge_type][edge_attr_name] = new_edge_attr
-
-    return data
-
 def _load_single_graph(files: Tuple[Path, Path]) -> HeteroData:
     """
     Load and process a single graph file (worker function for multiprocessing).
@@ -132,6 +83,21 @@ def _load_single_graph(files: Tuple[Path, Path]) -> HeteroData:
         'binary_id': binary_id
     }   
 
+def get_dummy_sample_data(dim: int = 2):
+    data = HeteroData()
+    num_nodes = 100
+    data['node'].x = torch.tensor(np.zeros((num_nodes,dim+2)), dtype=torch.float)
+    data['node','to','node'].edge_index = torch.tensor(np.zeros((2,num_nodes)), dtype=torch.long)
+    data['node','to','node'].edge_attr = torch.tensor(np.zeros((num_nodes,1)), dtype=torch.float)
+    data['node','to','node'].edge_weight = None
+    data['node','approx','node'].edge_index = torch.tensor(np.zeros((2,num_nodes)), dtype=torch.long)
+    data['node','approx','node'].edge_attr = torch.tensor(np.zeros((num_nodes,1)), dtype=torch.float)
+    data['node','approx','node'].edge_weight = None
+    data['node'].y = torch.tensor(np.zeros((num_nodes,1)), dtype=torch.float)
+    transform = torch_geometric.transforms.Compose([AddSelfLoops('edge_attr',fill_value=0.0)])
+    data = transform(data)
+    return data
+
 class GraphDataset(InMemoryDataset):  
     def __init__(self,
                 data_files:List[Path]=None,
@@ -148,8 +114,6 @@ class GraphDataset(InMemoryDataset):
         self.save_file = save_file if save_file is not None and len(save_file) > 0 else os.path.join(root, 'data.pt') if root is not None else 'data.pt'
         self.data_binary_id = []
         super().__init__(root, transform, pre_transform, pre_filter)
-        
-        
 
         if load_file is not None:
             if os.path.exists(load_file):
@@ -159,7 +123,6 @@ class GraphDataset(InMemoryDataset):
 
         if len(data_files) == 0:
             raise ValueError("No data files provided")
-
 
         if data_files is None:
             raise ValueError("No data files provided")

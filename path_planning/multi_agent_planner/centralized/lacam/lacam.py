@@ -23,6 +23,7 @@ class LaCAM(LaCAM_random):
         starts: Config,
         goals: Config,
         time_limit_ms: int = 3000,
+        max_iterations: int = None,
         deadline: Deadline | None = None,
         flg_star: bool = True,
         flg_swap: bool = True,
@@ -39,6 +40,7 @@ class LaCAM(LaCAM_random):
         self.deadline: Deadline = (
             deadline if deadline is not None else Deadline(time_limit_ms)
         )
+        self.max_iterations = max_iterations if max_iterations is not None and max_iterations > 0 else float('inf')
         # set hyper parameters
         self.flg_star: bool = flg_star
         self.flg_swap: bool = flg_swap
@@ -48,6 +50,8 @@ class LaCAM(LaCAM_random):
         self.rng: np.random.Generator = np.random.default_rng(seed=seed)
         self.verbose = verbose
         self.cost = float('inf')
+        self.total_time = 0
+        self.total_iterations = 0
         return self._solve()
 
     def _solve(self) -> Configs:
@@ -102,8 +106,15 @@ class LaCAM(LaCAM_random):
         EXPLORED[N_init.Q] = N_init
 
         # main loop
+        iterations = 0
         while len(OPEN) > 0 and not self.deadline.is_expired:
             N: HighLevelNode = OPEN[0]
+            iterations += 1
+
+            if self.max_iterations is not None and iterations >= self.max_iterations:
+                if self.verbose:
+                    print(f"Search terminated: max iterations of {self.max_iterations} reached.")
+                break
 
             # goal check
             if N_goal is None and N.Q == self.goals:
@@ -184,6 +195,8 @@ class LaCAM(LaCAM_random):
         else:
             self.info(1, "failure due to timeout")
             self.cost = float('inf')
+        self.total_time = self.deadline.elapsed/1000.0
+        self.total_iterations = iterations
         return self.backtrack(N_goal)
 
     def get_h_value(self, Q: Config) -> int:
