@@ -46,10 +46,12 @@ def solve_mapf(map_, agents,mapf_solver_config:dict) -> Tuple[dict, float]:
         solution, solution_info = ccbs.search()
     else:
         raise ValueError(f"Invalid algorithm: {mapf_solver_name}")
+    solution_info["collision"] = False
     if agent_radius != 0 and solution_info["success"]:
         collisions = check_collision(solution, agent_radius, verbose=False)
         if collisions:
             solution_info["success"] = False
+            solution_info["collision"] = True
     summary = summarize_solution(solution,solution_info,mapf_solver_config,map_)
     return summary
 
