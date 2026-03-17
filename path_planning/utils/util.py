@@ -11,13 +11,28 @@ import torch
 import argparse
 from pathlib import Path
 from typing import List
+import math
 import random
+from multiprocessing import cpu_count
 
 def convert_to_pixel(x,y):
     pixel_x = int(np.round(x))
     pixel_y = int(np.round(-1 - y))
     return pixel_x, pixel_y
 
+def _to_native_yaml(obj):
+    """Convert numpy scalars/arrays in nested structures to native Python for YAML serialization."""
+    if isinstance(obj, dict):
+        return {k: _to_native_yaml(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_to_native_yaml(v) for v in obj]
+    if isinstance(obj, (np.floating, np.float32, np.float64)):
+        return float(obj)
+    if isinstance(obj, (np.integer, np.int32, np.int64)):
+        return int(obj)
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    return obj
 
 def convert_from_pixel(pixel_x, pixel_y, ylen):
     """
@@ -169,7 +184,6 @@ def to_builtin(obj):
         return float(obj)
     return obj
 
-
 def write_to_yaml(obj, filename: str):
     if len(os.path.dirname(filename)) > 0 and not os.path.exists(os.path.dirname(filename)):
         os.makedirs(os.path.dirname(filename))
@@ -185,6 +199,230 @@ def set_global_seed(seed: int = 42):
     torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+
+def set_map_config(map_config: dict = None,args: argparse.Namespace = None):
+    """
+    Set the map config.
+    Args:
+        args: The arguments to set the map config.
+    Returns:
+        map_config: The map config.
+    """
+    assert args is not None, "Arguments must be provided"
+    if map_config is None:
+        with open(args.config_file, 'r') as f:
+            map_config = yaml.load(f,Loader=yaml.FullLoader)
+    args_dict = vars(args)
+
+    # Setting the seed
+    if args_dict.get('seed') is not None:
+        map_config['seed'] = args.seed
+    else:
+        map_config['seed'] = map_config['seed'] if map_config['seed'] is not None else 42
+    
+    # Setting the path
+    if args_dict.get('path') is not None and os.path.exists(args_dict.get('path')):
+        map_config['path'] = args.path
+    else:
+        map_config['path'] = map_config['path'] if map_config['path'] is not None else os.path.join(os.getcwd(), 'benchmark', 'train')
+    map_config['path'] = Path(map_config['path'])
+
+    # Setting the bounds
+    if args_dict.get('bounds') is not None:
+        # Convert bounds from flat list to nested list format
+        if isinstance(args.bounds, list):
+            if len(args.bounds) == 2:
+                bounds = [[0, args.bounds[1]], [0, args.bounds[0]]]
+            elif len(args.bounds) == 3:
+                bounds = [[0, args.bounds[1]], [0, args.bounds[0]], [0, args.bounds[2]]]
+            elif len(args.bounds) == 4:
+                bounds = [[args.bounds[0], args.bounds[1]], [args.bounds[2], args.bounds[3]]]
+            elif len(args.bounds) == 6:
+                bounds = [[args.bounds[0], args.bounds[1]], [args.bounds[2], args.bounds[3]], [args.bounds[4], args.bounds[5]]]
+            else:
+                raise ValueError(f"Invalid bounds: {args.bounds}")
+        else:
+            bounds = args.bounds
+        map_config['bounds'] = bounds
+    else:
+        map_config['bounds'] = map_config['bounds'] if map_config['bounds'] is not None else [[0, 32.0], [0, 32.0]]
+    
+    # Setting the nb_agents
+    if args_dict.get('nb_agents') is not None:
+        map_config['nb_agents'] = args.nb_agents
+    else:
+        map_config['nb_agents'] = map_config['nb_agents'] if map_config['nb_agents'] is not None else 4
+
+    # Setting the nb_obstacles
+    if args_dict.get('nb_obstacles') is not None:
+        map_config['nb_obstacles'] = args.nb_obstacles
+    else:
+        map_config['nb_obstacles'] = map_config['nb_obstacles'] if map_config['nb_obstacles'] is not None else 0.1
+    
+    # Setting the resolution
+    if args_dict.get('resolution') is not None:
+        map_config['resolution'] = args.resolution
+    else:
+        map_config['resolution'] = map_config['resolution'] if map_config['resolution'] is not None else 1.0
+    
+    # Setting the agent_radius
+    if args_dict.get('agent_radius') is not None:
+        map_config['agent_radius'] = round(args.agent_radius, 3)
+    else:
+        map_config['agent_radius'] = round(map_config['agent_radius'] if map_config['agent_radius'] is not None else 0.0, 3)
+
+    # Setting the agent_velocity
+    if args_dict.get('agent_velocity') is not None:
+        map_config['agent_velocity'] = args.agent_velocity
+    else:
+        map_config['agent_velocity'] = map_config['agent_velocity'] if map_config['agent_velocity'] is not None else 0.0
+
+    # Setting the num cases
+    if args_dict.get('num_cases') is not None:
+        map_config['num_cases'] = args.num_cases
+    else:
+        map_config['num_cases'] = map_config['num_cases'] if map_config['num_cases'] is not None else 1
+    
+    # Setting the solve_till_success
+    if args_dict.get('solve_till_success') is not None:
+        map_config['solve_till_success'] = args.solve_till_success
+    else:
+        map_config['solve_till_success'] = map_config['solve_till_success'] if map_config['solve_till_success'] is not None else False
+
+    # Setting the nb_permutations
+    if args_dict.get('nb_permutations') is not None:
+        map_config['nb_permutations'] = args.nb_permutations
+    else:
+        map_config['nb_permutations'] = map_config['nb_permutations'] if map_config['nb_permutations'] is not None else 1
+    if map_config['nb_permutations'] <= 0:
+        assert False, "Number of permutations must be greater than 0"
+    max_permutations = math.factorial(2 * map_config['nb_agents'])
+    if map_config['nb_permutations'] > max_permutations:
+        print(f"Warning: Requested {map_config['nb_permutations']} permutations, but only {max_permutations} possible")
+        map_config['nb_permutations'] = max_permutations
+
+    # Setting the nb_permutations_tries
+    if args_dict.get('nb_permutations_tries') is not None:
+        map_config['nb_permutations_tries'] = args.nb_permutations_tries
+    else:
+        map_config['nb_permutations_tries'] = map_config['nb_permutations_tries'] if map_config['nb_permutations_tries'] is not None else map_config['nb_permutations']
+    if map_config['solve_till_success']:
+        if map_config['nb_permutations_tries'] < map_config['nb_permutations']:
+            print(f"Warning: nb_permutations_tries ({map_config['nb_permutations_tries']}) < nb_permutations ({map_config['nb_permutations']})")
+            print(f"Setting nb_permutations_tries to {map_config['nb_permutations'] * 2}")
+        map_config['nb_permutations_tries'] = max(map_config['nb_permutations_tries'], map_config['nb_permutations'] * 2) 
+    else:
+        map_config['nb_permutations_tries'] = map_config['nb_permutations']
+
+    # Setting the time_limit
+    if args_dict.get('time_limit') is not None:
+        map_config['time_limit'] = args.time_limit
+    else:
+        map_config['time_limit'] = map_config['time_limit'] if map_config['time_limit'] is not None else 60
+
+    # Setting the max_iterations
+    if args_dict.get('max_iterations') is not None:
+        map_config['max_iterations'] = args.max_iterations
+    else:
+        map_config['max_iterations'] = map_config['max_iterations'] if map_config['max_iterations'] is not None else 10000
+
+    # Setting the mapf_solver_name
+    if args_dict.get('mapf_solver_name') is not None:
+        map_config['mapf_solver_name'] = args.mapf_solver_name
+    else:
+        map_config['mapf_solver_name'] = map_config['mapf_solver_name'] if map_config['mapf_solver_name'] is not None else 'cbs'
+
+    # Setting the road_map_type
+    if args_dict.get('road_map_type') is not None:
+        map_config['road_map_type'] = args.road_map_type
+    else:
+        map_config['road_map_type'] = map_config['road_map_type'] if map_config['road_map_type'] is not None else 'grid'
+
+    # Setting the use_discrete_space
+    if args_dict.get('use_discrete_space') is not None:
+        map_config['use_discrete_space'] = args.use_discrete_space
+    else:
+        map_config['use_discrete_space'] = map_config['use_discrete_space'] if map_config['use_discrete_space'] is not None else True
+
+    # Setting the generate_new_graph
+    if args_dict.get('generate_new_graph') is not None:
+        map_config['generate_new_graph'] = args.generate_new_graph
+    else:
+        map_config['generate_new_graph'] = map_config['generate_new_graph'] if map_config['generate_new_graph'] is not None else True
+
+    # Setting the sample_num
+    if args_dict.get('num_samples') is not None:
+        map_config['sample_num'] = args.num_samples
+    else:
+        map_config['sample_num'] = map_config['num_samples'] if map_config['num_samples'] is not None else 0
+
+    # Setting the num_neighbors
+    if args_dict.get('num_neighbors') is not None:
+        map_config['num_neighbors'] = args.num_neighbors
+    else:
+        map_config['num_neighbors'] = map_config['num_neighbors'] if map_config['num_neighbors'] is not None else 4.0
+
+    # Setting the min_edge_len
+    if args_dict.get('min_edge_len') is not None:
+        map_config['min_edge_len'] = args.min_edge_len
+    else:
+        map_config['min_edge_len'] = map_config['min_edge_len'] if map_config['min_edge_len'] is not None else 1e-10
+
+    # Setting the max_edge_len
+    if args_dict.get('max_edge_len') is not None:
+        map_config['max_edge_len'] = args.max_edge_len
+    else:
+        map_config['max_edge_len'] = map_config['max_edge_len'] if map_config['max_edge_len'] is not None else 1.1
+
+    # Setting the heuristic_type
+    if args_dict.get('heuristic_type') is not None:
+        map_config['heuristic_type'] = args.heuristic_type
+    else:
+        map_config['heuristic_type'] = map_config['heuristic_type'] if map_config['heuristic_type'] is not None else 'manhattan'
+
+    # Setting the is_start_goal_discrete
+    if args_dict.get('is_start_goal_discrete') is not None:
+        map_config['is_start_goal_discrete'] = args.is_start_goal_discrete
+    else:
+        map_config['is_start_goal_discrete'] = map_config['is_start_goal_discrete'] if map_config['is_start_goal_discrete'] is not None else True
+
+    # Setting the weighted_sampling
+    if args_dict.get('weighted_sampling') is not None:
+        map_config['weighted_sampling'] = args.weighted_sampling
+    else:
+        map_config['weighted_sampling'] = map_config['weighted_sampling'] if map_config['weighted_sampling'] is not None else True
+
+    # Setting the samp_from_prob_map_ratio
+    if args_dict.get('samp_from_prob_map_ratio') is not None:
+        map_config['samp_from_prob_map_ratio'] = args.samp_from_prob_map_ratio
+    else:
+        map_config['samp_from_prob_map_ratio'] = map_config['samp_from_prob_map_ratio'] if map_config['samp_from_prob_map_ratio'] is not None else 0.5
+
+    # Setting the num_graph_samples
+    if args_dict.get('num_graph_samples') is not None:
+        map_config['num_graph_samples'] = args.num_graph_samples
+    else:
+        map_config['num_graph_samples'] = map_config['num_graph_samples'] if map_config['num_graph_samples'] is not None else 1
+
+    # Setting the target_space
+    if args_dict.get('target_space') is not None:
+        map_config['target_space'] = args.target_space
+    else:
+        map_config['target_space'] = map_config['target_space'] if map_config['target_space'] is not None else 'convolution_binary'
+
+    # Setting the num_workers
+    if args_dict.get('num_workers') is not None:
+        map_config['num_workers'] = args.num_workers
+    else:
+        map_config['num_workers'] = map_config['num_workers'] if map_config['num_workers'] is not None else cpu_count()
+   
+    # Setting the verbose
+    if args_dict.get('verbose') is not None:
+        map_config['verbose'] = args.verbose
+    else:
+        map_config['verbose'] = map_config['verbose'] if map_config['verbose'] is not None else False
+
+    return map_config
 
 def set_train_config(train_config: dict = None,args: argparse.Namespace = None):
     """
