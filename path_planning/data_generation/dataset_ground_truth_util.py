@@ -3,19 +3,16 @@ from typing import Dict
 
 def generate_base_case_path(base_path: Path, case_id: int, road_map_type: str):
     case_path = base_path / f"case_{case_id}"
-    roadmap_path = case_path / road_map_type
-    ground_truth_path = roadmap_path / "ground_truth"
     case_path.mkdir(parents=True, exist_ok=True)
-    roadmap_path.mkdir(parents=True, exist_ok=True)
-    ground_truth_path.mkdir(parents=True, exist_ok=True)
-    return case_path, roadmap_path, ground_truth_path
+    map_path = base_path / f"case_{case_id}" / "maps"/ road_map_type
+    map_path.mkdir(parents=True, exist_ok=True)
+    return case_path,map_path
 
-def generate_agent_yaml_path(base_path: Path, perm_id: int):
-    agents_path = base_path / "agents"
-    perm_path = agents_path /  f"perm_{perm_id}"
+def generate_input_perm_yaml_path(base_path: Path, perm_id: int):
+    perm_path = base_path /  f"perm_{perm_id}"
     perm_path.mkdir(parents=True, exist_ok=True)
-    agents_file = perm_path / "agents.yaml"
-    return agents_path,perm_path,agents_file
+    perm_file = perm_path / "input.yaml"
+    return perm_path,perm_file
 
 def generate_mapf_path(base_path: Path, perm_id: int,mapf_solver_name:str):
     mapf_path = base_path / f"perm_{perm_id}" / mapf_solver_name
@@ -38,7 +35,7 @@ def get_config_file_path(base_path: Path):
     config_file = base_path / "config.yaml"
     return config_file
 
-def get_map_path(base_path: Path, config: Dict):
+def generate_base_path(base_path: Path, config: Dict):
     bounds = config.get("bounds", [[0,32.0],[0,32.0]])
     nb_agents = config.get("nb_agents", 4)
     nb_obstacles = config.get("nb_obstacles", 0.1)

@@ -23,16 +23,17 @@ import copy
 import math
 from itertools import product
 from path_planning.utils.util import _to_native_yaml
-from path_planning.data_generation.dataset_ground_truth_util import generate_base_case_path, generate_agent_yaml_path, generate_mapf_path, get_input_file_path, get_graph_file_path, get_solution_file_path, get_config_file_path,get_map_path
+from path_planning.data_generation.dataset_ground_truth_util import generate_base_path,generate_base_case_path, generate_input_perm_yaml_path, generate_mapf_path, get_input_file_path, get_graph_file_path, get_solution_file_path, get_config_file_path
+from path_planning.data_generation.dataset_ground_truth_util import get_input_file_path, get_graph_file_path, get_solution_file_path, get_config_file_path
 
+KEYS = ["bounds", "resolution", "time_limit", "max_iterations", "road_map_type", "use_discrete_space", "sample_num", "num_neighbors", "min_edge_len", "max_edge_len", "agent_radius", "nb_obstacles", "nb_agents"]
 class InputFile:   
     def __init__(self, input_file: Path, case_id: int = 0):
         self.input_file = input_file
         self.case_id = case_id
-        self.KEYS = ["bounds", "resolution", "time_limit", "max_iterations", "road_map_type", "use_discrete_space", "sample_num", "num_neighbors", "min_edge_len", "max_edge_len", "agent_radius", "nb_obstacles", "nb_agents"]
         
     def check_keys_inside_input(self, inpt: Dict):
-        for key in self.KEYS:
+        for key in KEYS:
             if key in inpt:
                 return False
             for subkey in inpt.keys():
@@ -290,11 +291,13 @@ def generate_permutation(inpt: Dict, config: Dict, case_path: Path):
 
         unique_permutations.add(tuple(start_goal_index))
         agents_shuffled = shuffle_agents_goals(inpt, start_goal_index)
+        inpt_copy = copy.deepcopy(inpt)
+        inpt_copy["agents"] = agents_shuffled
 
         perm_id = len(unique_permutations) - 1
-        _,_,agents_file = generate_agent_yaml_path(case_path, perm_id)
-        with open(agents_file, "w") as f:
-            yaml.safe_dump(_to_native_yaml({"agents": agents_shuffled}), f)
+        _,perm_file = generate_input_perm_yaml_path(case_path, perm_id)
+        with open(perm_file, "w") as f:
+            yaml.safe_dump(_to_native_yaml(inpt_copy), f)
         start_goal_index = np.random.permutation(start_goal_index)
 
 def process_single_case_map_generation(args: Tuple) -> Optional[int]:
@@ -312,9 +315,9 @@ def process_single_case_map_generation(args: Tuple) -> Optional[int]:
     case_id, path, config,generate_new_graph,graph_file,verbose = args
     set_global_seed(config.get("seed", 42) + case_id)
     road_map_type = config.get("road_map_type", "grid")
-    case_path, roadmap_path, ground_truth_path = generate_base_case_path(path, case_id, road_map_type)
+    case_path,map_path = generate_base_case_path(path, case_id, road_map_type)
 
-    input_file = get_input_file_path(roadmap_path)
+    input_file = get_input_file_path(case_path)
     input_class = InputFile(input_file, case_id)
     inpt = input_class.check_input_file()
     if generate_new_graph or not inpt:
@@ -324,7 +327,7 @@ def process_single_case_map_generation(args: Tuple) -> Optional[int]:
         with open(input_file, "w") as f:
             yaml.safe_dump(_to_native_yaml(inpt), f)   
     if graph_file is None:
-        graph_file = get_graph_file_path(ground_truth_path)
+        graph_file = get_graph_file_path(map_path)
 
     # Build and save graph once
     create_map(inpt, generate_new_graph,graph_file)
@@ -411,22 +414,18 @@ def process_single_case(args: Tuple) -> Tuple[float, float, int]:
     case_id, path, config, graph_file,verbose = args
     set_global_seed(config.get("seed", 42) + case_id)
     road_map_type = config.get("road_map_type", "grid")
-    case_path, roadmap_path, ground_truth_path = generate_base_case_path(path, case_id, road_map_type)    
+    case_path,map_path = generate_base_case_path(path, case_id, road_map_type)   
     
-
-    graph_sampler_exists = get_graph_file_path(ground_truth_path).exists()
+    graph_sampler_exists = get_graph_file_path(map_path).exists()
     assert graph_sampler_exists, f"Graph sampler {graph_sampler_exists} does not exist"
     solve_till_success = config.get("solve_till_success", False)
 
-    input_file = get_input_file_path(roadmap_path)
+    input_file = get_input_file_path(case_path)
     assert input_file.exists(), f"Input file {input_file} does not exist"
     with open(input_file, "r") as f:
         inpt = yaml.load(f, Loader=yaml.FullLoader)
 
     # Read through permutations already generated
-    start_goal_index = np.arange(0, config["nb_agents"]*2, 1)
-    agent_start_goals = [tuple(agent["start"]) for agent in inpt["agents"]] + [tuple(agent["goal"]) for agent in inpt["agents"]]
-    agent_start_goals = dict(zip(agent_start_goals, range(len(agent_start_goals))))
     nb_permutations = config["nb_permutations"]
     nb_permutations_tries = config['nb_permutations_tries']
     solve_till_success = config.get("solve_till_success", False)
@@ -439,7 +438,7 @@ def process_single_case(args: Tuple) -> Tuple[float, float, int]:
     mapf_solver_name = config["mapf_solver_name"]
     agent_velocity = config["agent_velocity"]
     if graph_file is None:
-        graph_file = get_graph_file_path(ground_truth_path)
+        graph_file = get_graph_file_path(map_path)
         solution_name_suffix = "solution"
     else:
         solution_name_suffix = "solution_" + graph_file.stem
@@ -473,9 +472,9 @@ def process_single_case(args: Tuple) -> Tuple[float, float, int]:
     
     if num_success < nb_permutations:
         for perm_id in perm_ids_unfinished:
-            _,_,agents_file = generate_agent_yaml_path(case_path, perm_id)
-            assert agents_file.exists(), f"Agents file {agents_file} does not exist"
-            with open(agents_file, "r") as f:
+            _,perm_file = generate_input_perm_yaml_path(case_path, perm_id)
+            assert perm_file.exists(), f"Permutation file {perm_file} does not exist"
+            with open(perm_file, "r") as f:
                 agents_shuffled = yaml.load(f, Loader=yaml.FullLoader)["agents"]
 
             inpt_copy = copy.deepcopy(inpt)
@@ -556,7 +555,6 @@ def create_solutions(path: Path, num_cases: int, config: Dict,  num_workers: int
             attempts += num_attempts
 
     # Print summary
-    total_permutations = num_cases * config.get("nb_permutations", 1)
     if verbose:
         success_ratio = successful / attempts
         failed_ratio = 1.0 - success_ratio
@@ -574,7 +572,7 @@ def create_path_parameter_directory(base_path: Path, config: Dict,dump_config: b
     nb_obstacles = config.get("nb_obstacles", 0.1)
     resolution = config.get("resolution", 1.0)
     agent_radius = config.get("agent_radius", 0.0)
-    map_path = get_map_path(base_path, config)
+    map_path = generate_base_path(base_path, config)
 
     base_config = {
         "bounds": bounds,
