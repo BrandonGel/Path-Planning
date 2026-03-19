@@ -10,29 +10,43 @@ from path_planning.common.visualizer.visualizer_2d import Visualizer2D
 from path_planning.common.environment.map.graph_sampler import GraphSampler
 from python_motion_planning.common import TYPES
 from path_planning.data_generation.dataset_label import get_trajectory_map
+from path_planning.data_generation.dataset_ground_truth_util import *
+from multiprocessing import Pool, cpu_count
+from tqdm import tqdm
 
-def load_and_visualize_case(case_path: Path, show_static=True, show_animation=True):
+def load_and_visualize_case(perm_path: Path,graph_file: Path = None,mapf_solver_name: str = "cbs",road_map_type: str = "grid", agent_velocity: float = 0.0, show_static=True, show_animation=True,verbose=True):
     """
     Load and visualize a single training case.
     
     Args:
-        case_path: Path to the case directory
+        perm_path: Path to the permutation directory
+        mapf_solver_name: Name of the MAPF solver
+        agent_velocity: Velocity of the agent
         show_static: Whether to show static path visualization
         show_animation: Whether to show animation
     """
     # Load input data
-    with open(case_path / "input.yaml", "r") as f:
+    input_file = get_input_file_path(perm_path)
+    with open(input_file, "r") as f:
         input_data = yaml.safe_load(f)
     
     # Load solution data
-    with open(case_path / "solution.yaml", "r") as f:
+    mapf_path = generate_mapf_path(perm_path, mapf_solver_name)
+    roadmap_path = generate_roadmap_path(mapf_path, road_map_type)
+    solution_name_suffix = get_solution_name_suffix(graph_file=graph_file)
+    solution_file = get_solution_file_path(roadmap_path,solution_name_suffix,agent_velocity)
+    with open(solution_file, "r") as f:
         solution_data = yaml.safe_load(f)
+
+    if not solution_data["success"]:
+        raise Exception(f"Solution not successful: {solution_file}")
     
     # Extract map parameters
     bounds = input_data["map"]["bounds"]
     resolution = input_data["map"]["resolution"]
     obstacles = np.array(input_data["map"]["obstacles"])
     agents = input_data["agents"]
+    
     
     # Create map
     map_ = GraphSampler(bounds=bounds, resolution=resolution, start=[], goal=[])
@@ -56,12 +70,13 @@ def load_and_visualize_case(case_path: Path, show_static=True, show_animation=Tr
     road_map = map_.generate_roadmap(nodes)
     
     # Print case info
-    print(f"{case_path.parent.parent.name} + {case_path.name} | Agents: {len(agents)} | Cost: {solution_data['cost']} | Obstacles: {len(obstacles)}")
+    if verbose:
+        print(f"{solution_file.parent.parent.name} + {solution_file.name} | Agents: {len(agents)} | SoC: {solution_data['flowtime']} | Obstacles: {len(obstacles)}")
     
     # Static visualization
     if show_static:
         plt.close('all')
-        vis = Visualizer2D(figname = f"{case_path.name} - Static Paths", figsize=(8, 8))
+        vis = Visualizer2D(figname = f"{solution_file.name} - Static Paths", figsize=(8, 8))
         vis.plot_grid_map(map_)
         
         # Plot each agent's path
@@ -70,18 +85,21 @@ def load_and_visualize_case(case_path: Path, show_static=True, show_animation=Tr
             path = np.array([[point['x'], point['y']] for point in trajectory])
             vis.plot_path(path)
         
-        plt.title(f"{case_path.name} - Static Paths")
-        vis.show()
+        plt.title(f"{perm_path.name} - Static Paths")
+        vis.savefig(get_path_visualization_file(roadmap_path,solution_name_suffix,agent_velocity))
+        if verbose:
+            vis.show()
         vis.close()
 
         perm_trajectory_map = get_trajectory_map(solution_data["schedule"], map_)
         density_map = perm_trajectory_map.sum(axis=(0,1))
-        visualizer = Visualizer2D(figname = f"{case_path.name} - Density Map", figsize=(8, 8))
+        visualizer = Visualizer2D(figname = f"{solution_file.name} - Density Map", figsize=(8, 8))
         masked_map = ~map_.get_obstacle_map()
         visualizer.plot_grid_map(map_, masked_map=masked_map)
         visualizer.plot_density_map(density_map)
-        visualizer.savefig(case_path / 'density_map.png')
-        visualizer.show()
+        visualizer.savefig(get_heatmap_visualization_file(roadmap_path,solution_name_suffix,agent_velocity))
+        if verbose:
+            visualizer.show()
         visualizer.close()
     
     # Animation
@@ -93,19 +111,59 @@ def load_and_visualize_case(case_path: Path, show_static=True, show_animation=Tr
         schedule = {"schedule": solution_data["schedule"]}
         
         # Create animation
-        temp_filename = f"temp_{case_path.name}_animation.gif"
-        vis.animate(temp_filename, map_, schedule, road_map=road_map)
-        print(f"Animation saved to: {temp_filename}")
+        path_animation_file = get_path_animation_file(roadmap_path,solution_name_suffix,agent_velocity)
+        vis.animate(path_animation_file, map_, schedule, road_map=road_map)
+        if verbose:
+            print(f"Animation saved to: {path_animation_file}")
 
+def process_visualization(args):
+    """Worker function for parallel visualization."""
+    case_path,perm_dir, graph_file, mapf_solver_name, road_map_type, agent_velocity, show_static, show_animation, verbose = args
+    try:
+        load_and_visualize_case(perm_dir,graph_file=graph_file,mapf_solver_name=mapf_solver_name,road_map_type=road_map_type, agent_velocity=agent_velocity, show_static=show_static, show_animation=show_animation,verbose=verbose)
+        return True, case_path.name, perm_dir.name
+    except Exception as e:
+        return False, case_path.name, f"{perm_dir.name}: {str(e)}"
+
+def visualize_gt(tasks, num_workers: int = cpu_count()):
+    successful = 0
+    failed = 0
+    num_tasks = len(tasks)
+    print(f"\nVisualizing {num_tasks} permutations across {num_tasks} tasks with {num_workers} workers...")
+
+    if num_workers > 1 and len(tasks) > 1:
+        with Pool(processes=num_workers) as pool:
+            for success, case_name, result in tqdm(
+                pool.imap_unordered(process_visualization, tasks),
+                total=len(tasks),
+                desc="Visualizing tasks",
+            ):
+                if success:
+                    successful += 1
+                else:
+                    failed += 1
+                    print(f"Error in {case_name}: {result}")
+    else:
+        for task in tqdm(tasks, desc="Visualizing tasks"):
+            success, case_name, result = process_visualization(task)
+            if success:
+                successful += 1
+            else:
+                failed += 1
+                print(f"Error in {case_name}: {result}")
+
+    print("\n" + "="*60)
+    print(f"Visualization complete: {successful} tasks succeeded, {failed} tasks failed")
+    print("="*60)
 
 def load_and_visualize_solver_case(
-    solver_path: Path,
-    map_,
-    show_static: bool = True,
-    show_animation: bool = False,
-    show: bool = False,
-    map_frame: bool = False,
-):
+        solver_path: Path,
+        map_,
+        show_static: bool = True,
+        show_animation: bool = False,
+        show: bool = False,
+        map_frame: bool = False,
+    ):
     """
     Load and visualize a single solver result (valid solution only).
     Used for run_visualize_solvers.py: solution lives in perm_{id}/{solver}/solution_radius*_velocity*.yaml.
@@ -118,7 +176,7 @@ def load_and_visualize_solver_case(
         show: Whether to show the matplotlib figure
         map_frame: Whether to use the map frame
     """
-    sol_files = list(solver_path.glob("solution_radius*_velocity*.yaml"))
+    sol_files = list(solver_path.glob("solution*_velocity*.yaml"))
     if not sol_files:
         raise FileNotFoundError(f"No solution_radius*_velocity*.yaml in {solver_path}")
     with open(sol_files[0], "r") as f:
@@ -142,15 +200,18 @@ def load_and_visualize_solver_case(
             path = np.array([[p["x"], p["y"]] for p in trajectory])
             vis.plot_path(path, map_frame=map_frame)
         plt.title(f"{label} - Static Paths")
-        vis.savefig(solver_path / "paths.png")
+        path_img_file = get_path_visualization_file(solver_path)
+        vis.savefig(path_img_file)
         if show:
             vis.show()
         vis.close()
 
     if show_animation and hasattr(map_, "road_map") and map_.road_map is not None:
         plt.close("all")
+        agent_radius = solution_data["agent_radius"]
+        agent_velocity = solution_data["agent_velocity"]
         vis = Visualizer2D(figsize=(8, 8))
         combined_schedule = {"schedule": schedule}
-        gif_path = solver_path / "animation.gif"
-        vis.animate(str(gif_path), map_, combined_schedule, road_map=map_.road_map, map_frame=map_frame)
+        path_animation_file = get_path_animation_file(solver_path)
+        vis.animate(path_animation_file, map_, combined_schedule, road_map=map_.road_map, map_frame=map_frame,radius=agent_radius,velocity=agent_velocity)
         vis.close()

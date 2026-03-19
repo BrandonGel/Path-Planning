@@ -23,8 +23,9 @@ import copy
 import math
 from itertools import product
 from path_planning.utils.util import _to_native_yaml
-from path_planning.data_generation.dataset_ground_truth_util import generate_base_path,generate_base_case_path, generate_input_perm_yaml_path, generate_mapf_path, get_input_file_path, get_graph_file_path, get_solution_file_path, get_config_file_path
-from path_planning.data_generation.dataset_ground_truth_util import get_input_file_path, get_graph_file_path, get_solution_file_path, get_config_file_path
+from path_planning.data_generation.dataset_ground_truth_util import *
+# from path_planning.data_generation.dataset_ground_truth_util import generate_base_path,generate_base_case_path, generate_input_perm_yaml_path, generate_mapf_path, get_input_file_path, get_graph_file_path, get_solution_file_path, get_config_file_path
+# from path_planning.data_generation.dataset_ground_truth_util import get_input_file_path, get_graph_file_path, get_solution_file_path, get_config_file_path
 
 KEYS = ["bounds", "resolution", "time_limit", "max_iterations", "road_map_type", "use_discrete_space", "sample_num", "num_neighbors", "min_edge_len", "max_edge_len", "agent_radius", "nb_obstacles", "nb_agents"]
 class InputFile:   
@@ -374,13 +375,13 @@ def process_single_permutation(args: Tuple) -> Tuple[bool, int]:
     (
         param,
         map_,
-        mapf_path,
+        roadmap_path,
         mapf_solver_config,
         solution_name_suffix
     ) = args
 
     # Generate solution
-    mapf_path.mkdir(parents=True, exist_ok=True)
+    roadmap_path.mkdir(parents=True, exist_ok=True)
     agents = [
         {"start": tuple(agent['start']), "name": agent["name"], "goal": tuple(agent['goal'])}
         for i, agent in enumerate(param["agents"])
@@ -391,12 +392,12 @@ def process_single_permutation(args: Tuple) -> Tuple[bool, int]:
     agent_velocity = mapf_solver_config["agent_velocity"]
 
     # Write input parameters file
-    parameters_file = get_input_file_path(mapf_path)
+    parameters_file = get_input_file_path(roadmap_path)
     if not os.path.exists(parameters_file):
         with open(parameters_file, "w") as f:
             yaml.safe_dump(_to_native_yaml(param), f)
 
-    solution_file = get_solution_file_path(mapf_path, solution_name_suffix, agent_velocity)
+    solution_file = get_solution_file_path(roadmap_path, solution_name_suffix, agent_velocity)
     with open(solution_file, "w") as f:
         yaml.safe_dump(_to_native_yaml(solution_summary), f)
     return success
@@ -414,8 +415,10 @@ def process_single_case(args: Tuple) -> Tuple[float, float, int]:
     case_id, path, config, graph_file,verbose = args
     set_global_seed(config.get("seed", 42) + case_id)
     road_map_type = config.get("road_map_type", "grid")
+    mapf_solver_name = config.get("mapf_solver_name", "cbs")
     case_path,map_path = generate_base_case_path(path, case_id, road_map_type)   
     
+    #TODO: Update this to use the new function get_graph_file_path
     graph_sampler_exists = get_graph_file_path(map_path).exists()
     assert graph_sampler_exists, f"Graph sampler {graph_sampler_exists} does not exist"
     solve_till_success = config.get("solve_till_success", False)
@@ -437,17 +440,19 @@ def process_single_case(args: Tuple) -> Tuple[float, float, int]:
     perm_id = 0
     mapf_solver_name = config["mapf_solver_name"]
     agent_velocity = config["agent_velocity"]
+
+    #TODO: simplify this
+    solution_name_suffix = get_solution_name_suffix(graph_file=graph_file)
     if graph_file is None:
         graph_file = get_graph_file_path(map_path)
-        solution_name_suffix = "solution"
-    else:
-        solution_name_suffix = "solution_" + graph_file.stem
 
     perm_ids_unfinished = []
     num_attempts = 0
     for perm_id in range(num_tries):
-        mapf_path = generate_mapf_path(case_path, perm_id, mapf_solver_name)
-        solution_file = get_solution_file_path(mapf_path, solution_name_suffix, agent_velocity)
+        perm_path,_ = generate_input_perm_yaml_path(case_path, perm_id)
+        mapf_path = generate_mapf_path(perm_path, mapf_solver_name)
+        roadmap_path = generate_roadmap_path(mapf_path, road_map_type)
+        solution_file = get_solution_file_path(roadmap_path, solution_name_suffix, agent_velocity)
         if not solution_file.exists():
             perm_ids_unfinished.append(perm_id)
         else:
@@ -480,8 +485,10 @@ def process_single_case(args: Tuple) -> Tuple[float, float, int]:
             inpt_copy = copy.deepcopy(inpt)
             inpt_copy["agents"] = agents_shuffled
 
-            mapf_path = generate_mapf_path(case_path, perm_id, mapf_solver_config["mapf_solver_name"])
-            task = (inpt_copy, map_, mapf_path, mapf_solver_config, solution_name_suffix)
+            perm_path,_ = generate_input_perm_yaml_path(case_path, perm_id)
+            mapf_path = generate_mapf_path(perm_path, mapf_solver_name)
+            roadmap_path = generate_roadmap_path(mapf_path, road_map_type)
+            task = (inpt_copy, map_, roadmap_path, mapf_solver_config, solution_name_suffix)
             success = process_single_permutation(task)
 
             total_attempts += 1
