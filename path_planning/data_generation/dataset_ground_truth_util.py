@@ -23,6 +23,11 @@ def generate_mapf_path(base_path: Path, mapf_solver_name:str):
     mapf_path.mkdir(parents=True, exist_ok=True)
     return mapf_path
 
+def generate_ground_truth_path(base_path: Path):
+    ground_truth_path = base_path / "ground_truth"
+    ground_truth_path.mkdir(parents=True, exist_ok=True)
+    return ground_truth_path
+
 def generate_roadmap_path(base_path: Path,roadmap_type:str):
     roadmap_path = base_path / roadmap_type
     roadmap_path.mkdir(parents=True, exist_ok=True)
@@ -32,13 +37,17 @@ def get_input_file_path(base_path: Path):
     input_file = base_path / "input.yaml"
     return input_file
 
+def get_start_goal_file(base_path: Path):
+    start_goal_file = base_path /  'start_goal_locations.npy'
+    return start_goal_file
+
 def get_graph_file_path(base_path: Path,graph_file_name:str =None):
     if graph_file_name is None:
         graph_file_name = "graph_map.pkl"
     graph_file = base_path / graph_file_name
     return graph_file
 
-def get_solution_file_path(base_path: Path, solution_name_suffix: str = "solution", agent_velocity: float = 0.0):
+def get_solution_file_path(base_path: Path, solution_name_suffix: str = "solution_graph_map", agent_velocity: float = 0.0):
     solution_file = base_path / f"{solution_name_suffix}_velocity{agent_velocity}.yaml"
     return solution_file
 
@@ -46,17 +55,33 @@ def get_config_file_path(base_path: Path):
     config_file = base_path / "config.yaml"
     return config_file
 
-def get_path_visualization_file(base_path: Path, solution_name_suffix: str = "solution", agent_velocity: float = 0.0):
+def get_path_visualization_file(base_path: Path, solution_name_suffix: str = "solution_graph_map", agent_velocity: float = 0.0):
     path_visualization_file = base_path / f"{solution_name_suffix}_velocity{agent_velocity}_path.png"
     return path_visualization_file
 
-def get_heatmap_visualization_file(base_path: Path, solution_name_suffix: str = "solution", agent_velocity: float = 0.0):
+def get_heatmap_visualization_file(base_path: Path, solution_name_suffix: str = "solution_graph_map", agent_velocity: float = 0.0):
     heatmap_visualization_file = base_path / f"{solution_name_suffix}_velocity{agent_velocity}_heatmap.png"
     return heatmap_visualization_file
 
-def get_path_animation_file(base_path: Path, solution_name_suffix: str = "solution", agent_velocity: float = 0.0):
+def get_path_animation_file(base_path: Path, solution_name_suffix: str = "solution_graph_map", agent_velocity: float = 0.0):
     path_animation_file = base_path / f"{solution_name_suffix}_velocity{agent_velocity}_path.gif"
     return path_animation_file
+
+def get_trajectory_map_file(base_path: Path, solution_name_suffix: str = "solution_graph_map", agent_velocity: float = 0.0):
+    trajectory_map_file = base_path / f"{solution_name_suffix}_velocity{agent_velocity}_trajectory_map.npy"
+    return trajectory_map_file
+
+def get_obstacle_map_file(base_path: Path, solution_name_suffix: str = "solution_graph_map", agent_velocity: float = 0.0):
+    obstacle_map_file = base_path / f"{solution_name_suffix}_velocity{agent_velocity}_obstacle_map.npy"
+    return obstacle_map_file
+
+def get_density_map_file(base_path: Path, solution_name_suffix: str = "solution_graph_map", agent_velocity: float = 0.0):
+    density_map_file = base_path / f"{solution_name_suffix}_velocity{agent_velocity}_density_map.npy"
+    return density_map_file
+
+def get_density_map_visualization_file(base_path: Path, solution_name_suffix: str = "solution_graph_map", agent_velocity: float = 0.0):
+    density_map_visualization_file = base_path / f"{solution_name_suffix}_velocity{agent_velocity}_density_map.png"
+    return density_map_visualization_file
 
 def get_solution_name_suffix(graph_file: Path = None):
     if graph_file is None:
