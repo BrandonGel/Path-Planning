@@ -157,15 +157,45 @@ def generate_target_space(target_space_type:str, map:GraphSampler,density_map:np
         name ='binary'
     return y,name
 
-def generate_roadmap(road_map_type: str, map: GraphSampler, nodes: List[Node], ignore_generate: bool = False):
-    if road_map_type == 'prm':
-        if not ignore_generate:
-            map.generate_roadmap(nodes)
-        return 'prm'
-    else:
-        if not ignore_generate:
-            map.generate_planar_map(nodes)
-        return 'planar'
+def transform_graph_map_to_gnn(map_: GraphSampler):
+    # Get Edges & Edge Weights
+    edge_weights = map_.edge_weights
+    start_goal_edges_dict = {**map_.get_start_nodes_with_all_edges(), **map_.get_goal_nodes_with_all_edges()}
+    start_goal_nodes = map_.get_start_nodes() + map_.get_goal_nodes()
+
+    # Generate Node Data ('node')
+    pos = np.array([node.current for node in map_.nodes])
+    # Concatenate Position & zero class vector
+    ndata = np.concatenate((pos, np.zeros((pos.shape[0], 2))), axis=1)
+    start_goal_mask = np.full(len(ndata),fill_value=0).astype(bool)
+    start_goal_idx = [map_.get_node_index(node) for node in start_goal_nodes]
+    start_goal_mask[start_goal_idx] = True
+    # Specify Start & Goal Nodes to have the one class value
+    ndata[start_goal_mask, map_.dim] = 1
+    ndata[~start_goal_mask, map_.dim+1] = 1
+
+    # Generate Edges ('node', 'to', 'node')
+    edges = np.array(map_.edges)
+    edata = np.array(edge_weights)
+
+    # Generate Start & Goal Edges ('node', 'approx', 'node')
+    start_goal_edges_list = []
+    start_goal_weights_list = []
+    for u_idx, u_to_v_edge in start_goal_edges_dict.items():
+        for v_idx, edge_weight in u_to_v_edge:
+            start_goal_edges_list.append((u_idx, v_idx))
+            start_goal_weights_list.append(edge_weight)
+
+    
+    
+    # Convert to numpy arrays and save as compressed npz (much smaller than pickle)
+    node_to_node_edges_arr = edges.astype(np.int32)
+    node_to_node_weights_arr = edata.astype(np.float32)
+    
+    start_goal_edges_arr = np.array(start_goal_edges_list, dtype=np.int32)
+    start_goal_weights_arr = np.array(start_goal_weights_list, dtype=np.float32)
+
+    return ndata,node_to_node_edges_arr, node_to_node_weights_arr, start_goal_edges_arr, start_goal_weights_arr
 
 def process_single_case_graphs(args: Tuple[Path, dict]) -> Tuple[bool, Path]:
     """
@@ -186,19 +216,22 @@ def process_single_case_graphs(args: Tuple[Path, dict]) -> Tuple[bool, Path]:
     min_edge_len = config["min_edge_len"] if "min_edge_len" in config else 0.0
     max_edge_len = config["max_edge_len"] if "max_edge_len" in config else 1 + 1e-10
     num_graph_samples = config["num_graph_samples"] if "num_graph_samples" in config else 10
-    road_map_type = config["road_map_type"] if "road_map_type" in config else "planar"
+    roadmap_type = config["roadmap_type"] if "roadmap_type" in config else "prm"
+    roadmap_type_gt = config["roadmap_type_gt"] if "roadmap_type_gt" in config else "grid"
     target_space = config["target_space"] if "target_space" in config else "binary"
     generate_new_graph = config["generate_new_graph"] if "generate_new_graph" in config else True
-    roadmap_type = config["roadmap_type"] if "roadmap_type" in config else "grid"
+    agent_velocity = config["agent_velocity"] if "agent_velocity" in config else 0.0
     is_start_goal_discrete = config["is_start_goal_discrete"] if "is_start_goal_discrete" in config else True
+    graph_file_name = config["graph_file_name"] if "graph_file_name" in config else None
 
     input_file = get_input_file_path(case_dir)
     map_ = read_graph_sampler_from_yaml(
         input_file, use_discrete_space=use_discrete_space
     )
     agents = read_agents_from_yaml(input_file)
-    gt_dir = generate_roadmap_path(generate_ground_truth_path(case_dir), roadmap_type)
-    density_map_file = get_density_map_file(gt_dir)
+    gt_dir = generate_roadmap_path(generate_ground_truth_path(case_dir), roadmap_type_gt)
+    solution_name_suffix = get_solution_name_suffix(graph_file=graph_file_name)
+    density_map_file = get_density_map_file(gt_dir, solution_name_suffix,agent_velocity)
     density_map = np.load(density_map_file)
 
     # Starts and Goals are assumed to be in grid space
@@ -229,25 +262,18 @@ def process_single_case_graphs(args: Tuple[Path, dict]) -> Tuple[bool, Path]:
         goal = [agent["goal"] for agent in agents]
     map_.set_start(start)
     map_.set_goal(goal)
+    
 
+    sample_base_dir = generate_roadmap_path(generate_sample_base_path(case_dir), roadmap_type)
     for ii in range(num_graph_samples):
-        # Check if graph file exists
-        road_map_type_name = generate_roadmap(road_map_type, None, [], True)
-        graph_sample_path = case_dir / "samples" / f"{road_map_type_name}" / f"graph_{ii}_0"
+        # Check if graph gnn file exists
+        graph_sample_path = generate_sample_path(sample_base_dir, ii, 0)
         graph_sample_path.mkdir(parents=True, exist_ok=True)
-        # Check if npz graph already exists
-        graph_file = graph_sample_path / f"graph.npz"
-        use_exisiting_graph = graph_file.exists() and not generate_new_graph
+        graph_file = get_graph_file_path(graph_sample_path)
+        graph_gnn_file = get_graph_gnn_file_path(graph_sample_path)
+        use_exisiting_graph = graph_gnn_file.exists() and graph_file.exists() and not generate_new_graph
         if use_exisiting_graph:
-            # Load from npz format
-            data_dict = np.load(graph_file)
-            position = data_dict['node_features'][:,:-1]
-            edge_index = data_dict['edge_index']
-            edge_attr = data_dict['edge_attr']
-            use_roadmap = False
-            if 'fuzzy' in target_space:
-                use_roadmap = True
-            map_.read_from_numpy(position, edge_index, edge_attr, use_roadmap)
+            map_.load_graph_sampler(graph_file)
         else:
             # Generates Nodes & Edges
             weighted_sampling = config["weighted_sampling"] if "weighted_sampling" in config else False
@@ -256,51 +282,13 @@ def process_single_case_graphs(args: Tuple[Path, dict]) -> Tuple[bool, Path]:
             else:
                 prob_map = None
             samp_from_prob_map_ratio = config["samp_from_prob_map_ratio"] if "samp_from_prob_map_ratio" in config else 0.5
-            nodes = map_.generateRandomNodes(generate_grid_nodes=use_discrete_space,prob_map=prob_map,samp_from_prob_map_ratio=samp_from_prob_map_ratio)
-            generate_roadmap(road_map_type, map_, nodes)
-            dims = map_.dim
+            map_.generateRandomNodes(generate_grid_nodes=use_discrete_space,prob_map=prob_map,samp_from_prob_map_ratio=samp_from_prob_map_ratio)
+            map_.generate_map(roadmap_type,map_.nodes)
 
-            # Get Edges & Edge Weights
-            edge_weights = map_.edge_weights
-            start_goal_edges_dict = {**map_.get_start_nodes_with_all_edges(), **map_.get_goal_nodes_with_all_edges()}
-            start_goal_nodes = map_.get_start_nodes() + map_.get_goal_nodes()
-
-            # Generate Node Data ('node')
-            pos = np.array([node.current for node in nodes])
-            # Concatenate Position & zero class vector
-            ndata = np.concatenate((pos, np.zeros((pos.shape[0], 2))), axis=1)
-            start_goal_mask = np.full(len(ndata),fill_value=0).astype(bool)
-            start_goal_idx = [map_.get_node_index(node) for node in start_goal_nodes]
-            start_goal_mask[start_goal_idx] = True
-            # Specify Start & Goal Nodes to have the one class value
-            ndata[start_goal_mask, dims] = 1
-            ndata[~start_goal_mask, dims+1] = 1
-
-            # Generate Edges ('node', 'to', 'node')
-            edges = np.array(map_.edges)
-            edata = np.array(edge_weights)
-
-            # Generate Start & Goal Edges ('node', 'approx', 'node')
-            start_goal_edges_list = []
-            start_goal_weights_list = []
-            for u_idx, u_to_v_edge in start_goal_edges_dict.items():
-                for v_idx, edge_weight in u_to_v_edge:
-                    start_goal_edges_list.append((u_idx, v_idx))
-                    start_goal_weights_list.append(edge_weight)
-
-            # Ensure directory exists
-            graph_sample_path.mkdir(parents=True, exist_ok=True)
-            
-            # Convert to numpy arrays and save as compressed npz (much smaller than pickle)
-            node_to_node_edges_arr = edges.astype(np.int32)
-            node_to_node_weights_arr = edata.astype(np.float32)
-            
-            start_goal_edges_arr = np.array(start_goal_edges_list, dtype=np.int32)
-            start_goal_weights_arr = np.array(start_goal_weights_list, dtype=np.float32)
-            
+            ndata,node_to_node_edges_arr, node_to_node_weights_arr, start_goal_edges_arr, start_goal_weights_arr = transform_graph_map_to_gnn(map_)
             # Save as compressed npz (10x smaller than pickle)
             np.savez_compressed(
-                graph_sample_path / f"graph.npz",
+                graph_gnn_file,
                 node_features=ndata.astype(np.float32),
                 edge_index=node_to_node_edges_arr,
                 edge_attr=node_to_node_weights_arr,
@@ -309,15 +297,17 @@ def process_single_case_graphs(args: Tuple[Path, dict]) -> Tuple[bool, Path]:
                 binary_id=np.binary_repr(0, width=map_.dim)
             )
 
+            map_.save_graph_sampler(graph_file)
+
         # Generate Target Space ('y')
         y, y_type_name = generate_target_space(target_space, map_, density_map,config=config)
-        np.save(graph_sample_path / f"target_{y_type_name}.npy", y)
+        target_file = get_target_file_path(graph_sample_path, y_type_name)
+        np.save(target_file, y)
 
         num_augmentations = 2**map_.dim
         for augmentation_id in range(1,num_augmentations):
             ndata_augmented = ndata.copy()
-            graph_sample_path = case_dir / "samples" / f"{road_map_type_name}" / f"graph_{ii}_{augmentation_id}"
-            graph_sample_path.mkdir(parents=True, exist_ok=True)
+            graph_sample_path = generate_sample_path(sample_base_dir, ii, augmentation_id)
             # Generate Target Space ('y')
             binary_id = np.binary_repr(augmentation_id, width=map_.dim)
             for i in range(map_.dim):
@@ -326,7 +316,7 @@ def process_single_case_graphs(args: Tuple[Path, dict]) -> Tuple[bool, Path]:
                     ndata_augmented[:,i] = -ndata_augmented[:,i]
                     ndata_augmented[:,i] += bounds_offset
             np.savez_compressed(
-                graph_sample_path / f"graph.npz",
+                get_graph_gnn_file_path(graph_sample_path),
                 node_features=ndata_augmented.astype(np.float32),
                 edge_index=node_to_node_edges_arr,
                 edge_attr=node_to_node_weights_arr,
@@ -335,7 +325,7 @@ def process_single_case_graphs(args: Tuple[Path, dict]) -> Tuple[bool, Path]:
                 binary_id=binary_id
             )
             y, y_type_name = generate_target_space(target_space, map_, density_map,config=config)
-            np.save(graph_sample_path / f"target_{y_type_name}.npy", y)
+            np.save(get_target_file_path(graph_sample_path, y_type_name), y)
 
 
         map_.clear_data()

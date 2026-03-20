@@ -38,6 +38,16 @@ def generate_roadmap_path(base_path: Path,roadmap_type:str):
     roadmap_path.mkdir(parents=True, exist_ok=True)
     return roadmap_path
 
+def generate_sample_base_path(base_path: Path):
+    sample_base_path = base_path / "sample"
+    sample_base_path.mkdir(parents=True, exist_ok=True)
+    return sample_base_path
+
+def generate_sample_path(base_path: Path, sample_id: int, augmentation_id: int = 0):
+    sample_path = base_path/ f"graph_{sample_id}_{augmentation_id}"
+    sample_path.mkdir(parents=True, exist_ok=True)
+    return sample_path
+
 def get_input_file_path(base_path: Path):
     input_file = base_path / "input.yaml"
     return input_file
@@ -51,6 +61,18 @@ def get_graph_file_path(base_path: Path,graph_file_name:str =None):
         graph_file_name = "graph_map.pkl"
     graph_file = base_path / graph_file_name
     return graph_file
+
+def get_graph_gnn_file_path(base_path: Path):
+    graph_gnn_file = base_path / "graph.npz"
+    return graph_gnn_file
+
+def get_graph_gnn_file_path(base_path: Path):
+    graph_gnn_file = base_path / "graph.npz"
+    return graph_gnn_file
+
+def get_target_file_path(base_path: Path, y_type_name: str):
+    target_file = base_path / "target_{y_type_name}.npy"
+    return target_file
 
 def get_solution_file_path(base_path: Path, solution_name_suffix: str = "solution_graph_map", agent_velocity: float = 0.0):
     solution_file = base_path / f"{solution_name_suffix}_velocity{agent_velocity}.yaml"

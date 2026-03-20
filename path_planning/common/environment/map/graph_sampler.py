@@ -476,6 +476,16 @@ class GraphSampler(Grid):
         self.nodes = nodes
         return nodes
 
+    def generate_map(self, roadmap_type: str, samples: List[Node]):
+        if roadmap_type == 'grid':
+            self.generate_roadmap(samples)
+        elif roadmap_type == 'prm':
+            self.generate_roadmap(samples)
+        elif roadmap_type == 'planar':
+            self.generate_planar_map(samples)
+        else:
+            raise ValueError(f"Invalid roadmap type: {roadmap_type}")
+
     def generate_roadmap(self, samples: List[Node]):
         road_map = []
         edge_weights = []
@@ -504,7 +514,7 @@ class GraphSampler(Grid):
                     edge_id.append(indexes[ii])
                     edge_weight.append(e_weight)
 
-                if self.num_neighbors > 0 and len(edge_id) >= self.num_neighbors:
+                if self.num_neighbors > 0 and len(edge_id) >= self.num_neighbors and self.num_neighbors >= 0:
                     break
 
             road_map.append(edge_id)
@@ -731,7 +741,6 @@ class GraphSampler(Grid):
     def load_graph_sampler(self, path: str):
         with open(path, 'rb') as f:
             data = pickle.load(f)
-
         self._load_from_dict(data)
 
     def _load_from_dict(self, data: dict):
