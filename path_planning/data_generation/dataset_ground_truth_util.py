@@ -12,8 +12,13 @@ def generate_map_path(base_path: Path, road_map_type: str):
     map_path.mkdir(parents=True, exist_ok=True)
     return map_path
 
+def generate_perm_base_path(base_path: Path):
+    perm_path = base_path / "perm"
+    perm_path.mkdir(parents=True, exist_ok=True)
+    return perm_path
+
 def generate_input_perm_yaml_path(base_path: Path, perm_id: int):
-    perm_path = base_path /  f"perm_{perm_id}"
+    perm_path = generate_perm_base_path(base_path) / f"perm_{perm_id}"
     perm_path.mkdir(parents=True, exist_ok=True)
     perm_file = perm_path / "input.yaml"
     return perm_path,perm_file

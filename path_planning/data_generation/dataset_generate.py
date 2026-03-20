@@ -12,6 +12,7 @@ from scipy.interpolate import RegularGridInterpolator
 from multiprocessing import Pool, cpu_count
 from scipy.ndimage import generic_filter,generate_binary_structure
 from path_planning.utils.util import set_global_seed
+from path_planning.data_generation.dataset_ground_truth_util import *
 
 def weighted_max_op(window, weights,ignore_value = -1):
     # 'window' is passed as a 1D array by scipy
@@ -188,13 +189,17 @@ def process_single_case_graphs(args: Tuple[Path, dict]) -> Tuple[bool, Path]:
     road_map_type = config["road_map_type"] if "road_map_type" in config else "planar"
     target_space = config["target_space"] if "target_space" in config else "binary"
     generate_new_graph = config["generate_new_graph"] if "generate_new_graph" in config else True
+    roadmap_type = config["roadmap_type"] if "roadmap_type" in config else "grid"
     is_start_goal_discrete = config["is_start_goal_discrete"] if "is_start_goal_discrete" in config else True
 
+    input_file = get_input_file_path(case_dir)
     map_ = read_graph_sampler_from_yaml(
-        case_dir / "input.yaml", use_discrete_space=use_discrete_space
+        input_file, use_discrete_space=use_discrete_space
     )
-    agents = read_agents_from_yaml(case_dir / "input.yaml")
-    density_map = np.load(case_dir / "ground_truth" / "density_map.npy")
+    agents = read_agents_from_yaml(input_file)
+    gt_dir = generate_roadmap_path(generate_ground_truth_path(case_dir), roadmap_type)
+    density_map_file = get_density_map_file(gt_dir)
+    density_map = np.load(density_map_file)
 
     # Starts and Goals are assumed to be in grid space
     if use_discrete_space:

@@ -54,13 +54,14 @@ def process_single_case_trajectories(args: Tuple) -> Tuple[bool, Path]:
         Tuple of (success: bool, case_dir: Path)
     """
     case_dir,solution_name_suffix, mapf_solver_name,roadmap_type, agent_velocity, visualize_density_map = args
+    perm_path = generate_perm_base_path(case_dir)
     gt_dir = generate_roadmap_path(generate_ground_truth_path(case_dir), roadmap_type)
 
     try:
-        permutations = sorted([d for d in case_dir.iterdir() if d.is_dir() and d.name.startswith("perm_")])
+        permutations = sorted([d for d in perm_path.iterdir() if d.is_dir() and d.name.startswith("perm_")])
         
         if not permutations:
-            return False, case_dir
+            return False, perm_path
 
         input_file = get_input_file_path(permutations[0])
         agents = read_agents_from_yaml(input_file)
