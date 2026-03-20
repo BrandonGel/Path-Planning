@@ -32,16 +32,19 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument("-seed","--seed",type=int, default=42, help="seed")
-    parser.add_argument("-s","--path",type=str, nargs='+', default=['benchmark/train/map32.0x32.0_resolution1.0/agents4_obst0.1'], help="input file containing map and obstacles")
+    parser.add_argument("-s","--path",type=str, nargs='+', default=['benchmark/train/map32.0x32.0_resolution1.0/agents4_obst0.1/radius0.0'], help="input file containing map and obstacles")
     parser.add_argument("-ds","--use_discrete_space",type=bool, default=False, help="use discrete space")
     parser.add_argument("-ns","--num_samples",type=int, default=1000, help="number of samples")
     parser.add_argument("-nn","--num_neighbors",type=float, default=13.0, help="number of neighbors")
     parser.add_argument("-min_el","--min_edge_len",type=float, default=1e-10, help="minimum edge length")
     parser.add_argument("-max_el","--max_edge_len",type=float, default=5+1e-10, help="maximum edge length")
     parser.add_argument("-ngs","--num_graph_samples",type=int, default=1, help="number of graph samples")
-    parser.add_argument("-rmt","--road_map_type",type=str, default='prm', help="road map type")
+    parser.add_argument("-rmt","--roadmap_type",type=str, default='prm', help="road map type")
+    parser.add_argument("-rmt_gt","--roadmap_type_gt",type=str, default='grid', help="road map type for ground truth")
+    parser.add_argument("-av","--agent_velocity",type=float, default=0.0, help="agent velocity")
     parser.add_argument("-ts","--target_space",type=str, default='convolution_binary', help="target space")
     parser.add_argument("-gn","--generate_new_graph",type=bool, default=True, help="generate new graph")
+    parser.add_argument("-gfn","--graph_file_name",type=str, default=None, help="graph file name")
     parser.add_argument("-isg","--is_start_goal_discrete",type=bool, default=True, help="use discrete space for start and goal")
     parser.add_argument("-w","--num_workers",type=int, default=None, help="number of parallel workers for cases (default: auto-detect CPU cores)")
     parser.add_argument("-ws","--weighted_sampling",type=bool, default=True, help="weighted sampling")
@@ -59,9 +62,12 @@ if __name__ == "__main__":
             "min_edge_len": args.min_edge_len,
             "max_edge_len": args.max_edge_len,
             "num_graph_samples": args.num_graph_samples,
-            "road_map_type": args.road_map_type,
+            "roadmap_type": args.roadmap_type,
+            "roadmap_type_gt": args.roadmap_type_gt,
+            "agent_velocity": args.agent_velocity,
             "target_space": args.target_space,
             "generate_new_graph": args.generate_new_graph,
+            "graph_file_name": args.graph_file_name,
             "is_start_goal_discrete": args.is_start_goal_discrete,
             "weighted_sampling": args.weighted_sampling,
             "samp_from_prob_map_ratio": args.samp_from_prob_map_ratio,
