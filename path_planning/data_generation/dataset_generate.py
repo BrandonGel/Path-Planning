@@ -12,7 +12,17 @@ from scipy.interpolate import RegularGridInterpolator
 from multiprocessing import Pool, cpu_count
 from scipy.ndimage import generic_filter,generate_binary_structure
 from path_planning.utils.util import set_global_seed
-from path_planning.data_generation.dataset_ground_truth_util import *
+from path_planning.data_generation.dataset_util import *
+
+target_space_type_to_name = {
+    'binary',
+    'bilinear',
+    'distribution',
+    'fuzzy_binary',
+    'fuzzy_distribution',
+    'convolution_binary',
+    'convolution_distribution',
+}
 
 def weighted_max_op(window, weights,ignore_value = -1):
     # 'window' is passed as a 1D array by scipy
@@ -52,110 +62,92 @@ def get_prob_map(target_space_type:str, map:GraphSampler,density_map:np.ndarray,
         prob_map = np.clip(density_map,0,1)/np.clip(density_map,0,1).sum()
     return prob_map
 
+
 def generate_target_space(target_space_type:str, map:GraphSampler,density_map:np.ndarray,ignore_generate: bool = False,config:dict = None):
     y = []
-    name = 'binary'
-    if target_space_type == 'binary':
-        if not ignore_generate:
-            discrete_pos = [map.world_to_map(node.current,discrete=True) for node in map.nodes]
-            y = np.clip([density_map[s] for s in discrete_pos],0,1)
-        name ='binary'
-    elif target_space_type == 'bilinear':
-        if not ignore_generate:
-            discrete_pos = [map.world_to_map(node.current,discrete=True) for node in map.nodes]
-            mesh_space = tuple((np.arange(0,map.shape[i],1) for i in range(map.dim)))
-            interp_func = RegularGridInterpolator(mesh_space, density_map/np.sum(density_map), method="linear")
-            y = np.array([interp_func(discrete_pos[i]) for i in range(len(discrete_pos))])
-        name ='bilinear'
-    elif target_space_type == 'distribution':
-        if not ignore_generate:
-            discrete_pos = [map.world_to_map(node.current,discrete=True) for node in map.nodes]
-            y = np.array([density_map[s] for s in discrete_pos])
-            y = y / density_map.sum()
-        name ='distribution'
-    elif 'fuzzy' in target_space_type:
-        if not ignore_generate:
-            num_hops = int(config["num_hops"]) if config is not None and "num_hops" in config else 1
-            if num_hops < 1:
-                num_hops = 1
-            discrete_pos = [map.world_to_map(node.current, discrete=True) for node in map.nodes]            
-            y_density = np.array([density_map[s] for s in discrete_pos]) 
-            if target_space_type == 'fuzzy_binary':
-                y_density = np.clip(y_density,0,1)
-            elif target_space_type == 'fuzzy_distribution':
-                y_density = y_density / np.sum(density_map)
-            y = y_density.copy()
+    if target_space_type.lower() in target_space_type_to_name:
+        discrete_pos = [map.world_to_map(node.current,discrete=True) for node in map.nodes]
+        y = np.clip([density_map[s] for s in discrete_pos],0,1)
+    elif target_space_type.lower() in target_space_type_to_name:
+        discrete_pos = [map.world_to_map(node.current,discrete=True) for node in map.nodes]
+        mesh_space = tuple((np.arange(0,map.shape[i],1) for i in range(map.dim)))
+        interp_func = RegularGridInterpolator(mesh_space, density_map/np.sum(density_map), method="linear")
+        y = np.array([interp_func(discrete_pos[i]) for i in range(len(discrete_pos))])
+    elif target_space_type.lower() in target_space_type_to_name:
+        discrete_pos = [map.world_to_map(node.current,discrete=True) for node in map.nodes]
+        y = np.array([density_map[s] for s in discrete_pos])
+        y = y / density_map.sum()
+    elif 'fuzzy' in target_space_type_to_name[target_space_type.lower()]:
+        num_hops = int(config["num_hops"]) if config is not None and "num_hops" in config else 1
+        if num_hops < 1:
+            num_hops = 1
+        discrete_pos = [map.world_to_map(node.current, discrete=True) for node in map.nodes]            
+        y_density = np.array([density_map[s] for s in discrete_pos]) 
+        if target_space_type.lower() in target_space_type_to_name:
+            y_density = np.clip(y_density,0,1)
+        elif target_space_type.lower() in target_space_type_to_name:
+            y_density = y_density / np.sum(density_map)
+        y = y_density.copy()
+        
+        # PRE-COMPUTE: Build graph structure once (OPTIMIZATION)
+        num_nodes = len(map.nodes)
+        y_node_index = {map.node_index_list[node]: ii for ii, node in enumerate(map.nodes)}
+        
+        # Pre-build neighbor arrays for efficient access
+        max_neighbors = max(len(map.road_map[map.node_index_list[node]]) 
+                        for node in map.nodes) if num_nodes > 0 else 0
+        if max_neighbors > 0:
+            neighbor_indices = np.full((num_nodes, max_neighbors), -1, dtype=np.int32)
+            neighbor_costs = np.zeros((num_nodes, max_neighbors), dtype=np.float32)
+            neighbor_counts = np.zeros(num_nodes, dtype=np.int32)
             
-            # PRE-COMPUTE: Build graph structure once (OPTIMIZATION)
-            num_nodes = len(map.nodes)
-            y_node_index = {map.node_index_list[node]: ii for ii, node in enumerate(map.nodes)}
+            for i, node in enumerate(map.nodes):
+                node_idx = map.node_index_list[node]
+                neighbors = list(map.road_map[node_idx])
+                neighbor_counts[i] = len(neighbors)
+                
+                for j, neighbor_idx in enumerate(neighbors):
+                    neighbor_indices[i, j] = y_node_index[neighbor_idx]
+                    neighbor_costs[i, j] = map.cost_matrix[(node_idx, neighbor_idx)]
             
-            # Pre-build neighbor arrays for efficient access
-            max_neighbors = max(len(map.road_map[map.node_index_list[node]]) 
-                              for node in map.nodes) if num_nodes > 0 else 0
-            if max_neighbors > 0:
-                neighbor_indices = np.full((num_nodes, max_neighbors), -1, dtype=np.int32)
-                neighbor_costs = np.zeros((num_nodes, max_neighbors), dtype=np.float32)
-                neighbor_counts = np.zeros(num_nodes, dtype=np.int32)
+            # PROPAGATION LOOP (now much faster)
+            for _ in range(num_hops):
+                y_inverse_cost = np.zeros(num_nodes)
                 
-                for i, node in enumerate(map.nodes):
-                    node_idx = map.node_index_list[node]
-                    neighbors = list(map.road_map[node_idx])
-                    neighbor_counts[i] = len(neighbors)
-                    
-                    for j, neighbor_idx in enumerate(neighbors):
-                        neighbor_indices[i, j] = y_node_index[neighbor_idx]
-                        neighbor_costs[i, j] = map.cost_matrix[(node_idx, neighbor_idx)]
+                for i in range(num_nodes):
+                    if neighbor_counts[i] > 0:
+                        # Get valid neighbors
+                        valid_neighbors = neighbor_indices[i, :neighbor_counts[i]]
+                        neighbor_values = y[valid_neighbors]/(neighbor_costs[i,:neighbor_counts[i]] + 1)
+                        
+                        # Find best neighbor
+                        y_inverse_cost[i] = np.max(neighbor_values)
                 
-                # PROPAGATION LOOP (now much faster)
-                for _ in range(num_hops):
-                    y_inverse_cost = np.zeros(num_nodes)
-                    
-                    for i in range(num_nodes):
-                        if neighbor_counts[i] > 0:
-                            # Get valid neighbors
-                            valid_neighbors = neighbor_indices[i, :neighbor_counts[i]]
-                            neighbor_values = y[valid_neighbors]/(neighbor_costs[i,:neighbor_counts[i]] + 1)
-                            
-                            # Find best neighbor
-                            y_inverse_cost[i] = np.max(neighbor_values)
-                    
-                    # Vectorized update
-                    y = np.clip(np.maximum(y_density, y_inverse_cost), 0, 1)
-        if target_space_type == 'fuzzy_binary':
-            name = 'fuzzy_binary'
-        elif target_space_type == 'fuzzy_distribution':
-            name = 'fuzzy_distribution'
-    elif 'convolution' in  target_space_type:
-        if not ignore_generate:
-            num_hops = int(config["num_hops"]) if config is not None and "num_hops" in config else 1
-            if num_hops < 1:
-                num_hops = 1
-            if target_space_type == 'convolution_binary':
-                new_density_map = np.clip(density_map,0,1)
-            elif target_space_type == 'convolution_distribution':
-                new_density_map = density_map / density_map.sum()
-            new_density_map[map.get_obstacle_map()] = -1
+                # Vectorized update
+                y = np.clip(np.maximum(y_density, y_inverse_cost), 0, 1)
+    elif 'convolution' in  target_space_type_to_name[target_space_type.lower()]:
+        num_hops = int(config["num_hops"]) if config is not None and "num_hops" in config else 1
+        if num_hops < 1:
+            num_hops = 1
+        if target_space_type.lower() in target_space_type_to_name:
+            new_density_map = np.clip(density_map,0,1)
+        elif target_space_type.lower() in target_space_type_to_name:
+            new_density_map = density_map / density_map.sum()
+        new_density_map[map.get_obstacle_map()] = -1
 
-            resolution = map.resolution
-            kernel = generate_binary_structure(map.dim,1).astype(int)/(1+resolution)
-            center_pt = (1,)*map.dim
-            kernel[tuple(center_pt)] = 1
-            for _ in range(num_hops):     
-                new_density_map = generic_filter(new_density_map, weighted_max_op, size=kernel.shape, 
-                        extra_keywords={'weights': kernel.flatten(),'ignore_value':-1})
-            discrete_pos = [map.world_to_map(node.current, discrete=True) for node in map.nodes]            
-            y = np.array([new_density_map[s] for s in discrete_pos]) 
-        if target_space_type == 'convolution_binary':
-            name = 'convolution_binary'
-        elif target_space_type == 'convolution_distribution':
-            name = 'convolution_distribution'
+        resolution = map.resolution
+        kernel = generate_binary_structure(map.dim,1).astype(int)/(1+resolution)
+        center_pt = (1,)*map.dim
+        kernel[tuple(center_pt)] = 1
+        for _ in range(num_hops):     
+            new_density_map = generic_filter(new_density_map, weighted_max_op, size=kernel.shape, 
+                    extra_keywords={'weights': kernel.flatten(),'ignore_value':-1})
+        discrete_pos = [map.world_to_map(node.current, discrete=True) for node in map.nodes]            
+        y = np.array([new_density_map[s] for s in discrete_pos]) 
     else:
-        if not ignore_generate:
-            discrete_pos = [map.world_to_map(node.current,discrete=True) for node in map.nodes]
-            y = np.clip([density_map[s] for s in discrete_pos],0,1)
-        name ='binary'
-    return y,name
+        discrete_pos = [map.world_to_map(node.current,discrete=True) for node in map.nodes]
+        y = np.clip([density_map[s] for s in discrete_pos],0,1)
+    return y
 
 def transform_graph_map_to_gnn(map_: GraphSampler):
     # Get Edges & Edge Weights
@@ -274,6 +266,13 @@ def process_single_case_graphs(args: Tuple[Path, dict]) -> Tuple[bool, Path]:
         use_exisiting_graph = graph_gnn_file.exists() and graph_file.exists() and not generate_new_graph
         if use_exisiting_graph:
             map_.load_graph_sampler(graph_file)
+            data_dict = np.load(graph_gnn_file)
+            ndata = data_dict['node_features']
+            node_to_node_edges_arr = data_dict['edge_index']
+            node_to_node_weights_arr = data_dict['edge_attr']
+            start_goal_edges_arr = data_dict['approx_edge_index']
+            start_goal_weights_arr = data_dict['approx_edge_attr']
+            binary_id = data_dict['binary_id']
         else:
             # Generates Nodes & Edges
             weighted_sampling = config["weighted_sampling"] if "weighted_sampling" in config else False
@@ -300,15 +299,29 @@ def process_single_case_graphs(args: Tuple[Path, dict]) -> Tuple[bool, Path]:
             map_.save_graph_sampler(graph_file)
 
         # Generate Target Space ('y')
-        y, y_type_name = generate_target_space(target_space, map_, density_map,config=config)
+        y = generate_target_space(target_space, map_, density_map,config=config)
+        if target_space.lower() in target_space_type_to_name:
+            y_type_name = target_space.lower()
+        else:
+            raise ValueError(f"Target space type {target_space} not supported")
         target_file = get_target_file_path(graph_sample_path, y_type_name)
         np.save(target_file, y)
 
         num_augmentations = 2**map_.dim
         for augmentation_id in range(1,num_augmentations):
-            ndata_augmented = ndata.copy()
             graph_sample_path = generate_sample_path(sample_base_dir, ii, augmentation_id)
+            gnn_graph_file = get_graph_gnn_file_path(graph_sample_path)
+            graph_file = get_graph_file_path(graph_sample_path)
+            if target_space.lower() in target_space_type_to_name:
+                y_type_name = target_space.lower()
+            else:
+                raise ValueError(f"Target space type {target_space} not supported")
+            target_file = get_target_file_path(graph_sample_path, y_type_name)
+            if not generate_new_graph and target_file.exists() and gnn_graph_file.exists() and graph_file.exists():
+                continue
+
             # Generate Target Space ('y')
+            ndata_augmented = ndata.copy()
             binary_id = np.binary_repr(augmentation_id, width=map_.dim)
             for i in range(map_.dim):
                 if binary_id[i] == '1':
@@ -316,7 +329,7 @@ def process_single_case_graphs(args: Tuple[Path, dict]) -> Tuple[bool, Path]:
                     ndata_augmented[:,i] = -ndata_augmented[:,i]
                     ndata_augmented[:,i] += bounds_offset
             np.savez_compressed(
-                get_graph_gnn_file_path(graph_sample_path),
+                gnn_graph_file,
                 node_features=ndata_augmented.astype(np.float32),
                 edge_index=node_to_node_edges_arr,
                 edge_attr=node_to_node_weights_arr,
@@ -324,8 +337,8 @@ def process_single_case_graphs(args: Tuple[Path, dict]) -> Tuple[bool, Path]:
                 approx_edge_attr=start_goal_weights_arr,
                 binary_id=binary_id
             )
-            y, y_type_name = generate_target_space(target_space, map_, density_map,config=config)
-            np.save(get_target_file_path(graph_sample_path, y_type_name), y)
+            y = generate_target_space(target_space, map_, density_map,config=config)
+            np.save(target_file, y)
 
 
         map_.clear_data()

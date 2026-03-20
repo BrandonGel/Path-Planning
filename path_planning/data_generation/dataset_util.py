@@ -1,5 +1,7 @@
 from pathlib import Path
 from typing import Dict
+import yaml
+from path_planning.utils.util import _to_native_yaml
 
 def generate_base_case_path(base_path: Path, case_id: int, road_map_type: str):
     case_path = base_path / f"case_{case_id}"
@@ -71,7 +73,7 @@ def get_graph_gnn_file_path(base_path: Path):
     return graph_gnn_file
 
 def get_target_file_path(base_path: Path, y_type_name: str):
-    target_file = base_path / "target_{y_type_name}.npy"
+    target_file = base_path / f"target_{y_type_name}.npy"
     return target_file
 
 def get_solution_file_path(base_path: Path, solution_name_suffix: str = "solution_graph_map", agent_velocity: float = 0.0):
@@ -130,4 +132,27 @@ def generate_base_path(base_path: Path, config: Dict):
     path = base_path/ f"map{str_bounds}_resolution{resolution}"/ f"agents{nb_agents}_obst{nb_obstacles}"/ f"radius{agent_radius}"
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+def create_path_parameter_directory(base_path: Path, config: Dict,dump_config: bool = True):
+    """
+    Create a path parameters file.
+    """
+    bounds = config.get("bounds", [[0,32.0],[0,32.0]])
+    nb_agents = config.get("nb_agents", 4)
+    nb_obstacles = config.get("nb_obstacles", 0.1)
+    resolution = config.get("resolution", 1.0)
+    agent_radius = config.get("agent_radius", 0.0)
+    map_path = generate_base_path(base_path, config)
+
+    base_config = {
+        "bounds": bounds,
+        "nb_agents": nb_agents,
+        "nb_obstacles": nb_obstacles,
+        "resolution": resolution,
+        "agent_radius": agent_radius,
+    }
+    if dump_config:
+        with open(get_config_file_path(map_path), "w") as f:
+            yaml.safe_dump(_to_native_yaml(base_config), f)
+    return map_path
 

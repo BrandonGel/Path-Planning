@@ -10,7 +10,7 @@ from path_planning.common.visualizer.visualizer_2d import Visualizer2D
 from path_planning.common.environment.map.graph_sampler import GraphSampler
 from python_motion_planning.common import TYPES
 from path_planning.data_generation.dataset_label import get_trajectory_map
-from path_planning.data_generation.dataset_ground_truth_util import *
+from path_planning.data_generation.dataset_util import *
 from multiprocessing import Pool, cpu_count
 from tqdm import tqdm
 

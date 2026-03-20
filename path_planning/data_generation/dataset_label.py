@@ -6,7 +6,7 @@ from path_planning.utils.util import read_graph_sampler_from_yaml, read_agents_f
 from tqdm import tqdm
 from multiprocessing import Pool, cpu_count
 from typing import Tuple
-from path_planning.data_generation.dataset_ground_truth_util import *
+from path_planning.data_generation.dataset_util import *
 
 def get_start_goal_locations(agents):
     start_goal_locations = []
@@ -109,7 +109,7 @@ def process_single_case_trajectories(args: Tuple) -> Tuple[bool, Path]:
         return False, case_dir
 
 
-def label_dataset(path, graph_file_name: Path = "graph_map.pkl", mapf_solver_name: str = "cbs", roadmap_type: str = "grid", agent_velocity: float = 0.0, visualize_density_map: bool = False, num_workers: int = None):
+def label_dataset(path, graph_file_name: Path = None, mapf_solver_name: str = "cbs", roadmap_type: str = "grid", agent_velocity: float = 0.0, visualize_density_map: bool = False, num_workers: int = None):
     """
     Label & parse all trajectories for all cases in a dataset directory.
 
