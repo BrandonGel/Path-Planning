@@ -155,4 +155,3 @@ def create_path_parameter_directory(base_path: Path, config: Dict,dump_config: b
         with open(get_config_file_path(map_path), "w") as f:
             yaml.safe_dump(_to_native_yaml(base_config), f)
     return map_path
-

@@ -209,12 +209,14 @@ def shuffle_agents_goals(inpt: Dict, agent_goal_index: List[int]) -> Dict:
         agents[i]["goal"] = start_goals[agent_goal_index[i + len(agents)]]
     return agents
 
-def create_map(param: Dict, generate_new_graph: bool = False,graph_file: Path =None):
+def create_map(param: Dict, generate_new_graph: bool = False,graph_file: Path =None,verbose: bool = True):
     bounds = param["map"]["bounds"]
     resolution = param["map"]["resolution"]
     if graph_file and graph_file.exists() and not generate_new_graph:
         map_ = GraphSampler(bounds=bounds, resolution=resolution, start=[], goal=[])
         map_.load_graph_sampler(graph_file)
+        if verbose:
+            print(f"Loaded graph from {graph_file}")
     else:
         obstacles = np.array(param["map"]["obstacles"])
         agents = param["agents"]
@@ -250,6 +252,7 @@ def create_map(param: Dict, generate_new_graph: bool = False,graph_file: Path =N
         map_.set_start(start)
         map_.set_goal(goal)
 
+        # TODO: UPDATE THIS TO BE SIMPLE
         if road_map_type == 'grid':
             nodes = map_.generateRandomNodes(generate_grid_nodes=True)
             map_.generate_roadmap(nodes)
@@ -266,9 +269,11 @@ def create_map(param: Dict, generate_new_graph: bool = False,graph_file: Path =N
         else:
             print("Invalid road map name provided")
         map_.save_graph_sampler(graph_file)
+        if verbose:
+            print(f"Generated and saved graph to {graph_file}")
     return map_
 
-def generate_permutation(inpt: Dict, config: Dict, case_path: Path):
+def generate_permutation(inpt: Dict, config: Dict, case_path: Path,verbose: bool = True):
     # Generate and save permutation agent configs
     nb_permutations = config["nb_permutations"]
     nb_permutations_tries = config["nb_permutations_tries"]
@@ -286,6 +291,8 @@ def generate_permutation(inpt: Dict, config: Dict, case_path: Path):
             if unique_attempts >= max_unique_attempts:
                 break
         if unique_attempts >= max_unique_attempts:
+            if verbose:
+                print(f"Failed to generate unique permutation after {max_unique_attempts} attempts")
             break
 
         unique_permutations.add(tuple(start_goal_index))
@@ -297,6 +304,8 @@ def generate_permutation(inpt: Dict, config: Dict, case_path: Path):
         _,perm_file = generate_input_perm_yaml_path(case_path, perm_id)
         with open(perm_file, "w") as f:
             yaml.safe_dump(_to_native_yaml(inpt_copy), f)
+        if verbose:
+            print(f"Generated and saved permutation {perm_id} to {perm_file}")
         start_goal_index = np.random.permutation(start_goal_index)
 
 def process_single_case_map_generation(args: Tuple) -> Optional[int]:
@@ -329,10 +338,10 @@ def process_single_case_map_generation(args: Tuple) -> Optional[int]:
         graph_file = get_graph_file_path(map_path)
 
     # Build and save graph once
-    create_map(inpt, generate_new_graph,graph_file)
+    create_map(inpt, generate_new_graph,graph_file,verbose)
 
     # Generate and save permutation agent configs
-    generate_permutation(inpt, config, case_path)
+    generate_permutation(inpt, config, case_path,verbose)
 
     return case_id
 

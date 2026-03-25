@@ -68,6 +68,10 @@ class Visualizer2D(BaseVisualizer2D):
         )
         self.figsize = figsize
         self.fig.tight_layout()
+        self.ax.spines['top'].set_visible(False)
+        self.ax.spines['right'].set_visible(False)
+        self.ax.spines['left'].set_visible(False)
+        self.ax.spines['bottom'].set_visible(False)
 
     def set_fig_size(self, width: float, height: float, aspect_ratio: float = 0.0):
         if aspect_ratio != 0.0:
@@ -98,7 +102,7 @@ class Visualizer2D(BaseVisualizer2D):
         if masked_map is not None:
             type_data = np.ma.masked_where(masked_map == 1, type_data)
 
-        plt.imshow(
+        self.ax.imshow(
             np.transpose(type_data), 
             cmap=self.cmap, 
             norm=self.norm, 
@@ -109,7 +113,7 @@ class Visualizer2D(BaseVisualizer2D):
             )
 
         if show_esdf:   # draw esdf hotmap
-            plt.imshow(
+            self.ax.imshow(
                 np.transpose(grid_map.esdf),
                 cmap="jet",
                 origin="lower",
@@ -118,10 +122,10 @@ class Visualizer2D(BaseVisualizer2D):
                 alpha=alpha_esdf,
                 zorder=self.zorder['esdf'],
             )
-            plt.colorbar(label="ESDF distance")
+            self.ax.colorbar(label="ESDF distance")
             
         if equal: 
-            plt.axis("equal")
+            self.ax.axis("equal")
         
     def plot_road_map(self,
                         map_: Grid,

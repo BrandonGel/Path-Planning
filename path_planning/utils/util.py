@@ -142,7 +142,7 @@ def read_graph_sampler_from_yaml(filename: str,use_discrete_space: bool = True):
     
     env = GraphSampler(bounds=bounds, resolution=resolution,start=[],goal=[],use_discrete_space=use_discrete_space)
     if len(dimensions) == 2 or len(dimensions) == 3:
-        env.set_obstacle_map(obstacles)
+        env.set_obstacles(obstacles)
     else:
         raise ValueError(f"Unsupported dimensions: {len(dimensions)}")
     return env

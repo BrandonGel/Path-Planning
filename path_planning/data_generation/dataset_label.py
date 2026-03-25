@@ -108,7 +108,6 @@ def process_single_case_trajectories(args: Tuple) -> Tuple[bool, Path]:
         print(f"Error processing {case_dir.name}: {e}")
         return False, case_dir
 
-
 def label_dataset(path, graph_file_name: Path = None, mapf_solver_name: str = "cbs", roadmap_type: str = "grid", agent_velocity: float = 0.0, visualize_density_map: bool = False, num_workers: int = None):
     """
     Label & parse all trajectories for all cases in a dataset directory.
