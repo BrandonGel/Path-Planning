@@ -2,7 +2,7 @@ from typing import List, Tuple
 import numpy as np
 from scipy.spatial import KDTree, Delaunay
 from path_planning.common.environment.node import Node
-from python_motion_planning.common.env.map.grid import Grid
+from python_motion_planning.common.env.map.grid import Grid, GridTypeMap
 from scipy.spatial.distance import cdist
 from itertools import product
 from python_motion_planning.common import TYPES
@@ -147,7 +147,8 @@ class GraphSampler(Grid):
         else:
             raise ValueError(f"Unsupported dimensions: {len(obstacles.shape)}")
         for obstacle in obstacles:
-            node = Node(tuple(obstacle),None,0,0)
+            pos = tuple(obstacle)
+            node = Node(pos,None,0,0)
             self.obstacle_nodes.append(node)
 
     def get_obstacle_map(self) -> np.ndarray:
@@ -691,7 +692,7 @@ class GraphSampler(Grid):
         return point_int
 
     def set_obstacles(self, obstacles: np.ndarray):
-        self.obstacles = obstacles
+        self.obstacles = [tuple(obs) for obs in obstacles]
         self.set_obstacle_map(obstacles)
 
     def set_inflation_radius(self, radius: float):
@@ -783,6 +784,112 @@ class GraphSampler(Grid):
 
         points = np.array([samp.current for samp in self.nodes])
         self.sample_kd_tree = KDTree(points)
+
+    def rotate(self, k: int, axes: Tuple[int, int] = (0, 1)):
+        """
+        Rotate the grid type map and all node / start / goal / obstacle positions
+        in-place by k * 90 degrees counterclockwise in the plane of ``axes``.
+
+        ``axes`` is a pair of distinct dimension indices (same convention as ``numpy.rot90``).
+        When k is 1 or 3, the world extents along those two axes are swapped.
+        Road map topology and cost_matrix are unchanged (rotation preserves distances).
+
+        Example: for a 2D map, ``rotate(1, (0, 1))`` is a 90° CCW rotation in the
+        plane of dimensions 0 and 1.
+        """
+        a, b = int(axes[0]), int(axes[1])
+        if a == b or not (0 <= a < self.dim) or not (0 <= b < self.dim):
+            raise ValueError(
+                f"axes must be two distinct valid dimension indices, got {axes}"
+            )
+
+        k %= 4  # 0, 1, 2, 3
+        if k == 0:
+            return
+
+        old_bounds = np.asarray(self.bounds, dtype=float).copy()
+        old_shape = tuple(int(s) for s in self.shape)
+
+        def rotate_grid_nd(coords: tuple) -> tuple:
+            ca, cb = coords[a], coords[b]
+            if k == 1:
+                new_ca, new_cb = old_shape[b] - 1 - cb, ca
+            elif k == 2:
+                new_ca, new_cb = old_shape[a] - 1 - ca, old_shape[b] - 1 - cb
+            else:
+                new_ca, new_cb = cb, old_shape[a] - 1 - ca
+            lst = list(coords)
+            lst[a], lst[b] = new_ca, new_cb
+            return tuple(lst)
+
+        def transform_pos(p: Tuple[float, ...]) -> Tuple[float, ...]:
+            if self.use_discrete_space:
+                p = tuple(int(round(float(v))) for v in p)
+            new_coords = rotate_grid_nd(p)
+            if all(isinstance(v, int) for v in p):
+                return new_coords
+            return tuple(float(v) for v in new_coords)
+
+        self.type_map = GridTypeMap(
+            np.rot90(self.type_map.data.copy(), k=k, axes=(a, b))
+        )
+        self._esdf = np.rot90(self._esdf.copy(), k=k, axes=(a, b))
+
+        if k in (1, 3):
+            range_a = old_bounds[a, 1] - old_bounds[a, 0]
+            range_b = old_bounds[b, 1] - old_bounds[b, 0]
+            self._bounds[a, 1] = old_bounds[a, 0] + range_b
+            self._bounds[b, 1] = old_bounds[b, 0] + range_a
+
+        self.nodes = [
+            Node(transform_pos(node.current), None, 0, 0) for node in self.nodes
+        ]
+        self.start = [list(transform_pos(tuple(s))) for s in self.start]
+        self.goal = [list(transform_pos(tuple(g))) for g in self.goal]
+        self.grid_points = [transform_pos(tuple(gp)) for gp in self.grid_points]
+
+        if len(self.obstacles) > 0:
+            obs = np.asarray(self.obstacles, dtype=int)
+            new_obs = np.empty_like(obs)
+            for idx in range(len(obs)):
+                rotated = rotate_grid_nd(
+                    tuple(int(obs[idx, d]) for d in range(obs.shape[1]))
+                )
+                new_obs[idx] = rotated
+            self.obstacles = [tuple(obs) for obs in new_obs]
+
+        self.obstacle_nodes = [
+            Node(rotate_grid_nd(tuple(int(v) for v in n.current)), None, 0, 0)
+            for n in self.obstacle_nodes
+        ]
+
+        # 6. Rebuild index dicts
+        self.node_index_dict = {node: i for i, node in enumerate(self.nodes)}
+        self.start_nodes_index = {
+            Node(tuple(s), None, 0, 0): self.node_index_dict[Node(tuple(s), None, 0, 0)]
+            for s in self.start
+        }
+        self.goal_nodes_index = {
+            Node(tuple(g), None, 0, 0): self.node_index_dict[Node(tuple(g), None, 0, 0)]
+            for g in self.goal
+        }
+        self.grid_nodes_index = {
+            Node(tuple(gp), None, 0, 0): self.node_index_dict[Node(tuple(gp), None, 0, 0)]
+            for gp in self.grid_points
+        }
+
+        # 7. Clear caches and rebuild derived structures
+        self.start_to_all_edges_dict = {}
+        self.goal_to_all_edges_dict = {}
+
+        if self.nodes:
+            points = np.array([samp.current for samp in self.nodes])
+            self.sample_kd_tree = KDTree(points)
+        else:
+            self.sample_kd_tree = None
+
+        if self.use_constraint_sweep and len(self.edges) > 0:
+            self.set_constraint_sweep()
 
     def create_pruned_copy(self, kept_node_indices: np.ndarray):
         """

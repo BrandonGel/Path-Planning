@@ -3,6 +3,8 @@ Dataset generation for MAPF training using the ground truth dataset.
 """
 
 from path_planning.utils.util import read_graph_sampler_from_yaml, read_agents_from_yaml
+import os
+import tempfile
 import numpy as np
 from pathlib import Path
 from tqdm import tqdm
@@ -14,7 +16,38 @@ from scipy.ndimage import generic_filter,generate_binary_structure
 from path_planning.utils.util import set_global_seed
 from path_planning.data_generation.dataset_util import *
 
-target_space_type_to_name = {
+
+def _clone_graph_sampler(map_: GraphSampler) -> GraphSampler:
+    """
+    Clone a GraphSampler without deepcopy. CGAL/SWIG objects in constraint_sweep
+    are not copyable; save_graph_sampler only stores plain data and load
+    reconstructs a fresh CGAL_Sweep.
+    """
+    fd, path = tempfile.mkstemp(suffix=".pkl")
+    os.close(fd)
+    try:
+        map_.save_graph_sampler(path)
+        clone = GraphSampler(
+            bounds=map_.bounds,
+            resolution=map_.resolution,
+            start=[],
+            goal=[],
+            sample_num=0,
+            num_neighbors=map_.num_neighbors,
+            min_edge_len=map_.min_edge_length,
+            max_edge_len=map_.max_edge_length,
+            use_discrete_space=map_.use_discrete_space,
+            use_constraint_sweep=map_.use_constraint_sweep,
+            record_sweep=map_.record_sweep,
+            use_exact_collision_check=map_.use_exact_collision_check,
+        )
+        clone.load_graph_sampler(path)
+        return clone
+    finally:
+        os.unlink(path)
+
+
+TARGET_SPACE_TYPE_TO_NAME = {
     'binary',
     'bilinear',
     'distribution',
@@ -62,30 +95,29 @@ def get_prob_map(target_space_type:str, map:GraphSampler,density_map:np.ndarray,
         prob_map = np.clip(density_map,0,1)/np.clip(density_map,0,1).sum()
     return prob_map
 
-
 def generate_target_space(target_space_type:str, map:GraphSampler,density_map:np.ndarray,ignore_generate: bool = False,config:dict = None):
     y = []
-    if target_space_type.lower() in target_space_type_to_name:
+    if target_space_type.lower() in TARGET_SPACE_TYPE_TO_NAME:
         discrete_pos = [map.world_to_map(node.current,discrete=True) for node in map.nodes]
         y = np.clip([density_map[s] for s in discrete_pos],0,1)
-    elif target_space_type.lower() in target_space_type_to_name:
+    elif target_space_type.lower() in TARGET_SPACE_TYPE_TO_NAME:
         discrete_pos = [map.world_to_map(node.current,discrete=True) for node in map.nodes]
         mesh_space = tuple((np.arange(0,map.shape[i],1) for i in range(map.dim)))
         interp_func = RegularGridInterpolator(mesh_space, density_map/np.sum(density_map), method="linear")
         y = np.array([interp_func(discrete_pos[i]) for i in range(len(discrete_pos))])
-    elif target_space_type.lower() in target_space_type_to_name:
+    elif target_space_type.lower() in TARGET_SPACE_TYPE_TO_NAME:
         discrete_pos = [map.world_to_map(node.current,discrete=True) for node in map.nodes]
         y = np.array([density_map[s] for s in discrete_pos])
         y = y / density_map.sum()
-    elif 'fuzzy' in target_space_type_to_name[target_space_type.lower()]:
+    elif 'fuzzy' in TARGET_SPACE_TYPE_TO_NAME[target_space_type.lower()]:
         num_hops = int(config["num_hops"]) if config is not None and "num_hops" in config else 1
         if num_hops < 1:
             num_hops = 1
         discrete_pos = [map.world_to_map(node.current, discrete=True) for node in map.nodes]            
         y_density = np.array([density_map[s] for s in discrete_pos]) 
-        if target_space_type.lower() in target_space_type_to_name:
+        if target_space_type.lower() in TARGET_SPACE_TYPE_TO_NAME:
             y_density = np.clip(y_density,0,1)
-        elif target_space_type.lower() in target_space_type_to_name:
+        elif target_space_type.lower() in TARGET_SPACE_TYPE_TO_NAME:
             y_density = y_density / np.sum(density_map)
         y = y_density.copy()
         
@@ -125,13 +157,13 @@ def generate_target_space(target_space_type:str, map:GraphSampler,density_map:np
                 
                 # Vectorized update
                 y = np.clip(np.maximum(y_density, y_inverse_cost), 0, 1)
-    elif 'convolution' in  target_space_type_to_name[target_space_type.lower()]:
+    elif 'convolution' in  TARGET_SPACE_TYPE_TO_NAME[target_space_type.lower()]:
         num_hops = int(config["num_hops"]) if config is not None and "num_hops" in config else 1
         if num_hops < 1:
             num_hops = 1
-        if target_space_type.lower() in target_space_type_to_name:
+        if target_space_type.lower() in TARGET_SPACE_TYPE_TO_NAME:
             new_density_map = np.clip(density_map,0,1)
-        elif target_space_type.lower() in target_space_type_to_name:
+        elif target_space_type.lower() in TARGET_SPACE_TYPE_TO_NAME:
             new_density_map = density_map / density_map.sum()
         new_density_map[map.get_obstacle_map()] = -1
 
@@ -215,11 +247,14 @@ def process_single_case_graphs(args: Tuple[Path, dict]) -> Tuple[bool, Path]:
     agent_velocity = config["agent_velocity"] if "agent_velocity" in config else 0.0
     is_start_goal_discrete = config["is_start_goal_discrete"] if "is_start_goal_discrete" in config else True
     graph_file_name = config["graph_file_name"] if "graph_file_name" in config else None
+    agent_radius = config["agent_radius"] if "agent_radius" in config else 0.0
+    resolution = config["resolution"] if "resolution" in config else 1.0
 
     input_file = get_input_file_path(case_dir)
     map_ = read_graph_sampler_from_yaml(
         input_file, use_discrete_space=use_discrete_space
     )
+    map_.set_inflation_radius(radius=agent_radius+np.sqrt(2)/2*resolution)
     agents = read_agents_from_yaml(input_file)
     gt_dir = generate_roadmap_path(generate_ground_truth_path(case_dir), roadmap_type_gt)
     solution_name_suffix = get_solution_name_suffix(graph_file=graph_file_name)
@@ -227,22 +262,12 @@ def process_single_case_graphs(args: Tuple[Path, dict]) -> Tuple[bool, Path]:
     density_map = np.load(density_map_file)
 
     # Starts and Goals are assumed to be in grid space
-    if use_discrete_space:
-        map_.set_parameters(
-            sample_num=0,
-            num_neighbors=num_neighbors,
-            min_edge_len=min_edge_len,
-            max_edge_len=max_edge_len,
-        )
-        
-    else:
-        map_.set_parameters(
-            sample_num=num_samples,
-            num_neighbors=num_neighbors,
-            min_edge_len=min_edge_len,
-            max_edge_len=max_edge_len,
-        )
-
+    map_.set_parameters(
+        sample_num=0 if use_discrete_space else num_samples,
+        num_neighbors=num_neighbors,
+        min_edge_len=min_edge_len,
+        max_edge_len=max_edge_len,
+    )
     if is_start_goal_discrete and not use_discrete_space:
         start = [map_.map_to_world(agent["start"]) for agent in agents]
         goal = [map_.map_to_world(agent["goal"]) for agent in agents]
@@ -299,48 +324,56 @@ def process_single_case_graphs(args: Tuple[Path, dict]) -> Tuple[bool, Path]:
             map_.save_graph_sampler(graph_file)
 
         # Generate Target Space ('y')
-        y = generate_target_space(target_space, map_, density_map,config=config)
-        if target_space.lower() in target_space_type_to_name:
+        if target_space.lower() in TARGET_SPACE_TYPE_TO_NAME:
             y_type_name = target_space.lower()
         else:
             raise ValueError(f"Target space type {target_space} not supported")
         target_file = get_target_file_path(graph_sample_path, y_type_name)
-        np.save(target_file, y)
-
-        num_augmentations = 2**map_.dim
-        for augmentation_id in range(1,num_augmentations):
-            graph_sample_path = generate_sample_path(sample_base_dir, ii, augmentation_id)
-            gnn_graph_file = get_graph_gnn_file_path(graph_sample_path)
-            graph_file = get_graph_file_path(graph_sample_path)
-            if target_space.lower() in target_space_type_to_name:
-                y_type_name = target_space.lower()
-            else:
-                raise ValueError(f"Target space type {target_space} not supported")
-            target_file = get_target_file_path(graph_sample_path, y_type_name)
-            if not generate_new_graph and target_file.exists() and gnn_graph_file.exists() and graph_file.exists():
-                continue
-
-            # Generate Target Space ('y')
-            ndata_augmented = ndata.copy()
-            binary_id = np.binary_repr(augmentation_id, width=map_.dim)
-            for i in range(map_.dim):
-                if binary_id[i] == '1':
-                    bounds_offset = map_.bounds[i][1]-map_.bounds[i][0]
-                    ndata_augmented[:,i] = -ndata_augmented[:,i]
-                    ndata_augmented[:,i] += bounds_offset
-            np.savez_compressed(
-                gnn_graph_file,
-                node_features=ndata_augmented.astype(np.float32),
-                edge_index=node_to_node_edges_arr,
-                edge_attr=node_to_node_weights_arr,
-                approx_edge_index=start_goal_edges_arr,
-                approx_edge_attr=start_goal_weights_arr,
-                binary_id=binary_id
-            )
+        if not (use_exisiting_graph and target_file.exists()):
             y = generate_target_space(target_space, map_, density_map,config=config)
             np.save(target_file, y)
 
+        # 4 rotation augmentations: k = 1, 2, 3  (90°, 180°, 270° CCW)
+        num_augmentations = 4
+        for augmentation_id in range(1, num_augmentations):
+            graph_sample_path = generate_sample_path(sample_base_dir, ii, augmentation_id)
+            gnn_graph_file = get_graph_gnn_file_path(graph_sample_path)
+            graph_file = get_graph_file_path(graph_sample_path)
+            target_file = get_target_file_path(graph_sample_path, y_type_name)
 
+            use_existing_aug = gnn_graph_file.exists() and graph_file.exists() and not generate_new_graph
+            if use_existing_aug and target_file.exists():
+                continue
+
+            graph_sample_path.mkdir(parents=True, exist_ok=True)
+
+            # Rotate a fresh copy of the map by augmentation_id * 90° CCW
+            map_aug = _clone_graph_sampler(map_)
+            map_aug.rotate(augmentation_id, axes=(0, 1))
+
+            # Rotate the density map to match the new orientation
+            rotated_density = np.rot90(density_map, k=augmentation_id, axes=(0, 1))
+
+            # Generate node features and graph arrays for the rotated map
+            (ndata_aug,
+             node_to_node_edges_arr_aug,
+             node_to_node_weights_arr_aug,
+             start_goal_edges_arr_aug,
+             start_goal_weights_arr_aug) = transform_graph_map_to_gnn(map_aug)
+
+            np.savez_compressed(
+                gnn_graph_file,
+                node_features=ndata_aug.astype(np.float32),
+                edge_index=node_to_node_edges_arr_aug,
+                edge_attr=node_to_node_weights_arr_aug,
+                approx_edge_index=start_goal_edges_arr_aug,
+                approx_edge_attr=start_goal_weights_arr_aug,
+                binary_id=np.binary_repr(augmentation_id, width=2),
+            )
+            map_aug.save_graph_sampler(graph_file)
+
+            y = generate_target_space(target_space, map_aug, rotated_density, config=config)
+            np.save(target_file, y)
         map_.clear_data()
 
     return True, case_dir
