@@ -493,6 +493,8 @@ class GraphSampler(Grid):
             self.generate_planar_map(samples,use_option='cdt')
         elif roadmap_type == 'midpoints':
             self.generate_planar_map(samples,use_option='midpoints')
+        elif roadmap_type == 'centroids':
+            self.generate_planar_map(samples,use_option='centroids')
         elif roadmap_type == 'voronoi':
             self.generate_planar_map(samples,use_option='voronoi')
         elif roadmap_type == 'rrg':

@@ -81,6 +81,37 @@ def dedupe_points_and_neighbors(
     new_neighbors = [sorted(list(s)) for s in new_neighbors_sets]
     return new_points, new_neighbors
 
+def get_circumcenter(p1:np.ndarray, p2:np.ndarray, p3:np.ndarray):
+    x1, y1 = p1[:,0], p1[:,1]
+    x2, y2 = p2[:,0], p2[:,1]
+    x3, y3 = p3[:,0], p3[:,1]
+
+    # Calculate midpoints of two sides (p1-p2 and p2-p3)
+    mid1 = ((x1 + x2) / 2, (y1 + y2) / 2)
+    mid2 = ((x2 + x3) / 2, (y2 + y3) / 2)
+
+    # Perpendicular bisector of p1-p2: Ax + By = C
+    # Slope of p1-p2 is (y2-y1)/(x2-x1). 
+    # Perpendicular slope is -(x2-x1)/(y2-y1).
+    A1 = x2 - x1
+    B1 = y2 - y1
+    C1 = A1 * mid1[0] + B1 * mid1[1]
+
+    # Perpendicular bisector of p2-p3
+    A2 = x3 - x2
+    B2 = y3 - y2
+    C2 = A2 * mid2[0] + B2 * mid2[1]
+
+    # Solve the 2x2 system using Cramer's rule
+    det = A1 * B2 - A2 * B1
+    if np.any(abs(det) < 1e-10):
+        return None  # Points are collinear
+
+    x = (C1 * B2 - C2 * B1) / det
+    y = (A1 * C2 - A2 * C1) / det
+
+    return np.array([x, y]).T
+
 
 def get_boundary(map_,mask:np.ndarray):
     use_discrete_space = map_.use_discrete_space
@@ -395,7 +426,7 @@ def connect_midpoints(triangles:np.ndarray,verts:np.ndarray,bnd_pts:np.ndarray,b
         midpoint_neighbors[v].append(int(u))
     return midpoints,midpoint_neighbors
 
-def connect_voronoi(triangles: np.ndarray, verts: np.ndarray, bnd_pts:np.ndarray, bnd_segs:np.ndarray, start_goal_indices={}):
+def connect_centroids(triangles: np.ndarray, verts: np.ndarray, bnd_pts:np.ndarray, bnd_segs:np.ndarray, start_goal_indices={}):
     """
     Compute triangle centroids and connect neighboring triangles' centroids, creating a Voronoi graph.
 
@@ -462,6 +493,73 @@ def connect_voronoi(triangles: np.ndarray, verts: np.ndarray, bnd_pts:np.ndarray
     centroid_neighbors = [sorted(list(nbrs)) for nbrs in adj_all]
     return centroids_all, centroid_neighbors
 
+def connect_voronoi(triangles: np.ndarray, verts: np.ndarray, bnd_pts:np.ndarray, bnd_segs:np.ndarray, start_goal_indices={}):
+    """
+    Compute triangle centroids and connect neighboring triangles' centroids, creating a Voronoi graph.
+
+    Two triangles are considered neighbors if they share an undirected edge.
+
+    Returns:
+        voronoi_points: (T + K, 2) float array of Voronoi points, optionally appended with K start/goal points.
+        voronoi_neighbors: list[list[int]] adjacency list over (triangles + start/goal nodes).
+    """
+    triangles = np.asarray(triangles, dtype=int)
+    verts = np.asarray(verts, dtype=float)
+    if triangles.ndim != 2 or triangles.shape[1] != 3:
+        raise ValueError("triangles must have shape (T, 3)")
+    if verts.ndim != 2 or verts.shape[1] < 2:
+        raise ValueError("verts must have shape (V, 2) or (V, D>=2)")
+    tri_pts = verts[triangles]  # (T,3,2)
+    voronoi_points = get_circumcenter(tri_pts[:,0],tri_pts[:,1],tri_pts[:,2])  # (T,2)
+    num_bdry_pts = len(bnd_pts)
+
+    # Build triangle adjacency via shared edges
+    edge_to_tri = {}  # (min_vi, max_vi) -> first triangle index that had it
+    T = len(triangles)
+    adj = [set() for _ in range(T)]
+    for ti, tri in enumerate(triangles):
+        a, b, c = int(tri[0]), int(tri[1]), int(tri[2])
+        for x, y in ((a, b), (b, c), (c, a)):
+            if x == y:
+                continue
+            e = (x, y) if x < y else (y, x)
+            other = edge_to_tri.get(e)
+            if other is None:
+                edge_to_tri[e] = ti
+            else:
+                if other != ti:
+                    adj[ti].add(int(other))
+                    adj[int(other)].add(int(ti))
+
+
+    # Optionally append start/goal nodes and connect them to incident triangle centroids.
+    if start_goal_indices is None or len(start_goal_indices) == 0:
+        voronoi_neighbors = [sorted(list(nbrs)) for nbrs in adj]
+        return voronoi_points, voronoi_neighbors
+
+    # Accept either:
+    # - dict-like: {Node -> vertex_index} (used elsewhere in this repo), or
+    # - iterable of vertex indices
+    sg_positions = np.asarray([node.current for node in start_goal_indices.keys()], dtype=float)
+    voronoi_points_all = np.vstack([voronoi_points, sg_positions])  # (T+K,2)
+    adj_all = [set(n) for n in adj]
+    adj_all.extend([set() for _ in range(len(start_goal_indices))])
+
+    # # Map each vertex index -> triangles that include it
+    v0 = triangles[:, 0]
+    v1 = triangles[:, 1]
+    v2 = triangles[:, 2]
+    for i, (node,index) in enumerate(start_goal_indices.items()):
+        vidx = int(num_bdry_pts + index)
+        incident = np.where((v0 == vidx) | (v1 == vidx) | (v2 == vidx))[0]
+        pass
+        for ti in incident.tolist():
+            adj_all[T+i].add(int(ti))
+            adj_all[int(ti)].add(T+i)
+    
+    voronoi_neighbors = [sorted(list(nbrs)) for nbrs in adj_all]
+    return voronoi_points_all, voronoi_neighbors
+
 def get_planar_graph(map_,mask:np.ndarray, use_option:str = 'cdt'):
     interior_points = np.array([p.current for p in map_.nodes])
     start_goal_indices = map_.start_nodes_index | map_.goal_nodes_index
@@ -474,6 +572,8 @@ def get_planar_graph(map_,mask:np.ndarray, use_option:str = 'cdt'):
         points,neighbors = connect_cdt(cdt)
     elif use_option == 'midpoints':
         points,neighbors = connect_midpoints(cdt['triangles'],cdt['vertices'],bnd_pts,bnd_segs,start_goal_indices)
+    elif use_option == 'centroids':
+        points,neighbors = connect_centroids(cdt['triangles'],cdt['vertices'],bnd_pts,bnd_segs,start_goal_indices)
     elif use_option == 'voronoi':
         points,neighbors = connect_voronoi(cdt['triangles'],cdt['vertices'],bnd_pts,bnd_segs,start_goal_indices)
     else:
