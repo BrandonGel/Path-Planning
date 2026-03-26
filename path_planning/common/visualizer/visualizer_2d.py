@@ -40,9 +40,9 @@ class Visualizer2D(BaseVisualizer2D):
                     TYPES.CUSTOM: "#bbbbbb",
                 },
                 zorder: dict = {
-                    'density_map': 5,
                     'grid_map': 10,
                     'voxels': 10,
+                    'density_map': 15,
                     'esdf': 20,
                     'road_map': 25,
                     'expand_tree_edge': 30,
@@ -97,10 +97,7 @@ class Visualizer2D(BaseVisualizer2D):
 
         self.grid_map = grid_map
         self.dim = grid_map.dim
-        type_data = grid_map.type_map.data
-
-        if masked_map is not None:
-            type_data = np.ma.masked_where(masked_map == 1, type_data)
+        type_data = grid_map.type_map.data.copy()
 
         self.ax.imshow(
             np.transpose(type_data), 
@@ -133,10 +130,11 @@ class Visualizer2D(BaseVisualizer2D):
                         road_map: List[List[int]],
                         node_color: str = "#8c564b", 
                         edge_color: str = "#e377c2", 
-                        node_size: float = 1, 
+                        node_size: float = 50, 
                         linewidth: float = 1.0, 
                         node_alpha: float = 1.0,
                         edge_alpha: float = 0.3,
+                        node_value: List[float] = None,
                         cmap: mcolors.Colormap = None,
                         map_frame: bool = True) -> None:
         """
@@ -170,7 +168,10 @@ class Visualizer2D(BaseVisualizer2D):
                     self.ax.plot([x1, x2], [y1, y2], edge_color, linewidth=linewidth, alpha=edge_alpha, zorder=self.zorder['road_map'])
 
         # Plot all nodes
-        self.ax.scatter(x_coords, y_coords, c=node_color, s=node_size, alpha=node_alpha, zorder=self.zorder['road_map'], label='Sample nodes', cmap=cmap)
+        if node_value is not None:
+            self.ax.scatter(x_coords, y_coords, c=node_value, edgecolors='black', s=node_size, alpha=node_alpha, zorder=self.zorder['road_map'], label='Sample nodes', cmap=cmap)
+        else:
+            self.ax.scatter(x_coords, y_coords, c=node_color, edgecolors='black', s=node_size, alpha=node_alpha, zorder=self.zorder['road_map'], label='Sample nodes')
         
         # Plot start nodes (handle both list and single value)
         if hasattr(map_, 'start') and map_.start is not None:
@@ -345,16 +346,19 @@ class Visualizer2D(BaseVisualizer2D):
         assert self.grid_map is not None, "Grid map is not set"
 
         # Create a masked array to hide zero values
+        density_map_plot = density_map.copy()
         if masked_map is not None:
-            density_map = np.ma.masked_where(masked_map == 1, density_map)
+            density_map_plot[masked_map == 1] = 0
 
 
         im = self.ax.imshow(
-            np.transpose(density_map), 
+            np.transpose(density_map_plot), 
             cmap=self.cmap_density, 
             origin='lower', 
             interpolation=interpolation, 
             extent=[*self.grid_map.bounds[0], *self.grid_map.bounds[1]],
+            vmin=0,
+            vmax=max(np.max(density_map_plot),1),
             zorder=self.zorder['density_map'],  # Use esdf zorder to appear above grid_map but below paths
             alpha=alpha,
             )

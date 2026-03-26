@@ -13,6 +13,7 @@ from path_planning.data_generation.dataset_label import get_trajectory_map
 from path_planning.data_generation.dataset_util import *
 from multiprocessing import Pool, cpu_count
 from tqdm import tqdm
+from path_planning.utils.util import read_graph_sampler_from_yaml, read_agents_from_yaml
 
 def load_and_visualize_case(perm_path: Path,graph_file: Path = None,mapf_solver_name: str = "cbs",road_map_type: str = "grid", agent_velocity: float = 0.0, show_static=True, show_animation=True,verbose=True):
     """
@@ -27,8 +28,8 @@ def load_and_visualize_case(perm_path: Path,graph_file: Path = None,mapf_solver_
     """
     # Load input data
     input_file = get_input_file_path(perm_path)
-    with open(input_file, "r") as f:
-        input_data = yaml.safe_load(f)
+    map_ = read_graph_sampler_from_yaml(input_file, graph_file=graph_file)
+    agents = read_agents_from_yaml(input_file)
     
     # Load solution data
     mapf_path = generate_mapf_path(perm_path, mapf_solver_name)
@@ -39,25 +40,7 @@ def load_and_visualize_case(perm_path: Path,graph_file: Path = None,mapf_solver_
         solution_data = yaml.safe_load(f)
 
     if not solution_data["success"]:
-        raise Exception(f"Solution not successful: {solution_file}")
-    
-    # Extract map parameters
-    bounds = input_data["map"]["bounds"]
-    resolution = input_data["map"]["resolution"]
-    obstacles = np.array(input_data["map"]["obstacles"])
-    agents = input_data["agents"]
-    
-    
-    # Create map
-    map_ = GraphSampler(bounds=bounds, resolution=resolution, start=[], goal=[])
-    
-    # Place obstacles
-    if len(obstacles) > 0:
-        map_.type_map[obstacles[:, 0], obstacles[:, 1]] = TYPES.OBSTACLE
-    
-    # Configure map
-    map_.inflate_obstacles(radius=0)
-    map_.set_parameters(sample_num=0, num_neighbors=4.0, min_edge_len=0.0, max_edge_len=1.1)
+        print(f"Solution not successful: {solution_file}")
     
     # Set agent positions
     start = [agent['start'] for agent in agents]
@@ -65,9 +48,6 @@ def load_and_visualize_case(perm_path: Path,graph_file: Path = None,mapf_solver_
     map_.set_start(start)
     map_.set_goal(goal)
     
-    # Generate nodes and roadmap
-    nodes = map_.generateRandomNodes(generate_grid_nodes=True)
-    road_map = map_.generate_roadmap(nodes)
     
     # Print case info
     if verbose:
@@ -84,6 +64,9 @@ def load_and_visualize_case(perm_path: Path,graph_file: Path = None,mapf_solver_
         for agent_name, trajectory in schedule.items():
             path = np.array([[point['x'], point['y']] for point in trajectory])
             vis.plot_path(path)
+
+        if hasattr(map_, "nodes") and hasattr(map_, "road_map") and map_.nodes and map_.road_map is not None:
+            vis.plot_road_map(map_, map_.nodes, map_.road_map, map_frame=map_.use_discrete_space)
         
         plt.title(f"{perm_path.name} - Static Paths")
         vis.savefig(get_path_visualization_file(roadmap_path,solution_name_suffix,agent_velocity))
@@ -94,8 +77,9 @@ def load_and_visualize_case(perm_path: Path,graph_file: Path = None,mapf_solver_
         perm_trajectory_map = get_trajectory_map(solution_data["schedule"], map_)
         density_map = perm_trajectory_map.sum(axis=(0,1))
         visualizer = Visualizer2D(figname = f"{solution_file.name} - Density Map", figsize=(8, 8))
-        masked_map = ~map_.get_obstacle_map()
-        visualizer.plot_grid_map(map_, masked_map=masked_map)
+        visualizer.plot_grid_map(map_)
+        if hasattr(map_, "nodes") and hasattr(map_, "road_map") and map_.nodes and map_.road_map is not None:
+            visualizer.plot_road_map(map_, map_.nodes, map_.road_map, map_frame=map_.use_discrete_space)
         visualizer.plot_density_map(density_map)
         visualizer.savefig(get_heatmap_visualization_file(roadmap_path,solution_name_suffix,agent_velocity))
         if verbose:
@@ -112,7 +96,8 @@ def load_and_visualize_case(perm_path: Path,graph_file: Path = None,mapf_solver_
         
         # Create animation
         path_animation_file = get_path_animation_file(roadmap_path,solution_name_suffix,agent_velocity)
-        vis.animate(path_animation_file, map_, schedule, road_map=road_map)
+        if hasattr(map_, "nodes") and hasattr(map_, "road_map") and map_.nodes and map_.road_map is not None:
+            vis.animate(path_animation_file, map_, schedule, road_map=map_.road_map, map_frame=map_.use_discrete_space)
         if verbose:
             print(f"Animation saved to: {path_animation_file}")
 

@@ -112,7 +112,7 @@ def process_single_case(args: Tuple) -> Tuple[float, float, int]:
         mapf_path = generate_mapf_path(perm_path, mapf_solver_name)
         roadmap_path = generate_roadmap_path(mapf_path, road_map_type)
         solution_file = get_solution_file_path(roadmap_path, solution_name_suffix, agent_velocity)
-        if not solution_file.exists() and not generate_new_graph:
+        if not solution_file.exists() or generate_new_graph:
             perm_ids_unfinished.append(perm_id)
         else:
             with open(solution_file, "r") as f:

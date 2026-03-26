@@ -116,7 +116,7 @@ def get_solution_name_suffix(graph_file: Path = None):
     if graph_file is None:
         solution_name_suffix = "solution_graph_map"
     else:
-        solution_name_suffix = "solution_" + graph_file.stem
+        solution_name_suffix = "solution_" + Path(graph_file).stem
     return solution_name_suffix
 
 def generate_base_path(base_path: Path, config: Dict):

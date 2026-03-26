@@ -251,35 +251,11 @@ def process_single_case_graphs(args: Tuple[Path, dict]) -> Tuple[bool, Path]:
     resolution = config["resolution"] if "resolution" in config else 1.0
 
     input_file = get_input_file_path(case_dir)
-    map_ = read_graph_sampler_from_yaml(
-        input_file, use_discrete_space=use_discrete_space
-    )
-    map_.set_inflation_radius(radius=agent_radius+np.sqrt(2)/2*resolution)
     agents = read_agents_from_yaml(input_file)
     gt_dir = generate_roadmap_path(generate_ground_truth_path(case_dir), roadmap_type_gt)
     solution_name_suffix = get_solution_name_suffix(graph_file=graph_file_name)
     density_map_file = get_density_map_file(gt_dir, solution_name_suffix,agent_velocity)
     density_map = np.load(density_map_file)
-
-    # Starts and Goals are assumed to be in grid space
-    map_.set_parameters(
-        sample_num=0 if use_discrete_space else num_samples,
-        num_neighbors=num_neighbors,
-        min_edge_len=min_edge_len,
-        max_edge_len=max_edge_len,
-    )
-    if is_start_goal_discrete and not use_discrete_space:
-        start = [map_.map_to_world(agent["start"]) for agent in agents]
-        goal = [map_.map_to_world(agent["goal"]) for agent in agents]
-    elif not is_start_goal_discrete and use_discrete_space:
-        start = [map_.world_to_map(agent["start"],discrete=True) for agent in agents]
-        goal = [map_.world_to_map(agent["goal"],discrete=True) for agent in agents]
-    else:
-        start = [agent["start"] for agent in agents]
-        goal = [agent["goal"] for agent in agents]
-    map_.set_start(start)
-    map_.set_goal(goal)
-    
 
     sample_base_dir = generate_roadmap_path(generate_sample_base_path(case_dir), roadmap_type)
     for ii in range(num_graph_samples):
@@ -290,7 +266,11 @@ def process_single_case_graphs(args: Tuple[Path, dict]) -> Tuple[bool, Path]:
         graph_gnn_file = get_graph_gnn_file_path(graph_sample_path)
         use_exisiting_graph = graph_gnn_file.exists() and graph_file.exists() and not generate_new_graph
         if use_exisiting_graph:
-            map_.load_graph_sampler(graph_file)
+            map_ = read_graph_sampler_from_yaml(
+                input_file, use_discrete_space=use_discrete_space,
+                graph_file=graph_file_name,
+                args={"use_constraint_sweep": False}
+            )
             data_dict = np.load(graph_gnn_file)
             ndata = data_dict['node_features']
             node_to_node_edges_arr = data_dict['edge_index']
@@ -299,6 +279,29 @@ def process_single_case_graphs(args: Tuple[Path, dict]) -> Tuple[bool, Path]:
             start_goal_weights_arr = data_dict['approx_edge_attr']
             binary_id = data_dict['binary_id']
         else:
+            map_ = read_graph_sampler_from_yaml(
+                input_file, use_discrete_space=use_discrete_space
+            )
+            map_.set_inflation_radius(radius=agent_radius+np.sqrt(2)/2*resolution)
+            # Starts and Goals are assumed to be in grid space
+            map_.set_parameters(
+                sample_num=0 if use_discrete_space else num_samples,
+                num_neighbors=num_neighbors,
+                min_edge_len=min_edge_len,
+                max_edge_len=max_edge_len,
+            )
+            if is_start_goal_discrete and not use_discrete_space:
+                start = [map_.map_to_world(agent["start"]) for agent in agents]
+                goal = [map_.map_to_world(agent["goal"]) for agent in agents]
+            elif not is_start_goal_discrete and use_discrete_space:
+                start = [map_.world_to_map(agent["start"],discrete=True) for agent in agents]
+                goal = [map_.world_to_map(agent["goal"],discrete=True) for agent in agents]
+            else:
+                start = [agent["start"] for agent in agents]
+                goal = [agent["goal"] for agent in agents]
+            map_.set_start(start)
+            map_.set_goal(goal)
+
             # Generates Nodes & Edges
             weighted_sampling = config["weighted_sampling"] if "weighted_sampling" in config else False
             if weighted_sampling:

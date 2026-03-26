@@ -17,203 +17,32 @@ from path_planning.data_generation.dataset_util import *
 from multiprocessing import Pool, cpu_count
 from tqdm import tqdm
 from path_planning.data_generation.dataset_generate import TARGET_SPACE_TYPE_TO_NAME
+from path_planning.utils.util import read_graph_sampler_from_yaml
 
-def load_and_visualize_case(perm_path: Path,graph_file: Path = None,mapf_solver_name: str = "cbs",road_map_type: str = "grid", agent_velocity: float = 0.0, show_static=True, show_animation=True,verbose=True):
-    """
-    Load and visualize a single training case.
-    
-    Args:
-        perm_path: Path to the permutation directory
-        mapf_solver_name: Name of the MAPF solver
-        agent_velocity: Velocity of the agent
-        show_static: Whether to show static path visualization
-        show_animation: Whether to show animation
-    """
-    # Load input data
-    input_file = get_input_file_path(perm_path)
-    with open(input_file, "r") as f:
-        input_data = yaml.safe_load(f)
-    
-    # Load solution data
-    mapf_path = generate_mapf_path(perm_path, mapf_solver_name)
-    roadmap_path = generate_roadmap_path(mapf_path, road_map_type)
-    solution_name_suffix = get_solution_name_suffix(graph_file=graph_file)
-    solution_file = get_solution_file_path(roadmap_path,solution_name_suffix,agent_velocity)
-    with open(solution_file, "r") as f:
-        solution_data = yaml.safe_load(f)
 
-    if not solution_data["success"]:
-        raise Exception(f"Solution not successful: {solution_file}")
-    
-    # Extract map parameters
-    bounds = input_data["map"]["bounds"]
-    resolution = input_data["map"]["resolution"]
-    obstacles = np.array(input_data["map"]["obstacles"])
-    agents = input_data["agents"]
-    
-    
-    # Create map
-    map_ = GraphSampler(bounds=bounds, resolution=resolution, start=[], goal=[])
-    
-    # Place obstacles
-    if len(obstacles) > 0:
-        map_.type_map[obstacles[:, 0], obstacles[:, 1]] = TYPES.OBSTACLE
-    
-    # Configure map
-    map_.inflate_obstacles(radius=0)
-    map_.set_parameters(sample_num=0, num_neighbors=4.0, min_edge_len=0.0, max_edge_len=1.1)
-    
-    # Set agent positions
-    start = [agent['start'] for agent in agents]
-    goal = [agent['goal'] for agent in agents]
-    map_.set_start(start)
-    map_.set_goal(goal)
-    
-    # Generate nodes and roadmap
-    nodes = map_.generateRandomNodes(generate_grid_nodes=True)
-    road_map = map_.generate_roadmap(nodes)
-    
-    # Print case info
-    if verbose:
-        print(f"{solution_file.parent.parent.name} + {solution_file.name} | Agents: {len(agents)} | SoC: {solution_data['flowtime']} | Obstacles: {len(obstacles)}")
-    
-    # Static visualization
-    if show_static:
-        plt.close('all')
-        vis = Visualizer2D(figname = f"{solution_file.name} - Static Paths", figsize=(8, 8))
-        vis.plot_grid_map(map_)
-        
-        # Plot each agent's path
-        schedule = solution_data["schedule"]
-        for agent_name, trajectory in schedule.items():
-            path = np.array([[point['x'], point['y']] for point in trajectory])
-            vis.plot_path(path)
-        
-        plt.title(f"{perm_path.name} - Static Paths")
-        vis.savefig(get_path_visualization_file(roadmap_path,solution_name_suffix,agent_velocity))
-        if verbose:
-            vis.show()
-        vis.close()
-
-        perm_trajectory_map = get_trajectory_map(solution_data["schedule"], map_)
-        density_map = perm_trajectory_map.sum(axis=(0,1))
-        visualizer = Visualizer2D(figname = f"{solution_file.name} - Density Map", figsize=(8, 8))
-        masked_map = ~map_.get_obstacle_map()
-        visualizer.plot_grid_map(map_, masked_map=masked_map)
-        visualizer.plot_density_map(density_map)
-        visualizer.savefig(get_heatmap_visualization_file(roadmap_path,solution_name_suffix,agent_velocity))
-        if verbose:
-            visualizer.show()
-        visualizer.close()
-    
-    # Animation
-    if show_animation:
-        plt.close('all')
-        vis = Visualizer2D(figsize=(8, 8))
-        
-        # Format schedule for animate method
-        schedule = {"schedule": solution_data["schedule"]}
-        
-        # Create animation
-        path_animation_file = get_path_animation_file(roadmap_path,solution_name_suffix,agent_velocity)
-        vis.animate(path_animation_file, map_, schedule, road_map=road_map)
-        if verbose:
-            print(f"Animation saved to: {path_animation_file}")
-
-def process_visualization(args):
-    """Worker function for parallel visualization."""
-    case_path,perm_dir, graph_file, mapf_solver_name, road_map_type, agent_velocity, show_static, show_animation, verbose = args
-    try:
-        load_and_visualize_case(perm_dir,graph_file=graph_file,mapf_solver_name=mapf_solver_name,road_map_type=road_map_type, agent_velocity=agent_velocity, show_static=show_static, show_animation=show_animation,verbose=verbose)
-        return True, case_path.name, perm_dir.name
-    except Exception as e:
-        return False, case_path.name, f"{perm_dir.name}: {str(e)}"
-
-def visualize_graph(tasks, num_workers: int = cpu_count()):
-    successful = 0
-    failed = 0
-    num_tasks = len(tasks)
-    print(f"\nVisualizing {num_tasks} {num_tasks} graphs with {num_workers} workers...")
-
-    if num_workers > 1 and len(tasks) > 1:
-        with Pool(processes=num_workers) as pool:
-            for success, case_name, result in tqdm(
-                pool.imap_unordered(process_visualization, tasks),
-                total=len(tasks),
-                desc="Visualizing tasks",
-            ):
-                if success:
-                    successful += 1
-                else:
-                    failed += 1
-                    print(f"Error in {case_name}: {result}")
-    else:
-        for task in tqdm(tasks, desc="Visualizing tasks"):
-            success, case_name, result = process_visualization(task)
-            if success:
-                successful += 1
-            else:
-                failed += 1
-                print(f"Error in {case_name}: {result}")
-
-    print("\n" + "="*60)
-    print(f"Visualization complete: {successful} tasks succeeded, {failed} tasks failed")
-    print("="*60)
-
-def build_nx_graph(sampler: GraphSampler) -> nx.Graph:
-    """Build a NetworkX graph from a GraphSampler roadmap."""
-    graph = nx.Graph()
-    for idx, node in enumerate(sampler.nodes):
-        x_coord, y_coord = sampler.map_to_world(node.current)
-        graph.add_node(idx, pos=(x_coord, y_coord))
-
-    for node_idx, neighbors in enumerate(sampler.road_map):
-        for neighbor_idx in neighbors:
-            if node_idx < neighbor_idx:
-                graph.add_edge(node_idx, neighbor_idx)
-    return graph
-
-def visualize_graph_sample(graph_dir: Path, sample_road_map_path: Path, show: bool = False, verbose: bool = True) -> Path:
+def visualize_graph_sample(graph_dir: Path, graph_file_name: str, target_space_type: str,density_map_file: Path, show: bool = False, verbose: bool = True) -> Path:
     """Load graph_map.pkl from graph_dir and save a NetworkX visualization image."""
-    graph_file = get_graph_file_path(graph_dir)
+    graph_file = get_graph_file_path(graph_dir, graph_file_name)
     if not graph_file.exists():
         raise FileNotFoundError(f"Graph file does not exist: {graph_file}")
 
-    # Infer map bounds/resolution from case input.yaml so sampler.map_to_world() is correct.
-    # Expected layout:
-    #   case_N/sample/<road_type>/graph_<i>_<j>/graph_map.pkl
     case_dir = graph_dir.parents[2]
     input_file = get_input_file_path(case_dir)
-    if input_file.exists():
-        with open(input_file, "r") as f:
-            input_data = yaml.safe_load(f)
-        bounds = input_data["map"]["bounds"]
-        resolution = float(input_data["map"]["resolution"])
-    else:
-        raise ValueError(f"Input file does not exist: {input_file}")
+    if not input_file.exists():
+        raise FileNotFoundError(f"Input file does not exist: {input_file}")
+    augmentation_id = int(graph_dir.stem.split("_")[-1])
+    target_file = get_target_file_path(graph_dir, target_space_type)
+    y = np.load(target_file)
 
-    map_ = GraphSampler(bounds=bounds, resolution=resolution, start=[], goal=[])
-    map_.load_graph_sampler(graph_file)
+    map_ =read_graph_sampler_from_yaml(input_file,graph_file=graph_file, args={"use_constraint_sweep": False})
     use_discrete_space = map_.use_discrete_space
-
-    # graph = build_nx_graph(map_)
-    # pos = nx.get_node_attributes(graph, "pos")
+    density_map = np.rot90(np.load(density_map_file), k=augmentation_id, axes=(0, 1))
 
     plt.close("all")
     visualizer = Visualizer2D(figname=f"{graph_dir.name} - Graph", figsize=(8, 8))
     visualizer.plot_grid_map(map_)
-    visualizer.plot_road_map(map_, map_.nodes, map_.road_map, map_frame=use_discrete_space)
-    # nx.draw(
-    #     graph,
-    #     pos=pos,
-    #     ax=visualizer.ax,
-    #     node_size=10,
-    #     node_color="#8c564b",
-    #     edge_color="#e377c2",
-    #     width=0.7,
-    #     alpha=0.7,
-    #     with_labels=False,
-    # )
+    visualizer.plot_road_map(map_, map_.nodes, map_.road_map, map_frame=use_discrete_space, node_value=y)
+    visualizer.plot_density_map(density_map)
     visualizer.ax.set_title(f"{graph_dir.parent.name}/{graph_dir.name}")
     output_file = graph_dir / "graph_map_visualization.png"
     visualizer.savefig(output_file)
@@ -230,11 +59,13 @@ def process_graph_visualization(
     args: Tuple[Path, Path, bool, bool],
 ) -> Tuple[bool, str, str]:
     """Worker for parallel graph sample visualization (must be top-level for Pool pickling)."""
-    graph_dir, sample_road_map_path, show, verbose = args
+    graph_dir, graph_file_name, target_space_type,density_map_file, show, verbose = args
     try:
         output_file = visualize_graph_sample(
             graph_dir=graph_dir,
-            sample_road_map_path=sample_road_map_path,
+            graph_file_name=graph_file_name,
+            target_space_type=target_space_type,
+            density_map_file=density_map_file,
             show=show,
             verbose=verbose,
         )
@@ -280,11 +111,15 @@ def visualize_graphs(
 def collect_graph_tasks(
         base_path: Path,
         road_map_types: List[str],
+        graph_file_name: str = "graph_map.pkl",
+        ground_truth_graph_file_name: str = "graph_map.pkl",
+        ground_truth_roadmap_type: str = "grid",
         target_space: str = "binary",
         case_mode: str = "first_n",
         num_cases: int = 3,
         case_range: List[int] = [0, 16],
         specific_cases: List[int] = [0, 5, 10],
+        agent_velocity: float = 0.0,
         show: bool = False,
         verbose: bool = True,
     ) -> List[Tuple[Path, bool, bool]]:
@@ -309,12 +144,15 @@ def collect_graph_tasks(
     else:
         raise ValueError(f"Unsupported case_mode: {case_mode}")
 
-    tasks: List[Tuple[Path,Path, bool, bool]] = []
+    tasks: List[Tuple[Path,Path, str, Path, bool, bool]] = []
     target_space_type = target_space.lower() 
     if target_space_type not in TARGET_SPACE_TYPE_TO_NAME:
         raise ValueError(f"Target space type {target_space_type} not supported")
     for case_path in selected_cases:
         sample_base_path = generate_sample_base_path(case_path)
+        ground_truth_path = generate_roadmap_path(generate_ground_truth_path(case_path), ground_truth_roadmap_type)
+        solution_name_suffix = get_solution_name_suffix(graph_file=ground_truth_graph_file_name)
+        density_map_file = get_density_map_file(ground_truth_path, solution_name_suffix, agent_velocity)
         for road_map_type in road_map_types:
             sample_road_map_path = generate_roadmap_path(sample_base_path, road_map_type)
             graph_dirs = sorted(
@@ -322,11 +160,11 @@ def collect_graph_tasks(
                 key=lambda value: value.name,
             )
             for graph_dir in graph_dirs:
-                if get_graph_file_path(graph_dir).exists() and get_target_file_path(graph_dir, target_space_type).exists():
-                    tasks.append((graph_dir, sample_road_map_path, show, verbose))
+                if get_graph_file_path(graph_dir, graph_file_name).exists() and get_target_file_path(graph_dir, target_space_type).exists():
+                    tasks.append((graph_dir, graph_file_name, target_space_type,density_map_file, show, verbose))
                 else:
-                    if not get_graph_file_path(graph_dir).exists():
-                        print(f"Graph file does not exist: {get_graph_file_path(graph_dir)}")
+                    if not get_graph_file_path(graph_dir, graph_file_name).exists():
+                        print(f"Graph file does not exist: {get_graph_file_path(graph_dir, graph_file_name)}")
                     if not get_target_file_path(graph_dir, target_space_type).exists():
                         print(f"Target file does not exist: {get_target_file_path(graph_dir, target_space_type)}")
 
