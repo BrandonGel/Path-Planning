@@ -113,7 +113,7 @@ def collect_graph_tasks(
         road_map_types: List[str],
         graph_file_name: str = "graph_map.pkl",
         ground_truth_graph_file_name: str = "graph_map.pkl",
-        ground_truth_roadmap_type: str = "grid",
+        ground_truth_road_map_type: str = "grid",
         target_space: str = "binary",
         case_mode: str = "first_n",
         num_cases: int = 3,
@@ -150,7 +150,7 @@ def collect_graph_tasks(
         raise ValueError(f"Target space type {target_space_type} not supported")
     for case_path in selected_cases:
         sample_base_path = generate_sample_base_path(case_path)
-        ground_truth_path = generate_roadmap_path(generate_ground_truth_path(case_path), ground_truth_roadmap_type)
+        ground_truth_path = generate_roadmap_path(generate_ground_truth_path(case_path), ground_truth_road_map_type)
         solution_name_suffix = get_solution_name_suffix(graph_file=ground_truth_graph_file_name)
         density_map_file = get_density_map_file(ground_truth_path, solution_name_suffix, agent_velocity)
         for road_map_type in road_map_types:

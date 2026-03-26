@@ -97,27 +97,16 @@ def get_prob_map(target_space_type:str, map:GraphSampler,density_map:np.ndarray,
 
 def generate_target_space(target_space_type:str, map:GraphSampler,density_map:np.ndarray,ignore_generate: bool = False,config:dict = None):
     y = []
-    if target_space_type.lower() in TARGET_SPACE_TYPE_TO_NAME:
-        discrete_pos = [map.world_to_map(node.current,discrete=True) for node in map.nodes]
-        y = np.clip([density_map[s] for s in discrete_pos],0,1)
-    elif target_space_type.lower() in TARGET_SPACE_TYPE_TO_NAME:
-        discrete_pos = [map.world_to_map(node.current,discrete=True) for node in map.nodes]
-        mesh_space = tuple((np.arange(0,map.shape[i],1) for i in range(map.dim)))
-        interp_func = RegularGridInterpolator(mesh_space, density_map/np.sum(density_map), method="linear")
-        y = np.array([interp_func(discrete_pos[i]) for i in range(len(discrete_pos))])
-    elif target_space_type.lower() in TARGET_SPACE_TYPE_TO_NAME:
-        discrete_pos = [map.world_to_map(node.current,discrete=True) for node in map.nodes]
-        y = np.array([density_map[s] for s in discrete_pos])
-        y = y / density_map.sum()
-    elif 'fuzzy' in TARGET_SPACE_TYPE_TO_NAME[target_space_type.lower()]:
+    target_space_type = target_space_type.lower()
+    if 'fuzzy' in target_space_type:
         num_hops = int(config["num_hops"]) if config is not None and "num_hops" in config else 1
         if num_hops < 1:
             num_hops = 1
         discrete_pos = [map.world_to_map(node.current, discrete=True) for node in map.nodes]            
         y_density = np.array([density_map[s] for s in discrete_pos]) 
-        if target_space_type.lower() in TARGET_SPACE_TYPE_TO_NAME:
+        if target_space_type in TARGET_SPACE_TYPE_TO_NAME:
             y_density = np.clip(y_density,0,1)
-        elif target_space_type.lower() in TARGET_SPACE_TYPE_TO_NAME:
+        elif target_space_type in TARGET_SPACE_TYPE_TO_NAME:
             y_density = y_density / np.sum(density_map)
         y = y_density.copy()
         
@@ -157,13 +146,13 @@ def generate_target_space(target_space_type:str, map:GraphSampler,density_map:np
                 
                 # Vectorized update
                 y = np.clip(np.maximum(y_density, y_inverse_cost), 0, 1)
-    elif 'convolution' in  TARGET_SPACE_TYPE_TO_NAME[target_space_type.lower()]:
+    elif 'convolution' in  target_space_type:
         num_hops = int(config["num_hops"]) if config is not None and "num_hops" in config else 1
         if num_hops < 1:
             num_hops = 1
-        if target_space_type.lower() in TARGET_SPACE_TYPE_TO_NAME:
+        if target_space_type in TARGET_SPACE_TYPE_TO_NAME:
             new_density_map = np.clip(density_map,0,1)
-        elif target_space_type.lower() in TARGET_SPACE_TYPE_TO_NAME:
+        elif target_space_type in TARGET_SPACE_TYPE_TO_NAME:
             new_density_map = density_map / density_map.sum()
         new_density_map[map.get_obstacle_map()] = -1
 
@@ -176,6 +165,18 @@ def generate_target_space(target_space_type:str, map:GraphSampler,density_map:np
                     extra_keywords={'weights': kernel.flatten(),'ignore_value':-1})
         discrete_pos = [map.world_to_map(node.current, discrete=True) for node in map.nodes]            
         y = np.array([new_density_map[s] for s in discrete_pos]) 
+    elif target_space_type in TARGET_SPACE_TYPE_TO_NAME:
+        discrete_pos = [map.world_to_map(node.current,discrete=True) for node in map.nodes]
+        y = np.clip([density_map[s] for s in discrete_pos],0,1)
+    elif target_space_type in TARGET_SPACE_TYPE_TO_NAME:
+        discrete_pos = [map.world_to_map(node.current,discrete=True) for node in map.nodes]
+        mesh_space = tuple((np.arange(0,map.shape[i],1) for i in range(map.dim)))
+        interp_func = RegularGridInterpolator(mesh_space, density_map/np.sum(density_map), method="linear")
+        y = np.array([interp_func(discrete_pos[i]) for i in range(len(discrete_pos))])
+    elif target_space_type in TARGET_SPACE_TYPE_TO_NAME:
+        discrete_pos = [map.world_to_map(node.current,discrete=True) for node in map.nodes]
+        y = np.array([density_map[s] for s in discrete_pos])
+        y = y / density_map.sum()
     else:
         discrete_pos = [map.world_to_map(node.current,discrete=True) for node in map.nodes]
         y = np.clip([density_map[s] for s in discrete_pos],0,1)
@@ -240,8 +241,8 @@ def process_single_case_graphs(args: Tuple[Path, dict]) -> Tuple[bool, Path]:
     min_edge_len = config["min_edge_len"] if "min_edge_len" in config else 0.0
     max_edge_len = config["max_edge_len"] if "max_edge_len" in config else 1 + 1e-10
     num_graph_samples = config["num_graph_samples"] if "num_graph_samples" in config else 10
-    roadmap_type = config["roadmap_type"] if "roadmap_type" in config else "prm"
-    roadmap_type_gt = config["roadmap_type_gt"] if "roadmap_type_gt" in config else "grid"
+    road_map_type = config["road_map_type"] if "road_map_type" in config else "prm"
+    road_map_type_gt = config["road_map_type_gt"] if "road_map_type_gt" in config else "grid"
     target_space = config["target_space"] if "target_space" in config else "binary"
     generate_new_graph = config["generate_new_graph"] if "generate_new_graph" in config else True
     agent_velocity = config["agent_velocity"] if "agent_velocity" in config else 0.0
@@ -252,12 +253,12 @@ def process_single_case_graphs(args: Tuple[Path, dict]) -> Tuple[bool, Path]:
 
     input_file = get_input_file_path(case_dir)
     agents = read_agents_from_yaml(input_file)
-    gt_dir = generate_roadmap_path(generate_ground_truth_path(case_dir), roadmap_type_gt)
+    gt_dir = generate_roadmap_path(generate_ground_truth_path(case_dir), road_map_type_gt)
     solution_name_suffix = get_solution_name_suffix(graph_file=graph_file_name)
     density_map_file = get_density_map_file(gt_dir, solution_name_suffix,agent_velocity)
     density_map = np.load(density_map_file)
 
-    sample_base_dir = generate_roadmap_path(generate_sample_base_path(case_dir), roadmap_type)
+    sample_base_dir = generate_roadmap_path(generate_sample_base_path(case_dir), road_map_type)
     for ii in range(num_graph_samples):
         # Check if graph gnn file exists
         graph_sample_path = generate_sample_path(sample_base_dir, ii, 0)
@@ -310,7 +311,7 @@ def process_single_case_graphs(args: Tuple[Path, dict]) -> Tuple[bool, Path]:
                 prob_map = None
             samp_from_prob_map_ratio = config["samp_from_prob_map_ratio"] if "samp_from_prob_map_ratio" in config else 0.5
             map_.generateRandomNodes(generate_grid_nodes=use_discrete_space,prob_map=prob_map,samp_from_prob_map_ratio=samp_from_prob_map_ratio)
-            map_.generate_map(roadmap_type,map_.nodes)
+            map_.generate_map(road_map_type,map_.nodes)
 
             ndata,node_to_node_edges_arr, node_to_node_weights_arr, start_goal_edges_arr, start_goal_weights_arr = transform_graph_map_to_gnn(map_)
             # Save as compressed npz (10x smaller than pickle)

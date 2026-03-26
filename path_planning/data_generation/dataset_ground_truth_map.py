@@ -252,22 +252,11 @@ def create_map(param: Dict, generate_new_graph: bool = False,graph_file: Path =N
         map_.set_start(start)
         map_.set_goal(goal)
 
-        # TODO: UPDATE THIS TO BE SIMPLE
         if road_map_type == 'grid':
             nodes = map_.generateRandomNodes(generate_grid_nodes=True)
-            map_.generate_roadmap(nodes)
-        elif road_map_type == 'prm':
-            nodes = map_.generateRandomNodes()
-            map_.generate_roadmap(nodes)
-        elif road_map_type == 'planar':
-            nodes = map_.generateRandomNodes()
-            map_.generate_planar_map(nodes)
-        elif road_map_type == 'rrg':
-            # TODO: Implement RRG generation
-            nodes = map_.generateRandomNodes()
-            map_.generate_rrg(nodes)
         else:
-            print("Invalid road map name provided")
+            nodes = map_.generateRandomNodes()
+        map_.generate_map(road_map_type,nodes)
         map_.save_graph_sampler(graph_file)
         if verbose:
             print(f"Generated and saved graph to {graph_file}")

@@ -123,7 +123,7 @@ def process_single_case(args: Tuple) -> Tuple[float, float, int]:
             num_attempts = perm_id + 1
             break
 
-    map_ = create_map(inpt, graph_file = graph_file)
+    map_ = create_map(inpt, graph_file = graph_file,verbose=verbose)
 
     mapf_solver_config = {
         "mapf_solver_name": config.get("mapf_solver_name", "cbs"),

@@ -489,7 +489,7 @@ class GraphSampler(Grid):
             self.generate_roadmap(samples)
         elif roadmap_type == 'prm':
             self.generate_roadmap(samples)
-        elif roadmap_type == 'planar':
+        elif roadmap_type == 'cdt':
             self.generate_planar_map(samples,use_option='cdt')
         elif roadmap_type == 'midpoints':
             self.generate_planar_map(samples,use_option='midpoints')
