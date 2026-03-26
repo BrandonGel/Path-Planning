@@ -8,11 +8,13 @@ from itertools import product
 from python_motion_planning.common import TYPES
 from path_planning.utils.cgal_sweep import CGAL_Sweep
 from path_planning.common.environment.map.cdt import get_planar_graph
+from path_planning.global_planner.sample_search.rrg import RRG
+import faiss
 import pickle
 
 
 class GraphSampler(Grid):
-    def __init__(self,*args,start,goal,sample_num=0,num_neighbors = 13.0, min_edge_len = 1e-10, max_edge_len = 30.0,use_discrete_space=True,use_constraint_sweep=True,record_sweep=True,use_exact_collision_check=True,**kwargs):
+    def __init__(self,*args,start,goal,sample_num=0,num_neighbors = 13.0, min_edge_len = 1e-10, max_edge_len = 30.0,goal_sample_rate=0.1,use_discrete_space=True,use_constraint_sweep=True,record_sweep=True,use_exact_collision_check=True,**kwargs):
         super().__init__(*args, **kwargs)
 
         # Check if start and goal are lists, non-empty, and not None
@@ -30,6 +32,7 @@ class GraphSampler(Grid):
         self.num_neighbors = num_neighbors
         self.min_edge_length = min_edge_len
         self.max_edge_length = max_edge_len
+        self.goal_sample_rate = goal_sample_rate
         self.cost_matrix = None
         self.node_index_dict = {}
         self.start_nodes_index = {}
@@ -286,6 +289,8 @@ class GraphSampler(Grid):
         # Check if start point has the correct dimension
         dim = self.dim
 
+        if p2 is None:
+            return not self.is_expandable(self.world_to_map(p1,discrete=True))
         
         # Check if end point has the correct dimension
         if  len(p1) != dim and len(p2) != dim:
@@ -597,8 +602,128 @@ class GraphSampler(Grid):
         self.edges, self.edge_indices_dict,self.edge_weights  = self.calculate_edges(planar_map,edge_weights)
         return planar_map
 
-    def prune_graph_sampler(self,prune_nodes_indices: List[int],prune_edges_indices: List[Tuple[int,int]], prune_edge_weights: List[float]):
-        return
+    def generate_rrg(self, samples: List[Node]):
+        # Re-register the nodes after applying constrained delaunay triangulation
+        self.rrg = RRG(map_=self,start=self.start,goal=self.goal,sample_num=self.sample_num,min_dist=self.min_edge_length,max_dist=self.max_edge_length,goal_sample_rate=self.goal_sample_rate,discrete=self.use_discrete_space,use_faiss=True)
+        self.nodes = []
+        self.node_index_dict = {}
+        self.start_nodes_index = {}
+        self.goal_nodes_index = {}
+        self.grid_nodes_index = {}
+
+        # Initialize graph structure
+        nodes = []
+        road_map = []  # Graph structure: list of adjacency lists
+        edge_weights = []
+        start_nodes = []  # List to hold all start nodes
+        goal_nodes = []  # List to hold all goal nodes
+
+        # Add start node to the graph and necessary lists
+        for start_node_coord in self.start:
+            start_node = Node(start_node_coord, None, 0, 0)
+            start_nodes.append(start_node)
+            nodes.append(start_node)
+            self.node_index_dict[start_node] = len(nodes) - 1
+            self.start_nodes_index[start_node] = len(nodes) - 1
+            road_map.append([])  # Initialize empty adjacency list for this node
+            edge_weights.append([])
+
+        # Add goal node to graph if not already present
+        for goal_node_coord in self.goal:
+            goal_node = Node(goal_node_coord, None, 0, 0)
+            goal_nodes.append(goal_node)
+            if goal_node not in self.node_index_dict:
+                nodes.append(goal_node)
+                self.node_index_dict[goal_node] = len(nodes) - 1
+                self.goal_nodes_index[goal_node] = len(nodes) - 1
+                road_map.append([])
+                edge_weights.append([])
+            else:
+                self.goal_nodes_index[goal_node] = self.node_index_dict[goal_node]
+                
+        # Initialize FAISS index for efficient nearest neighbor search
+        faiss_index = faiss.IndexFlatL2(self.dim)
+        faiss_nodes = []
+        for node in nodes:
+            self.rrg._faiss_add_node(node, faiss_index, faiss_nodes)
+
+        # Main RRG sampling loop
+        num_samples = 0
+        while num_samples < self.sample_num:
+            node_rand = self.rrg._generate_random_node()
+
+            # Skip if node already exists
+            if node_rand in self.node_index_dict:
+                continue
+
+            # Find nearest node in graph
+            node_near = self.rrg._get_nearest_node(
+                nodes, node_rand, faiss_index, faiss_nodes
+            )
+
+            # Create new node towards random sample
+            node_new = self.rrg._steer(node_near, node_rand)
+            if node_new is None:
+                continue
+            if self.in_collision(node_new.current):
+                continue
+            if node_new in self.node_index_dict:
+                continue
+
+            # Check if edge from nearest to new node is collision-free
+            if self.in_collision(
+                node_new.current,
+                node_near.current,
+            ):
+                continue
+
+            # Add new node to graph
+            nodes.append(node_new)
+            self.node_index_dict[node_new] = len(nodes) - 1
+            road_map.append([])  # Initialize empty adjacency list for this node
+            edge_weights.append([])
+
+            if self.rrg.use_faiss:
+                self.rrg._faiss_add_node(node_new, faiss_index, faiss_nodes)
+            num_samples += 1
+        # Connect node pairs within radius if collision-free (without duplicates)
+        edge_set = set()
+        for ii in range(len(nodes)):
+             # RRG key step: Find ALL nearby nodes within max_dist radius
+            node_new = nodes[ii]
+            nearby_nodes = self.rrg._get_nearby_nodes(
+                nodes, node_new, faiss_index, faiss_nodes
+            )
+
+            # Connect new node to all nearby nodes if collision-free
+            for nearby_node in nearby_nodes:
+                # Check if edge is collision-free
+                if not self.in_collision(
+                    node_new.current,
+                    nearby_node.current,
+                ):
+                    # Add bidirectional edge in graph
+                    node_new_idx = self.node_index_dict[node_new]
+                    nearby_idx = self.node_index_dict[nearby_node]
+                    if node_new_idx == nearby_idx:
+                        continue
+                    e = (node_new_idx, nearby_idx) if node_new_idx < nearby_idx else (nearby_idx, node_new_idx)
+                    if e in edge_set:
+                        continue
+                    edge_set.add(e)
+                    road_map[node_new_idx].append(nearby_idx)
+                    road_map[nearby_idx].append(node_new_idx)
+                    edge_weights[node_new_idx].append(self.get_cost(nodes[node_new_idx],nodes[nearby_idx]))
+                    edge_weights[nearby_idx].append(self.get_cost(nodes[nearby_idx],nodes[node_new_idx]))
+
+        # Update total node count after all nodes are added
+        self.num_total_nodes = len(nodes)
+        self.cost_matrix = cdist(np.array([node.current for node in nodes]), np.array([node.current for node in nodes]), metric='euclidean')
+        self.nodes = nodes
+        self.road_map = road_map
+        self.road_map_edge_weights = edge_weights
+        self.edges, self.edge_indices_dict,self.edge_weights  = self.calculate_edges(road_map,edge_weights)
+        return road_map
 
     def generate_custom_nodes(self,points: List[int]):
         num_nodes = 0
