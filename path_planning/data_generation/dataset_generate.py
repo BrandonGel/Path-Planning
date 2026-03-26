@@ -57,6 +57,12 @@ TARGET_SPACE_TYPE_TO_NAME = {
     'convolution_distribution',
 }
 
+def get_target_space_type_name(target_space_type:str):
+    if target_space_type.lower() in TARGET_SPACE_TYPE_TO_NAME:
+        return target_space_type.lower()
+    else:
+        raise ValueError(f"Target space type {target_space_type} not supported")
+
 def weighted_max_op(window, weights,ignore_value = -1):
     # 'window' is passed as a 1D array by scipy
     return np.max(window * weights) if window[len(window)//2] != ignore_value else ignore_value
@@ -328,10 +334,7 @@ def process_single_case_graphs(args: Tuple[Path, dict]) -> Tuple[bool, Path]:
             map_.save_graph_sampler(graph_file)
 
         # Generate Target Space ('y')
-        if target_space.lower() in TARGET_SPACE_TYPE_TO_NAME:
-            y_type_name = target_space.lower()
-        else:
-            raise ValueError(f"Target space type {target_space} not supported")
+        y_type_name = get_target_space_type_name(target_space)
         target_file = get_target_file_path(graph_sample_path, y_type_name)
         if not (use_exisiting_graph and target_file.exists()):
             y = generate_target_space(target_space, map_, density_map,config=config)

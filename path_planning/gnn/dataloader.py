@@ -9,13 +9,14 @@ from pathlib import Path
 from tqdm import tqdm
 from typing import List,Tuple
 from multiprocessing import Pool, cpu_count
-from path_planning.data_generation.dataset_generate import generate_roadmap,generate_target_space
+from path_planning.data_generation.dataset_generate import get_target_space_type_name
 import os
 import torch
 import torch_geometric
 from torch_geometric.typing import EdgeType
 from typing import Dict, Any
 from path_planning.common.environment.map.graph_sampler import GraphSampler
+from path_planning.data_generation.dataset_util import generate_sample_base_path,generate_roadmap_path
 # Allowlist PyG's base storage to bypass the security check
 torch.serialization.add_safe_globals([torch_geometric.data.storage.BaseStorage])
 torch.serialization.add_safe_globals([torch_geometric.data.storage.NodeStorage])
@@ -111,7 +112,7 @@ class GraphDataset(InMemoryDataset):
                 num_workers: Optional[int] = 1):
         self.data_files = data_files
         self.load_file = load_file
-        self.save_file = save_file if save_file is not None and len(save_file) > 0 else os.path.join(root, 'data.pt') if root is not None else 'data.pt'
+        self.save_file = save_file if save_file is not None and len(str(save_file)) > 0 else os.path.join(root, 'data.pt') if root is not None else 'data.pt'
         self.data_binary_id = []
         super().__init__(root, transform, pre_transform, pre_filter)
 
@@ -268,39 +269,42 @@ def get_graph_dataset_file_paths(paths:List[Path],config:dict, max_cases:list[in
         if len(max_graphs) != len(paths):
             raise ValueError("max_graphs must be a list of the same length as paths")
 
+    road_map_types = config["road_map_types"] if "road_map_types" in config else ["prm"]
+    target_space = config["target_space"].lower() if "target_space" in config else "convolution_binary"
+
     #Iterate over all paths
-    for ii,path in enumerate(paths):
-        path = Path(path)
-        cases = sorted([d for d in path.iterdir() if d.is_dir() and d.name.startswith("case_")],key=lambda x: int(x.name.split('_')[-1]))
-        if not cases:
-            print("No cases found to process")
-            return
+    for road_map_type in road_map_types:
+        for ii,path in enumerate(paths):
+            path = Path(path)
+            cases = sorted([d for d in path.iterdir() if d.is_dir() and d.name.startswith("case_")],key=lambda x: int(x.name.split('_')[-1]))
+            if not cases:
+                print("No cases found to process")
+                return
 
-        if max_cases is not None:   
-            cases_end = min(max_cases[ii],len(cases))
-            cases = cases[:cases_end]
-        #Iterate over all cases
-        for case_dir in cases:
-            road_map_type = config["road_map_type"] if "road_map_type" in config else "planar"
-            target_space = config["target_space"] if "target_space" in config else "binary"
-            road_map_type_name = generate_roadmap(road_map_type, None, [], True)
-            roadmap_dir = case_dir / "samples"  / f"{road_map_type_name}" 
-            _,y_type_name = generate_target_space(target_space,None,None,True)
-            if not roadmap_dir.exists():
-                continue
+            if max_cases is not None:   
+                cases_end = min(max_cases[ii],len(cases))
+                cases = cases[:cases_end]
+            #Iterate over all cases
+            for case_dir in cases:
+                
+                sample_base_path = generate_sample_base_path(case_dir)
+                roadmap_dir = generate_roadmap_path(sample_base_path,road_map_type)
+                y_type_name = get_target_space_type_name(target_space)
+                if not roadmap_dir.exists():
+                    continue
 
-            graphs_dirs = sorted([d for d in roadmap_dir.iterdir()], key = lambda x: int(x.name.split('_')[-1]))
-            if max_graphs is not None:
-                graphs_dirs_end = min(max_graphs[ii],len(graphs_dirs))
-                graphs_dirs = graphs_dirs[:graphs_dirs_end]
+                graphs_dirs = sorted([d for d in roadmap_dir.iterdir()], key = lambda x: int(x.name.split('_')[-1]))
+                if max_graphs is not None:
+                    graphs_dirs_end = min(max_graphs[ii],len(graphs_dirs))
+                    graphs_dirs = graphs_dirs[:graphs_dirs_end]
 
-            #Iterate over all graphs
-            for ii in range(len(graphs_dirs)):
-                # Check if graph file exists
-                graph_dir = graphs_dirs[ii]
-                graph_file = graph_dir / f'graph.npz'
-                target_file = graph_dir / f'target_{y_type_name}.npy'
-                assert graph_file.exists(), f"{graph_file} does not exist"
-                assert target_file.exists(), f"{target_file} does not exist"
-                data_files.append((graph_file,target_file))
+                #Iterate over all graphs
+                for ii in range(len(graphs_dirs)):
+                    # Check if graph file exists
+                    graph_dir = graphs_dirs[ii]
+                    graph_file = graph_dir / f'graph.npz'
+                    target_file = graph_dir / f'target_{y_type_name}.npy'
+                    assert graph_file.exists(), f"{graph_file} does not exist"
+                    assert target_file.exists(), f"{target_file} does not exist"
+                    data_files.append((graph_file,target_file))
     return data_files

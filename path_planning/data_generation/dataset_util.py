@@ -35,8 +35,8 @@ def generate_ground_truth_path(base_path: Path):
     ground_truth_path.mkdir(parents=True, exist_ok=True)
     return ground_truth_path
 
-def generate_roadmap_path(base_path: Path,roadmap_type:str):
-    roadmap_path = base_path / roadmap_type
+def generate_roadmap_path(base_path: Path,road_map_type:str):
+    roadmap_path = base_path / road_map_type
     roadmap_path.mkdir(parents=True, exist_ok=True)
     return roadmap_path
 

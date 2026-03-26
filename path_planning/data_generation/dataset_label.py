@@ -53,9 +53,9 @@ def process_single_case_trajectories(args: Tuple) -> Tuple[bool, Path]:
     Returns:
         Tuple of (success: bool, case_dir: Path)
     """
-    case_dir,solution_name_suffix, mapf_solver_name,roadmap_type, agent_velocity, visualize_density_map = args
+    case_dir,solution_name_suffix, mapf_solver_name,road_map_type, agent_velocity, visualize_density_map = args
     perm_path = generate_perm_base_path(case_dir)
-    gt_dir = generate_roadmap_path(generate_ground_truth_path(case_dir), roadmap_type)
+    gt_dir = generate_roadmap_path(generate_ground_truth_path(case_dir), road_map_type)
 
     try:
         permutations = sorted([d for d in perm_path.iterdir() if d.is_dir() and d.name.startswith("perm_")])
@@ -74,7 +74,7 @@ def process_single_case_trajectories(args: Tuple) -> Tuple[bool, Path]:
         
         for perm_dir in permutations:
             mapf_path = generate_mapf_path(perm_dir, mapf_solver_name)
-            roadmap_path = generate_roadmap_path(mapf_path, roadmap_type)
+            roadmap_path = generate_roadmap_path(mapf_path, road_map_type)
             solution_file = get_solution_file_path(roadmap_path, solution_name_suffix, agent_velocity)
 
             if not solution_file.exists():
@@ -108,7 +108,7 @@ def process_single_case_trajectories(args: Tuple) -> Tuple[bool, Path]:
         print(f"Error processing {case_dir.name}: {e}")
         return False, case_dir
 
-def label_dataset(path, graph_file_name: Path = None, mapf_solver_name: str = "cbs", roadmap_type: str = "grid", agent_velocity: float = 0.0, visualize_density_map: bool = False, num_workers: int = None):
+def label_dataset(path, graph_file_name: Path = None, mapf_solver_name: str = "cbs", road_map_type: str = "grid", agent_velocity: float = 0.0, visualize_density_map: bool = False, num_workers: int = None):
     """
     Label & parse all trajectories for all cases in a dataset directory.
 
@@ -116,7 +116,7 @@ def label_dataset(path, graph_file_name: Path = None, mapf_solver_name: str = "c
         path: Path to dataset directory containing case folders
         graph_file_name: Name of the graph file
         mapf_solver_name: Name of the MAPF solver
-        roadmap_type: Type of the roadmap
+        road_map_type: Type of the roadmap
         agent_velocity: Velocity of the agent
         visualize_density_map: Whether to visualize and save density maps
         num_workers: Number of parallel workers (default: auto-detect CPU cores)
@@ -136,7 +136,7 @@ def label_dataset(path, graph_file_name: Path = None, mapf_solver_name: str = "c
     
     # Prepare case tasks
     solution_name_suffix = get_solution_name_suffix(graph_file_name)
-    case_tasks = [(case_dir, solution_name_suffix, mapf_solver_name, roadmap_type, agent_velocity, visualize_density_map) for case_dir in cases]
+    case_tasks = [(case_dir, solution_name_suffix, mapf_solver_name, road_map_type, agent_velocity, visualize_density_map) for case_dir in cases]
     
     # Process cases in parallel
     successful = 0

@@ -455,7 +455,7 @@ def set_train_config(train_config: dict = None,args: argparse.Namespace = None):
         folder_path = [Path(p) for p in args.folder_paths]
         train_config['dataset']['folder_path'] = folder_path
         assert len(train_config['dataset']['folder_path']) > 0, "Dataset folder path must be provided"
-        assert type(train_config['dataset']['folder_path']) == List, "Dataset folder path must be a list"
+        assert type(train_config['dataset']['folder_path']) == list, "Dataset folder path must be a list"
 
     # Setting the dataset load file
     if args.load_file is not None:
