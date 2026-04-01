@@ -50,6 +50,11 @@ def generate_sample_path(base_path: Path, sample_id: int, augmentation_id: int =
     sample_path.mkdir(parents=True, exist_ok=True)
     return sample_path
 
+def generate_gnn_sampler_path(base_path: Path, gnn_folder_name: str):
+    gnn_path = base_path/ "gnn" / gnn_folder_name
+    gnn_path.mkdir(parents=True, exist_ok=True)
+    return gnn_path
+
 def get_input_file_path(base_path: Path):
     input_file = base_path / "input.yaml"
     return input_file
@@ -75,6 +80,13 @@ def get_graph_gnn_file_path(base_path: Path):
 def get_target_file_path(base_path: Path, y_type_name: str):
     target_file = base_path / f"target_{y_type_name}.npy"
     return target_file
+
+def get_prediction_file_path(base_path: Path, prune_name: str = None):
+    if prune_name is None or prune_name == '' or 'prediction' in prune_name:
+        prediction_file = base_path / f"predictions.npy"
+    else:
+        prediction_file = base_path / f"predictions_{prune_name}.npy"
+    return prediction_file
 
 def get_solution_file_path(base_path: Path, solution_name_suffix: str = "solution_graph_map", agent_velocity: float = 0.0):
     solution_file = base_path / f"{solution_name_suffix}_velocity{agent_velocity}.yaml"
@@ -111,6 +123,13 @@ def get_density_map_file(base_path: Path, solution_name_suffix: str = "solution_
 def get_density_map_visualization_file(base_path: Path, solution_name_suffix: str = "solution_graph_map", agent_velocity: float = 0.0):
     density_map_visualization_file = base_path / f"{solution_name_suffix}_velocity{agent_velocity}_density_map.png"
     return density_map_visualization_file
+
+def get_prediction_file_path(base_path: Path, prune_name: str = None):
+    if prune_name is None or prune_name == '' or 'predictions' in prune_name:
+        prediction_file = base_path / f"predictions.npy"
+    else:
+        prediction_file = base_path / f"predictions_{prune_name}.npy"
+    return prediction_file
 
 def get_solution_name_suffix(graph_file: Path = None):
     if graph_file is None:

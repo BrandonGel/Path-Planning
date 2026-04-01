@@ -905,6 +905,9 @@ class GraphSampler(Grid):
     def load_graph_sampler(self, path: str, args: dict = {}):
         with open(path, 'rb') as f:
             data = pickle.load(f)
+        self._load_from_dict(data, args)
+
+    def _load_from_dict(self, data: dict, args: dict = {}):
 
         self.use_discrete_space = data["use_discrete_space"]
         self.set_start(data["start"])

@@ -130,11 +130,12 @@ class Visualizer2D(BaseVisualizer2D):
                         road_map: List[List[int]],
                         node_color: str = "#8c564b", 
                         edge_color: str = "#e377c2", 
-                        node_size: float = 50, 
+                        node_size: float = 20, 
                         linewidth: float = 1.0, 
                         node_alpha: float = 1.0,
                         edge_alpha: float = 0.3,
                         node_value: List[float] = None,
+                        show_edge: bool = True,
                         cmap: mcolors.Colormap = None,
                         map_frame: bool = True) -> None:
         """
@@ -156,20 +157,23 @@ class Visualizer2D(BaseVisualizer2D):
         else:
             x_coords = [node.current[0] for node in nodes]
             y_coords = [node.current[1] for node in nodes]
-        for i, edges in enumerate(road_map):
-            if len(edges) == 0:
-                continue
-            x1, y1 = x_coords[i], y_coords[i]
-            # if not (x1 in points[ind1][:,0] and y1 in points[ind1][:,1]) and not (x1 in points[ind2][:,0] and x1 in points[ind2][:,1]):
-            #     continue
-            for edge_idx in edges:
-                if edge_idx < len(x_coords):  # Safety check
-                    x2, y2 = x_coords[edge_idx], y_coords[edge_idx]
-                    self.ax.plot([x1, x2], [y1, y2], edge_color, linewidth=linewidth, alpha=edge_alpha, zorder=self.zorder['road_map'])
+        if show_edge:
+            for i, edges in enumerate(road_map):
+                if len(edges) == 0:
+                    continue
+                x1, y1 = x_coords[i], y_coords[i]
+                # if not (x1 in points[ind1][:,0] and y1 in points[ind1][:,1]) and not (x1 in points[ind2][:,0] and x1 in points[ind2][:,1]):
+                #     continue
+                for edge_idx in edges:
+                    if edge_idx < len(x_coords):  # Safety check
+                        x2, y2 = x_coords[edge_idx], y_coords[edge_idx]
+                        self.ax.plot([x1, x2], [y1, y2], edge_color, linewidth=linewidth, alpha=edge_alpha, zorder=self.zorder['road_map'])
 
         # Plot all nodes
         if node_value is not None:
-            self.ax.scatter(x_coords, y_coords, c=node_value, edgecolors='black', s=node_size, alpha=node_alpha, zorder=self.zorder['road_map'], label='Sample nodes', cmap=cmap)
+            vmin = min(0,np.min(node_value))
+            vmax = max(1,np.max(node_value))
+            self.ax.scatter(x_coords, y_coords, c=node_value, edgecolors='black', s=node_size, alpha=node_alpha, zorder=self.zorder['road_map'], label='Sample nodes', cmap=cmap, vmin=vmin, vmax=vmax)
         else:
             self.ax.scatter(x_coords, y_coords, c=node_color, edgecolors='black', s=node_size, alpha=node_alpha, zorder=self.zorder['road_map'], label='Sample nodes')
         
