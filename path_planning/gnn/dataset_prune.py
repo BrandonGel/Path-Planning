@@ -64,11 +64,13 @@ def read_prune_mechanism_from_yaml(prune_mechanism_yaml: Path):
     prune_mode = prune_mechanism.get('prune_mode', None)
     prune_std_scale = prune_mechanism.get('prune_std_scale', None)
     prune_value = prune_mechanism.get('prune_value', None)
-    k_hop = prune_mechanism.get('k_hop', -1)
+    k_hop = prune_mechanism.get('k_hop', 0)
+
+    assert k_hop >= 0, "k_hop must be >= 0"
     prune_mechanism = create_prune_mechanism(prune_mode, prune_std_scale, prune_value, prune_gnn, threshold_scale, k_hop)
     return prune_mechanism
 
-def create_prune_mechanism(prune_mode: str, prune_std_scale: float, prune_value: float, prune_gnn: bool = False,threshold_scale: float = 1.0,k_hop: int = -1):
+def create_prune_mechanism(prune_mode: str, prune_std_scale: float, prune_value: float, prune_gnn: bool = False,threshold_scale: float = 1.0,k_hop: int = 0):
     mode = prune_mode.lower() if prune_mode and prune_mode.lower() in PRUNE_MECHANISMS_MODES else None
     std_scale = float(prune_std_scale) if prune_std_scale and prune_std_scale is not None else None
     value = float(prune_value) if prune_value and prune_value is not None else None
@@ -117,7 +119,7 @@ def get_prune_mechanism_folder(prune_mechanism: dict = None) -> Path:
         std_scale = prune_mechanism.get('std_scale', None)
         value = prune_mechanism.get('value', None)
         prune_gnn = prune_mechanism.get('prune_gnn', False)
-        k_hop = prune_mechanism.get('k_hop', -1)
+        k_hop = prune_mechanism.get('k_hop', 0)
         threshold_scale = prune_mechanism.get('threshold_scale', 1.0)
         name = ""
         if mode is not None:
@@ -128,12 +130,12 @@ def get_prune_mechanism_folder(prune_mechanism: dict = None) -> Path:
             name += f"value{value}"
         if prune_gnn:
             name += f"gnn"
-        if k_hop != -1:
-            name += f"k{k_hop}"
         if threshold_scale != 1.0:
             name += f"thresholdscale{threshold_scale}"
         if name == "":
             name += ""
+        else:
+            name += f"k{k_hop}"
         return name
 
 def _flatten_wandb_config(config):
@@ -522,167 +524,6 @@ def prune_map(map_: GraphSampler, prune_value: np.ndarray, k_hop: int = 0) -> Gr
     pruned_map = map_.create_pruned_copy(kept_indices)
     return pruned_map, kept_indices
 
-def process_single_case_gnn(
-        case_id: int,
-        base_path: Path,
-        road_map_type: str,
-        gnn_folder_name: str,
-        model: torch.nn.Module,
-        config: Dict,
-        device: torch.device,
-        prune_mechanism: dict = None,
-        k_hop: int = 0,
-    ) -> int:
-    """
-    Load graph_sampler.pkl for one case, run GNN inference for each permutation, save predictions.
-
-    Args:
-        case_id: Case index (case_{case_id}).
-        base_path: Dataset path (e.g. .../agents4_obst0.1).
-        road_map_type: One of grid, prm, planar (folder name under case_{id}).
-        gnn_folder_name: Output folder name (e.g. gatv2_z447mk1j).
-        model: Loaded GNN model (eval mode).
-        config: Config with bounds, resolution, etc.
-        device: Device to run inference on.
-
-    Returns:
-        Number of permutations processed.
-    """
-    base_path = Path(base_path)
-    case_path,_ = generate_base_case_path(base_path, case_id, road_map_type)
-    ground_truth_path = generate_roadmap_path(generate_ground_truth_path(case_path), road_map_type)
-    graph_file = get_graph_file_path(ground_truth_path)
-    if not graph_file.exists():
-        return 0
-
-    bounds = config.get("bounds", [[0, 32.0], [0, 32.0]])
-    resolution = config.get("resolution", 1.0)
-    map_ = GraphSampler(bounds=bounds, resolution=resolution, start=[], goal=[])
-    map_.load_graph_sampler(str(graph_file))
-    data = normalize_data(map_)
-    data = data.to(device)
-    edge_attr_dict = None
-    if hasattr(data, "edge_attr_dict"):
-        edge_attr_dict = data.edge_attr_dict
-    else:
-        edge_attr_dict = {
-            ("node", "to", "node"): data["node", "to", "node"].edge_attr,
-            ("node", "approx", "node"): data["node", "approx", "node"].edge_attr,
-        }
-
-    with torch.no_grad():
-        try:
-            out = model(data.x_dict, data.edge_index_dict, edge_attr_dict)
-        except TypeError:
-            out = model(data.x_dict, data.edge_index_dict)
-
-    if isinstance(out, dict):
-        pred = out["node"].cpu().numpy()
-    else:
-        pred = out.cpu().numpy()    
-
-    gnn_sampler_path = generate_gnn_sampler_path(ground_truth_path, gnn_folder_name)
-    prediction_file = get_prediction_file_path(gnn_sampler_path)
-    np.save(prediction_file, pred)
-
-    if prune_mechanism is not None:
-        # Get the prune function & value -> save as npy file
-        prune_name = get_prune_mechanism_folder(prune_mechanism)
-        prune_value = get_prune_mechanism(prune_mechanism)(pred)
-        prediction_file = get_prediction_file_path(gnn_sampler_path, prune_name)
-        np.save(prediction_file, prune_value)
-
-        map_pruned, kept_indices = prune_map(map_, prune_value, k_hop)
-        graph_file = get_graph_file_path(ground_truth_path, f"graph_sampler_{prune_name}_k{k_hop}.pkl")
-        map_pruned.save_graph_sampler(graph_file)
-
-    return 1
-
-def create_gnn_map(
-        path: Path,
-        num_cases: int,
-        map_config: Dict,
-        run_folder: Optional[Path] = None,
-        checkpoint_path: Optional[Path] = None,
-        config_path: Optional[Path] = None,
-        run_id: Optional[str] = None,
-        road_map_type: Optional[str] = None,
-        verbose: bool = True,
-        prune_mechanism: dict = None,
-        k_hop: int = 0,
-    ) -> None:
-    """
-    Load all graph_sampler.pkl under path, normalize to HeteroData, run GNN inference,
-    and save predictions into a folder named {model_type}_{run_id} alongside grid/prm/planar.
-
-    Args:
-        path: Base path for dataset (e.g. .../map32.0x32.0_resolution1.0/agents4_obst0.1).
-        num_cases: Number of cases to process (case_0 .. case_{num_cases-1}).
-        map_config: Configuration with bounds, resolution, etc. (used for GraphSampler and sample_data).
-        run_folder: Wandb run folder (e.g. logs/.../wandb/run-20260217_062327-z447mk1j).
-        checkpoint_path: Path to model .pth (use with config_path when run_folder is None).
-        config_path: Path to config.yaml (use with checkpoint_path when run_folder is None).
-        run_id: Optional run ID for folder name; inferred from run_folder if not set.
-        road_map_type: Road map type to load graphs from (grid, prm, planar). Default from config.
-        verbose: Whether to print progress.
-    """
-    path = Path(path)
-    path.mkdir(parents=True, exist_ok=True)
-    road_map_type = road_map_type or map_config.get("road_map_type", "grid")
-
-    if verbose:
-        print(f"GNN evaluation: loading model and building sample_data from first graph...")
-
-    sample_data = None
-    for case_id in range(num_cases):
-        case_path = path / f"case_{case_id}"
-        agent_radius = round(map_config.get("agent_radius", 0.0), 3)
-        ground_truth_path = case_path / road_map_type / f"radius{agent_radius}" / "ground_truth"
-        graph_file = ground_truth_path / "graph_sampler.pkl"
-        agents_dir = case_path / "agents"
-        if not graph_file.exists() or not agents_dir.exists():
-            continue
-        bounds = map_config.get("bounds", [[0, 32.0], [0, 32.0]])
-        resolution = map_config.get("resolution", 1.0)
-        map_ = GraphSampler(bounds=bounds, resolution=resolution, start=[], goal=[])
-        map_.load_graph_sampler(str(graph_file))
-        sample_data = normalize_data(map_)
-        break
-
-    if sample_data is None:
-        raise FileNotFoundError(
-            f"No graph_sampler.pkl and agents found under {path} for road_map_type={road_map_type}"
-        )
-
-    model, train_config, device, gnn_folder_name = load_gnn_model(
-        run_folder=run_folder,
-        checkpoint_path=checkpoint_path,
-        config_path=config_path,
-        run_id=run_id,
-        sample_data=sample_data,
-    )
-    merged_config = {**map_config, **train_config}
-    if verbose:
-        print(f"GNN folder name: {gnn_folder_name}, processing {num_cases} cases...")
-
-    total_perms = 0
-    for case_id in tqdm(range(num_cases), desc="GNN cases", disable=not verbose):
-        n = process_single_case_gnn(
-            case_id=case_id,
-            base_path=path,
-            road_map_type=road_map_type,
-            gnn_folder_name=gnn_folder_name,
-            model=model,
-            config=merged_config,
-            device=device,
-            prune_mechanism=prune_mechanism,
-            k_hop=k_hop,
-        )
-        total_perms += n
-
-    if verbose:
-        print(f"GNN evaluation complete: {total_perms} permutations saved under */{gnn_folder_name}/")
-
 def process_single_case_gnn_task(
         task: Tuple[Path, str],
         config: Dict,
@@ -702,7 +543,7 @@ def process_single_case_gnn_task(
     Returns:
         Number of tasks processed.
     """
-    graph_dir, graph_file_name = task[0], task[1]
+    input_file, graph_dir, graph_file_name = task[0], task[1], task[2]
     graph_file = get_graph_file_path(graph_dir, graph_file_name)
     if not graph_file.exists():
         return 0
@@ -738,7 +579,6 @@ def process_gnn_task_batch(
     else:
         pred = out.cpu().numpy()    
 
-    # TODO: NEED TO REVIST THIS
     prune_gnn = prune_mechanism.get('prune_gnn', False)
     threshold_values = None
     if prune_gnn:
@@ -769,7 +609,7 @@ def process_gnn_task_batch(
             if prune_name == "":
                 return
             prune_fn = get_prune_function(prune_mechanism)
-            k_hop = prune_mechanism.get('k_hop', -1)
+            k_hop = prune_mechanism.get('k_hop', 0)
             threshold_value = threshold_values[ii] if threshold_values is not None else 0
 
             prune_value = prune_fn(unbatched_pred, threshold_value)
@@ -777,7 +617,7 @@ def process_gnn_task_batch(
             np.save(prediction_file, prune_value)
 
             map_pruned, kept_indices = prune_map(map_, prune_value, k_hop)
-            graph_file = get_graph_file_path(gnn_sampler_path, f"graph_sampler_{prune_name}_k{k_hop}.pkl")
+            graph_file = get_graph_file_path(gnn_sampler_path, f"graph_sampler_{prune_name}.pkl")
             map_pruned.save_graph_sampler(graph_file)
 
 def create_gnn_map_tasks(
@@ -811,7 +651,7 @@ def create_gnn_map_tasks(
             print("No tasks to process.")
         return
 
-    graph_dir, graph_file_name = tasks[0][0], tasks[0][1]
+    input_file, graph_dir, graph_file_name = tasks[0][0], tasks[0][1], tasks[0][2]
     graph_file = get_graph_file_path(graph_dir, graph_file_name)
 
     if verbose:
@@ -866,7 +706,7 @@ def create_gnn_map_tasks(
         data_list.append(data)
         graph_file_list.append(graph_file)
         map_list.append(map_)
-        if len(data_list) >= batch_size:
+        if len(data_list) >= batch_size or task == tasks[-1]:
             process_gnn_task_batch(graph_file_list, data_list, map_list, model, device, gnn_folder_name, prune_mechanism)
             data_list = []
             map_list = []

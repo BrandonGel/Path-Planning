@@ -12,6 +12,11 @@ from path_planning.global_planner.sample_search.rrg import RRG
 import faiss
 import pickle
 
+ROADMAP_TYPES = set(["grid","prm","cdt","rrg","midpoints","centroids","voronoi"])
+def validate_roadmap_type(roadmap_type: str):
+    if roadmap_type not in ROADMAP_TYPES:
+        return False
+    return True
 
 class GraphSampler(Grid):
     def __init__(self,*args,start,goal,sample_num=0,num_neighbors = 13.0, min_edge_len = 1e-10, max_edge_len = 30.0,goal_sample_rate=0.1,use_discrete_space=True,use_constraint_sweep=True,record_sweep=True,use_exact_collision_check=True,**kwargs):

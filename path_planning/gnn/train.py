@@ -7,6 +7,7 @@ import wandb
 from time import time
 from path_planning.gnn.loss import LossFunction
 from typing import Dict
+from path_planning.gnn.loss import get_probability
 
 def split_dataset(graph_dataset:GraphDataset,batch_size=128,test_size=0.1,random_state=42,num_workers=1):
 
@@ -47,15 +48,23 @@ def get_threshold_x_dict(x_dict:Dict[str,torch.Tensor],out:Dict[str,torch.Tensor
     )
     return x_dict
 
-
 def threshold_graph_to_nodes(
-    threshold: torch.Tensor, batch_dict: Dict[str, torch.Tensor]
+    threshold: torch.Tensor, batch_dict: Dict[str, torch.Tensor],
+    node_type: str = 'node'
 ) -> torch.Tensor:
     """Broadcast graph-level ``threshold`` (B, *) to per-node (N, *) using ``batch_dict['node']``."""
-    idx = batch_dict['node']
+    idx = batch_dict[node_type]
     if threshold.dim() == 1:
         return threshold[idx].unsqueeze(-1)
     return threshold[idx]
+
+def normalize_threshold(threshold: torch.Tensor,batch_dict: Dict[str, torch.Tensor], logits:torch.Tensor, node_type: str = 'node'):
+    return threshold
+    # idx = batch_dict[node_type]
+    # logits_means = torch.stack([logits[node_type][idx==ii].mean(dim=0) for ii in torch.unique(idx)])
+    # new_threshold = threshold - logits_means
+    # return new_threshold
+    
 
 def train(train_loader,model,optimizer,loss_function:LossFunction,threshold_model=None,num_prune=0,device='cuda:0',run: wandb.Run =None):
     model.train()
@@ -73,6 +82,7 @@ def train(train_loader,model,optimizer,loss_function:LossFunction,threshold_mode
                 x_dict = get_threshold_x_dict(device_batch.x_dict,out)
                 with torch.no_grad():
                     threshold = threshold_model(x_dict, device_batch.edge_index_dict,device_batch.edge_attr_dict,device_batch.batch_dict)
+                    threshold = normalize_threshold(threshold, device_batch.batch_dict, out, 'node')
                 additional_args['threshold'] = threshold_graph_to_nodes(
                     threshold, device_batch.batch_dict
                 )
@@ -103,34 +113,36 @@ def test(test_loader,model,loss_function:LossFunction,threshold_model=None,num_p
     test_time = []
     with torch.no_grad():
         for batch in test_loader:
-            st = time()
-            device_batch = batch.to(device)
-            out = model(device_batch.x_dict, device_batch.edge_index_dict,device_batch.edge_attr_dict,device_batch.batch_dict)
+            for _ in range(num_prune+1):
+                st = time()
+                device_batch = batch.to(device)
+                out = model(device_batch.x_dict, device_batch.edge_index_dict,device_batch.edge_attr_dict,device_batch.batch_dict)
 
-            additional_args = {}
-            if threshold_model is not None:
-                x_dict = get_threshold_x_dict(device_batch.x_dict,out)
-                with torch.no_grad():
-                    threshold = threshold_model(x_dict, device_batch.edge_index_dict,device_batch.edge_attr_dict,device_batch.batch_dict)
-                additional_args['threshold'] = threshold_graph_to_nodes(
-                    threshold, device_batch.batch_dict
-                )
+                additional_args = {}
+                if threshold_model is not None:
+                    x_dict = get_threshold_x_dict(device_batch.x_dict,out)
+                    with torch.no_grad():
+                        threshold = threshold_model(x_dict, device_batch.edge_index_dict,device_batch.edge_attr_dict,device_batch.batch_dict)
+                        threshold = normalize_threshold(threshold, device_batch.batch_dict, out, 'node')
+                    additional_args['threshold'] = threshold_graph_to_nodes(
+                        threshold, device_batch.batch_dict
+                    )
 
-            loss = loss_function(out['node'],
-                               device_batch['node'].y.reshape(-1,1),
-                               device_batch.edge_index_dict,
-                               device_batch.edge_attr_dict,
-                               device_batch.edge_weight_dict,
-                               device_batch.batch_dict,
-                               additional_args)
-            et = time()
-            test_time.append(et-st)
-            test_loss.append(float(loss.item()))
-            if run is not None:
-                run.log({
-                    "batch/test_loss": test_loss[-1],
-                    "batch/test_time": test_time[-1],
-                })
+                loss = loss_function(out['node'],
+                                device_batch['node'].y.reshape(-1,1),
+                                device_batch.edge_index_dict,
+                                device_batch.edge_attr_dict,
+                                device_batch.edge_weight_dict,
+                                device_batch.batch_dict,
+                                additional_args)
+                et = time()
+                test_time.append(et-st)
+                test_loss.append(float(loss.item()))
+                if run is not None:
+                    run.log({
+                        "batch/test_loss": test_loss[-1],
+                        "batch/test_time": test_time[-1],
+                    })
     return test_loss,test_time
 
 def train_threshold(train_loader,threshold_model,threshold_optimizer,loss_function:LossFunction,model,num_prune=0,
@@ -152,6 +164,7 @@ def train_threshold(train_loader,threshold_model,threshold_optimizer,loss_functi
             threshold = threshold_model(x_dict, device_batch.edge_index_dict,
                                           device_batch.edge_attr_dict,
                                           device_batch.batch_dict)
+            threshold = normalize_threshold(threshold, device_batch.batch_dict, out, 'node')
             additional_args = {
                 'threshold': threshold_graph_to_nodes(threshold, device_batch.batch_dict),
             }
@@ -193,6 +206,7 @@ def test_threshold(test_loader,threshold_model,loss_function:LossFunction,model,
                 threshold = threshold_model(x_dict, device_batch.edge_index_dict,
                                               device_batch.edge_attr_dict,
                                               device_batch.batch_dict)
+                threshold = normalize_threshold(threshold, device_batch.batch_dict, out, 'node')
                 additional_args = {
                     'threshold': threshold_graph_to_nodes(threshold, device_batch.batch_dict),
                 }

@@ -6,11 +6,12 @@ from path_planning.utils.util import _to_native_yaml
 def generate_base_case_path(base_path: Path, case_id: int, road_map_type: str):
     case_path = base_path / f"case_{case_id}"
     case_path.mkdir(parents=True, exist_ok=True)
-    map_path = generate_map_path(case_path, road_map_type)
-    return case_path,map_path
+    map_path = generate_map_path(case_path)
+    roadmap_path = generate_roadmap_path(map_path, road_map_type)
+    return case_path,roadmap_path
 
-def generate_map_path(base_path: Path, road_map_type: str):
-    map_path = base_path / "maps" / road_map_type
+def generate_map_path(base_path: Path):
+    map_path = base_path / "maps"
     map_path.mkdir(parents=True, exist_ok=True)
     return map_path
 

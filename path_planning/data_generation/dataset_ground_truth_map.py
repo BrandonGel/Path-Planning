@@ -11,7 +11,7 @@ import os
 from pathlib import Path
 import yaml
 import numpy as np
-from typing import Dict, List, Tuple, Optional
+from typing import Any, Dict, List, Tuple, Optional
 from path_planning.multi_agent_planner.mapf_solver import solve_mapf
 from path_planning.common.environment.map.graph_sampler import GraphSampler
 from path_planning.utils.util import set_global_seed
@@ -24,12 +24,14 @@ import math
 from itertools import product
 from path_planning.utils.util import _to_native_yaml
 from path_planning.data_generation.dataset_util import *
+from path_planning.common.environment.map.graph_sampler import validate_roadmap_type
 
 KEYS = ["bounds", "resolution", "time_limit", "max_iterations", "road_map_type", "use_discrete_space", "sample_num", "num_neighbors", "min_edge_len", "max_edge_len", "agent_radius", "nb_obstacles", "nb_agents"]
 class InputFile:   
     def __init__(self, input_file: Path, case_id: int = 0):
         self.input_file = input_file
         self.case_id = case_id
+        self.inpt = self.check_input_file()
         
     def check_keys_inside_input(self, inpt: Dict):
         for key in KEYS:
@@ -55,6 +57,20 @@ class InputFile:
             return False
         return inpt
 
+    def get_input_content(self):
+        return self.inpt
+
+    def check_difference_between_input(self, config: Dict) -> bool:
+        keys = ["bounds", "resolution", "road_map_type", "use_discrete_space", "sample_num", "num_neighbors", "min_edge_len", "max_edge_len", "agent_radius", "nb_obstacles", "nb_agents"]
+        inpt = self.get_input_content()
+        if not inpt:
+            return True
+
+        for key in keys:
+            if inpt.get(key, None) is not None and config.get(key, None) is not None and inpt[key] != config[key]:
+                return True
+        return False
+
     def gen_input(self,**kwargs):
         key = self.check_keys_inside_input(kwargs)
         if key:
@@ -65,7 +81,7 @@ class InputFile:
         time_limit = kwargs.get("time_limit", 60)
         max_iterations = kwargs.get("max_iterations", 10000)
         road_map_type = kwargs.get("road_map_type", "grid")
-        discrete_space = kwargs.get("discrete_space", True)
+        use_discrete_space = kwargs.get("use_discrete_space", True)
         sample_num = kwargs.get("sample_num", 0)
         num_neighbors = kwargs.get("num_neighbors", 4.0)
         min_edge_len = kwargs.get("min_edge_len", 1e-10)
@@ -86,7 +102,7 @@ class InputFile:
             "time_limit": time_limit,
             "max_iterations": max_iterations,
             "road_map_type": road_map_type,
-            "discrete_space": discrete_space,
+            "use_discrete_space": use_discrete_space,
             "sample_num": sample_num,
             "num_neighbors": num_neighbors,
             "min_edge_len": min_edge_len,
@@ -215,8 +231,6 @@ def create_map(param: Dict, generate_new_graph: bool = False,graph_file: Path =N
     if graph_file and graph_file.exists() and not generate_new_graph:
         map_ = GraphSampler(bounds=bounds, resolution=resolution, start=[], goal=[])
         map_.load_graph_sampler(graph_file)
-        if verbose:
-            print(f"Loaded graph from {graph_file}")
     else:
         obstacles = np.array(param["map"]["obstacles"])
         agents = param["agents"]
@@ -229,20 +243,20 @@ def create_map(param: Dict, generate_new_graph: bool = False,graph_file: Path =N
                 max_edge_len=(1+1e-10)*param['resolution'],
                 num_neighbors=4.0
             )
-        elif road_map_type == 'prm' or road_map_type == 'planar' or road_map_type == 'rrg':
+        elif validate_roadmap_type(road_map_type):
             map_ = GraphSampler(
                 bounds=bounds,
                 resolution=resolution,
                 start=[],
                 goal=[],
-                use_discrete_space=param["discrete_space"],
+                use_discrete_space=param["use_discrete_space"],
                 sample_num=param["sample_num"],
                 min_edge_len=param["min_edge_len"],
                 max_edge_len=param["max_edge_len"],
                 num_neighbors=param["num_neighbors"]
             )
         else:
-            print("Invalid road map name provided")
+            assert False, f"Invalid road map name provided: {road_map_type}"
         
         map_.set_obstacles(obstacles=obstacles)
         map_.set_inflation_radius(radius=param["agent_radius"]+np.sqrt(2)/2*param["resolution"])
@@ -262,15 +276,50 @@ def create_map(param: Dict, generate_new_graph: bool = False,graph_file: Path =N
             print(f"Generated and saved graph to {graph_file}")
     return map_
 
-def generate_permutation(inpt: Dict, config: Dict, case_path: Path,verbose: bool = True):
+def generate_permutation(inpt: Dict, config: Dict, case_path: Path, generate_new_graph: bool = False, verbose: bool = True):
     # Generate and save permutation agent configs
     nb_permutations = config["nb_permutations"]
     nb_permutations_tries = config["nb_permutations_tries"]
-    solve_till_success = config["solve_till_success"]
+    solve_till_success = config.get("solve_till_success", False)
     start_goal_index = np.arange(0, config["nb_agents"] * 2, 1)
     unique_permutations = set()
 
-    num_tries = nb_permutations_tries if solve_till_success else nb_permutations
+    # Count how many permutation input files already exist on disk and, if we are
+    # not regenerating a new graph, load any previously stored permutations so we
+    # do not create duplicates across runs.
+    perm_base = generate_perm_base_path(case_path)
+    existing_count = 0
+    if perm_base.exists():
+        for p in perm_base.iterdir():
+            if p.is_dir() and (p / "input.yaml").exists():
+                existing_count += 1
+                if not generate_new_graph:
+                    try:
+                        with open(p / "input.yaml", "r") as f:
+                            existing_data = yaml.safe_load(f)
+                    except Exception:
+                        existing_data = None
+                    if isinstance(existing_data, dict) and "start_goal_index" in existing_data:
+                        try:
+                            perm_tuple = tuple(int(v) for v in existing_data["start_goal_index"])
+                            unique_permutations.add(perm_tuple)
+                        except TypeError:
+                            # If the stored value is not iterable/int-castable, just skip it.
+                            pass
+
+    # If we already have enough permutations and the graph is unchanged, do nothing.
+    if existing_count >= nb_permutations and not generate_new_graph:
+        return
+
+    # Determine how many additional permutations we still need (if any).
+    remaining = max(0, nb_permutations - existing_count)
+    if remaining == 0 and not generate_new_graph:
+        return
+
+    # For a new graph, we start from scratch; otherwise we only add missing perms.
+    start_perm_id = 0 if generate_new_graph else existing_count
+
+    num_tries = nb_permutations_tries if solve_till_success else remaining
     for ii in range(num_tries):
         max_unique_attempts = 1000
         unique_attempts = 0
@@ -288,8 +337,13 @@ def generate_permutation(inpt: Dict, config: Dict, case_path: Path,verbose: bool
         agents_shuffled = shuffle_agents_goals(inpt, start_goal_index)
         inpt_copy = copy.deepcopy(inpt)
         inpt_copy["agents"] = agents_shuffled
+        # Persist the permutation so future runs can avoid duplicates.
+        try:
+            inpt_copy["start_goal_index"] = start_goal_index.tolist()
+        except AttributeError:
+            inpt_copy["start_goal_index"] = list(start_goal_index)
 
-        perm_id = len(unique_permutations) - 1
+        perm_id = start_perm_id + len(unique_permutations) - 1
         _,perm_file = generate_input_perm_yaml_path(case_path, perm_id)
         with open(perm_file, "w") as f:
             yaml.safe_dump(_to_native_yaml(inpt_copy), f)
@@ -316,21 +370,23 @@ def process_single_case_map_generation(args: Tuple) -> Optional[int]:
 
     input_file = get_input_file_path(case_path)
     input_class = InputFile(input_file, case_id)
-    inpt = input_class.check_input_file()
-    if generate_new_graph or not inpt:
-        inpt = input_class.gen_input(**config)
-        if verbose:
-            print(f"Generated input file {input_file}")
-        with open(input_file, "w") as f:
-            yaml.safe_dump(_to_native_yaml(inpt), f)   
+    inpt = input_class.get_input_content()
     if graph_file is None:
         graph_file = get_graph_file_path(map_path)
+    if generate_new_graph or not inpt or not graph_file.exists():
+        inpt = input_class.gen_input(**config)
+        if generate_new_graph or not graph_file.exists() or not input_file.exists():
+            if verbose:
+                print(f"Generated new input file {input_file}")
+            with open(input_file, "w") as f:
+                yaml.safe_dump(_to_native_yaml(inpt), f)   
+    
 
     # Build and save graph once
     create_map(inpt, generate_new_graph,graph_file,verbose)
 
     # Generate and save permutation agent configs
-    generate_permutation(inpt, config, case_path,verbose)
+    generate_permutation(inpt, config, case_path, generate_new_graph=generate_new_graph, verbose=verbose)
 
     return case_id
 
