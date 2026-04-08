@@ -27,6 +27,7 @@ from path_planning.multi_agent_planner.centralized.lacam.lacam_random import LaC
 from path_planning.multi_agent_planner.centralized.lacam.utility import set_starts_goals_config, is_valid_mapf_solution
 from path_planning.multi_agent_planner.centralized.sipp.sipp import SippPlanner
 from path_planning.gnn.dataloader import get_graph_dataset_file_paths, GraphDataset
+from path_planning.gnn.train import get_threshold_x_dict
 
 import time
 import numpy as np
@@ -59,22 +60,24 @@ def read_prune_mechanism_from_yaml(prune_mechanism_yaml: Path):
     with open(prune_mechanism_yaml, 'r') as f:
         prune_mechanism = yaml.load(f, Loader=yaml.FullLoader)
     prune_gnn = prune_mechanism.get('prune_gnn', False)
+    threshold_scale = prune_mechanism.get('threshold_scale', 1.0)
     prune_mode = prune_mechanism.get('prune_mode', None)
     prune_std_scale = prune_mechanism.get('prune_std_scale', None)
     prune_value = prune_mechanism.get('prune_value', None)
     k_hop = prune_mechanism.get('k_hop', -1)
-    prune_mechanism = create_prune_mechanism(prune_mode, prune_std_scale, prune_value, prune_gnn, k_hop)
+    prune_mechanism = create_prune_mechanism(prune_mode, prune_std_scale, prune_value, prune_gnn, threshold_scale, k_hop)
     return prune_mechanism
 
-def create_prune_mechanism(prune_mode: str, prune_std_scale: float, prune_value: float, prune_gnn: bool = False,k_hop: int = -1):
-    mode = prune_mode.lower() if prune_mode.lower() in PRUNE_MECHANISMS_MODES else None
-    std_scale = float(prune_std_scale) if prune_std_scale is not None else None
-    value = float(prune_value) if prune_value is not None else None
+def create_prune_mechanism(prune_mode: str, prune_std_scale: float, prune_value: float, prune_gnn: bool = False,threshold_scale: float = 1.0,k_hop: int = -1):
+    mode = prune_mode.lower() if prune_mode and prune_mode.lower() in PRUNE_MECHANISMS_MODES else None
+    std_scale = float(prune_std_scale) if prune_std_scale and prune_std_scale is not None else None
+    value = float(prune_value) if prune_value and prune_value is not None else None
     return {
         "mode": mode,
         "std_scale": std_scale,
         "value": value,
         "prune_gnn": prune_gnn,
+        "threshold_scale": threshold_scale,
         "k_hop": k_hop}
 
 def get_prune_function(prune_mechanism: dict = None):
@@ -82,8 +85,7 @@ def get_prune_function(prune_mechanism: dict = None):
         mode = prune_mechanism.get('mode', None)
         std_scale = prune_mechanism.get('std_scale', None)
         value = prune_mechanism.get('value', None)
-        prune_gnn = prune_mechanism.get('prune_gnn', False)
-        
+        threshold_scale = prune_mechanism.get('threshold_scale', 1.0)
         mode_func = None
         if mode in PRUNE_MECHANISMS_MODES:
             if mode == 'mean':
@@ -91,17 +93,16 @@ def get_prune_function(prune_mechanism: dict = None):
             elif mode == 'median':
                 mode_func = np.median
 
-        def get_prune_value(out:np.ndarray,gnn_threshold_value:np.ndarray = None) -> np.ndarray:
+        def get_prune_value(out:np.ndarray,threshold_value:np.ndarray = 0) -> np.ndarray:
             assert isinstance(out, np.ndarray), "out must be a numpy array"
             threshold = float('inf')
+            out = np.exp(threshold_scale*(out-threshold_value))
             if mode_func is not None:
                 threshold = mode_func(out)
                 if std_scale is not None:
                     threshold = threshold - out.std()*std_scale
             if value is not None:
                 threshold = min(threshold, value)
-            if prune_gnn and gnn_threshold_value is not None:
-                threshold = min(threshold, gnn_threshold_value)
             if threshold == float('inf'):
                 return np.zeros_like(out)
             out[out > threshold] = 1
@@ -116,6 +117,8 @@ def get_prune_mechanism_folder(prune_mechanism: dict = None) -> Path:
         std_scale = prune_mechanism.get('std_scale', None)
         value = prune_mechanism.get('value', None)
         prune_gnn = prune_mechanism.get('prune_gnn', False)
+        k_hop = prune_mechanism.get('k_hop', -1)
+        threshold_scale = prune_mechanism.get('threshold_scale', 1.0)
         name = ""
         if mode is not None:
             name += f"{mode}"
@@ -125,22 +128,31 @@ def get_prune_mechanism_folder(prune_mechanism: dict = None) -> Path:
             name += f"value{value}"
         if prune_gnn:
             name += f"gnn"
+        if k_hop != -1:
+            name += f"k{k_hop}"
+        if threshold_scale != 1.0:
+            name += f"thresholdscale{threshold_scale}"
         if name == "":
             name += ""
         return name
 
-def _flatten_wandb_config(config: dict) -> dict:
-    """Flatten wandb-style config where each value may be {'value': ...}."""
-    out = {}
-    for key, value in config.items():
-        if isinstance(value, dict) and "value" in value:
-            out[key] = value["value"]
-        else:
-            out[key] = value
-    return out
+def _flatten_wandb_config(config):
+    """Recursively flatten wandb-style config where dicts may be {'value': ...}."""
+    if isinstance(config, dict):
+        if set(config.keys()) == {"value"}:
+            return _flatten_wandb_config(config["value"])
+        return {k: _flatten_wandb_config(v) for k, v in config.items()}
+    elif isinstance(config, list):
+        return [_flatten_wandb_config(v) for v in config]
+    return config
 
-def get_gnn_paths(run_folder: Optional[Path] = None, checkpoint_path: Optional[Path] = None, config_path: Optional[Path] = None, run_id: Optional[str] = None):
-    assert sum([run_folder is not None, checkpoint_path is not None, config_path is not None]) == 1, "Exactly one of run_folder, checkpoint_path, and config_path must be provided"
+def get_gnn_paths(
+    run_folder: Optional[Path] = None,
+    checkpoint_path: Optional[Path] = None,
+    config_path: Optional[Path] = None,
+    run_id: Optional[str] = None,
+    model_name_suffix: str = "",
+):
     if run_folder is not None:
         run_folder = Path(run_folder)
         config_file = run_folder / "files" / "config.yaml"
@@ -149,9 +161,14 @@ def get_gnn_paths(run_folder: Optional[Path] = None, checkpoint_path: Optional[P
             raise FileNotFoundError(f"Config not found: {config_file}")
         if not model_load_folder.exists():
             raise FileNotFoundError(f"Model folder not found: {model_load_folder}")
+        all_model_files = [f for f in os.listdir(model_load_folder) if f.endswith(".pth")]
+        if model_name_suffix:
+            model_load_files = [f for f in all_model_files if f"_{model_name_suffix}.pth" in f]
+        else:
+            model_load_files = [f for f in all_model_files if "_threshold.pth" not in f]
         model_load_files = sorted(
-            [f for f in os.listdir(model_load_folder) if f.endswith(".pth")],
-            key=lambda x: int(x.split("_")[-1].split(".")[0]),
+            model_load_files,
+            key=lambda x: int(x.split("_")[1].split(".")[0]),
         )
         if not model_load_files:
             raise FileNotFoundError(f"No .pth files in {model_load_folder}")
@@ -173,6 +190,8 @@ def get_gnn_paths(run_folder: Optional[Path] = None, checkpoint_path: Optional[P
         train_config = yaml.load(f, Loader=yaml.FullLoader)
     train_config = _flatten_wandb_config(train_config)
     model_config = dict(train_config.get("model", {}))
+    if not model_config:
+        model_config = dict(train_config.get("evaluator", {}).get("model", {}))
     model_type = model_config.get("type", "gat")
     gnn_folder_name = f"{model_type}_{run_id}"
     return checkpoint_path, config_path, run_id, gnn_folder_name
@@ -183,6 +202,7 @@ def load_gnn_model(
     config_path: Optional[Path] = None,
     run_id: Optional[str] = None,
     sample_data: Optional[HeteroData] = None,
+    model_name_suffix: str = "",
     ):
     """
     Load GNN model from either a wandb run folder or explicit checkpoint + config paths.
@@ -197,7 +217,13 @@ def load_gnn_model(
     Returns:
         Tuple of (model, config, device, gnn_folder_name).
     """
-    checkpoint_path, config_path, run_id,gnn_folder_name = get_gnn_paths(run_folder, checkpoint_path, config_path, run_id)
+    checkpoint_path, config_path, run_id,gnn_folder_name = get_gnn_paths(
+        run_folder,
+        checkpoint_path,
+        config_path,
+        run_id,
+        model_name_suffix=model_name_suffix,
+    )
 
     with open(config_path, "r") as f:
         train_config = yaml.load(f, Loader=yaml.FullLoader)
@@ -207,8 +233,13 @@ def load_gnn_model(
         raise ValueError("sample_data (HeteroData) is required to build model metadata and in_channels")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model_config = dict(train_config.get("model", {}))
-    node_in_channels = sample_data["node"].x.shape[1]
+    
+    if 'threshold' in model_name_suffix:
+        node_in_channels = sample_data["node"].x.shape[1] + 1
+        model_config = dict(train_config.get("threshold", {}).get("model", {}))
+    else:
+        node_in_channels = sample_data["node"].x.shape[1]
+        model_config = dict(train_config.get("evaluator", {}).get("model", {}))
     model_config["node_in_channels"] = node_in_channels
     if "in_channels" in model_config:
         model_config["in_channels"] = node_in_channels
@@ -220,9 +251,32 @@ def load_gnn_model(
         sample_data.metadata(),
         aggr=model_config.get("to_hetero_aggr", "sum"),
     ).to(device)
-    if model_config.get("compile", False):
-        model = torch.compile(model, dynamic=model_config.get("compile_dynamic", False))
-    model.load_state_dict(torch.load(checkpoint_path, map_location=device))
+    device_config = train_config.get("device", {})
+    if device_config.get("compile", False):
+        model = torch.compile(model, dynamic=device_config.get("compile_dynamic", False))
+
+    state_dict = torch.load(checkpoint_path, map_location=device)
+
+    def _strip_orig_mod_prefix(sd: dict) -> dict:
+        return {
+            (k[len("_orig_mod."):] if k.startswith("_orig_mod.") else k): v
+            for k, v in sd.items()
+        }
+
+    def _add_orig_mod_prefix(sd: dict) -> dict:
+        return {
+            (k if k.startswith("_orig_mod.") else f"_orig_mod.{k}"): v
+            for k, v in sd.items()
+        }
+
+    # Support checkpoints saved from both compiled and uncompiled modules.
+    try:
+        model.load_state_dict(state_dict)
+    except RuntimeError:
+        try:
+            model.load_state_dict(_strip_orig_mod_prefix(state_dict))
+        except RuntimeError:
+            model.load_state_dict(_add_orig_mod_prefix(state_dict))
     model.eval()
 
     return model, train_config, device, gnn_folder_name
@@ -629,7 +683,6 @@ def create_gnn_map(
     if verbose:
         print(f"GNN evaluation complete: {total_perms} permutations saved under */{gnn_folder_name}/")
 
-
 def process_single_case_gnn_task(
         task: Tuple[Path, str],
         config: Dict,
@@ -687,9 +740,12 @@ def process_gnn_task_batch(
 
     # TODO: NEED TO REVIST THIS
     prune_gnn = prune_mechanism.get('prune_gnn', False)
-    gnn_threshold_value = None
+    threshold_values = None
     if prune_gnn:
-        gnn_threshold_value = out["threshold"].cpu().numpy()
+        x_dict = get_threshold_x_dict(data.x_dict,out)  
+        with torch.no_grad():
+            out = prune_gnn(x_dict, data.edge_index_dict,data.edge_attr_dict,data.batch_dict)
+        threshold_values = out.cpu().numpy()
 
     unbatched_indices = []
     unbatched_max_ind = 0
@@ -710,14 +766,18 @@ def process_gnn_task_batch(
         if prune_mechanism is not None:
             # Get the prune function & value -> save as npy file
             prune_name = get_prune_mechanism_folder(prune_mechanism)
+            if prune_name == "":
+                return
             prune_fn = get_prune_function(prune_mechanism)
             k_hop = prune_mechanism.get('k_hop', -1)
-            prune_value = prune_fn(unbatched_pred)
+            threshold_value = threshold_values[ii] if threshold_values is not None else 0
+
+            prune_value = prune_fn(unbatched_pred, threshold_value)
             prediction_file = get_prediction_file_path(gnn_sampler_path, prune_name)
             np.save(prediction_file, prune_value)
 
             map_pruned, kept_indices = prune_map(map_, prune_value, k_hop)
-            graph_file = get_graph_file_path(graph_file.parent, f"graph_sampler_{prune_name}_k{k_hop}.pkl")
+            graph_file = get_graph_file_path(gnn_sampler_path, f"graph_sampler_{prune_name}_k{k_hop}.pkl")
             map_pruned.save_graph_sampler(graph_file)
 
 def create_gnn_map_tasks(
@@ -728,7 +788,6 @@ def create_gnn_map_tasks(
         config_path: Optional[Path] = None,
         run_id: Optional[str] = None,
         prune_mechanism: dict = None,
-        k_hop: int = 0,
         batch_size: int = 1,
         verbose: bool = True,
     ) -> None:
@@ -771,7 +830,6 @@ def create_gnn_map_tasks(
     if verbose:
         print(f"GNN folder name: {gnn_folder_name}, processing {len(tasks)} tasks...")
 
-    total_tasks = 0
     bounds = map_config.get("bounds", [[0, 32.0], [0, 32.0]])
     resolution = map_config.get("resolution", 1.0)
     map_ = GraphSampler(bounds=bounds, resolution=resolution, start=[], goal=[])
@@ -785,6 +843,19 @@ def create_gnn_map_tasks(
         run_id=run_id,
         sample_data=sample_data,
     )
+    threshold_model = None
+    if train_config['threshold']['use']:
+        threshold_model, _, _, _ = load_gnn_model(
+            run_folder=run_folder,
+            checkpoint_path=checkpoint_path,
+            config_path=config_path,
+            run_id=run_id,
+            sample_data=sample_data,
+            model_name_suffix="threshold",
+        )
+        prune_gnn = prune_mechanism.get('prune_gnn', False)
+        if prune_gnn:
+            prune_mechanism['prune_gnn'] = threshold_model
     merged_config = {**map_config, **train_config}
 
     data_list = []
@@ -802,4 +873,4 @@ def create_gnn_map_tasks(
             graph_file_list = []
 
     if verbose:
-        print(f"GNN evaluation complete: {total_tasks} tasks saved under */{gnn_folder_name}/")
+        print(f"GNN evaluation complete: {len(tasks)} tasks saved under */{gnn_folder_name}/")

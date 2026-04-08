@@ -114,6 +114,12 @@ class GraphSampler(Grid):
             u_indices = [self.start_nodes_index[node] for node in self.get_start_nodes()]
             self.start_to_all_edges_dict = {u_index : [(v_index,self.edge_weights[self.edge_indices_dict[(u_index,v_index)]]) for v_index in self.road_map[u_index]] for u_index in u_indices}
             return self.start_to_all_edges_dict
+        # Pruned or degenerate roadmap: every node may be isolated, so ``calculate_edges``
+        # produced no edge tuples, but ``road_map`` is still valid (empty neighbor lists).
+        if len(self.nodes) > 0 and getattr(self, "road_map", None) is not None:
+            u_indices = [self.start_nodes_index[node] for node in self.get_start_nodes()]
+            self.start_to_all_edges_dict = {u_index: [] for u_index in u_indices}
+            return self.start_to_all_edges_dict
         raise ValueError("Edges have not been generated yet. Please generate the roadmap first.")
 
     def get_goal_nodes_with_all_edges(self):
@@ -122,6 +128,10 @@ class GraphSampler(Grid):
         if len(self.edges) > 0:
             u_indices = [self.goal_nodes_index[node] for node in self.get_goal_nodes()]
             self.goal_to_all_edges_dict = {u_index : [(v_index,self.edge_weights[self.edge_indices_dict[(u_index,v_index)]]) for v_index in self.road_map[u_index]] for u_index in u_indices}
+            return self.goal_to_all_edges_dict
+        if len(self.nodes) > 0 and getattr(self, "road_map", None) is not None:
+            u_indices = [self.goal_nodes_index[node] for node in self.get_goal_nodes()]
+            self.goal_to_all_edges_dict = {u_index: [] for u_index in u_indices}
             return self.goal_to_all_edges_dict
         raise ValueError("Edges have not been generated yet. Please generate the roadmap first.")
 

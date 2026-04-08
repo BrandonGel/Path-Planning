@@ -124,13 +124,6 @@ def get_density_map_visualization_file(base_path: Path, solution_name_suffix: st
     density_map_visualization_file = base_path / f"{solution_name_suffix}_velocity{agent_velocity}_density_map.png"
     return density_map_visualization_file
 
-def get_prediction_file_path(base_path: Path, prune_name: str = None):
-    if prune_name is None or prune_name == '' or 'predictions' in prune_name:
-        prediction_file = base_path / f"predictions.npy"
-    else:
-        prediction_file = base_path / f"predictions_{prune_name}.npy"
-    return prediction_file
-
 def get_solution_name_suffix(graph_file: Path = None):
     if graph_file is None:
         solution_name_suffix = "solution_graph_map"

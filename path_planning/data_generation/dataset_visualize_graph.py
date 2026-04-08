@@ -164,9 +164,13 @@ def collect_graph_tasks(
             for graph_dir in graph_dirs:
                 if gnn_folder_name is not None:
                     gnn_sampler_path = generate_gnn_sampler_path(graph_dir, gnn_folder_name)
-                    target_file = get_prediction_file_path(gnn_sampler_path, target_space_type)
+                    if target_space_type == 'predictions':
+                        target_file = get_prediction_file_path(gnn_sampler_path)
+                        graph_file = get_graph_file_path(graph_dir, graph_file_name)
+                    else:
+                        target_file = get_prediction_file_path(gnn_sampler_path, target_space_type)
+                        graph_file = get_graph_file_path(gnn_sampler_path, graph_file_name)
                     save_path = gnn_sampler_path
-                    graph_file = get_graph_file_path(graph_dir, graph_file_name)
                 else:
                     graph_file = get_graph_file_path(graph_dir, graph_file_name)
                     target_file = get_target_file_path(graph_dir, target_space_type)

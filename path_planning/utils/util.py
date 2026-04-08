@@ -430,6 +430,16 @@ def set_map_config(map_config: dict = None,args: argparse.Namespace = None):
 
     return map_config
 
+
+def get_model_epoch_file(base_path: Path, epoch: int = 0, model_name_suffix: str = ""):
+    if model_name_suffix != "":
+        model_file = base_path / f"epoch_{epoch}_{model_name_suffix}.pth"
+    else:   
+        model_file = base_path / f"epoch_{epoch}.pth"
+    if not model_file.exists():
+        return False
+    return model_file
+
 def set_train_config(train_config: dict = None,args: argparse.Namespace = None):
     """
     Set the train config.
@@ -491,10 +501,10 @@ def set_train_config(train_config: dict = None,args: argparse.Namespace = None):
     assert batch_size > 0 and test_size > 0, "Batch size and test size must be greater than 0 "
 
     # Set the compile and compile dynamic
-    compile = args.compile  or train_config['model'].get('compile',False)
-    compile_dynamic = args.compile_dynamic or train_config['model'].get('compile_dynamic',True)
-    train_config['model']['compile'] = compile
-    train_config['model']['compile_dynamic'] = compile_dynamic
+    compile = args.compile  or train_config['device'].get('compile',False)
+    compile_dynamic = args.compile_dynamic or train_config['device'].get('compile_dynamic',True)
+    train_config['device']['compile'] = compile
+    train_config['device']['compile_dynamic'] = compile_dynamic
 
     # Check & set the resume epoch and load folder
     if 'resume_epoch' not in train_config['train']:
@@ -503,11 +513,14 @@ def set_train_config(train_config: dict = None,args: argparse.Namespace = None):
     if 'load_folder' not in train_config['train']:
         train_config['train']['load_folder'] = None
     resume_epoch = train_config['train']['resume_epoch']
-    model_load_folder = train_config['train']['load_folder']
+    model_load_folder = Path(train_config['train']['load_folder'])
     if resume_epoch > 0:
         assert model_load_folder is not None, "Load folder must be provided if resume epoch is greater than 0"
         assert os.path.exists(model_load_folder), "Load folder must exist"
-        model_load_file = f"epoch_{resume_epoch}.pth"        
-        model_load_path = os.path.join(model_load_folder, model_load_file)
-        assert os.path.exists(model_load_path), "Model file must exist"
+        model_file = get_model_epoch_file(model_load_folder, resume_epoch)
+        assert model_file, "Model file must exist"
+
+        if train_config['threshold']['use']:
+            model_threshold_file = get_model_epoch_file(model_load_folder, resume_epoch)
+            assert model_threshold_file, "Model threshold file must exist"
     return train_config

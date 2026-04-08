@@ -171,6 +171,7 @@ def generate_target_space(target_space_type:str, map:GraphSampler,density_map:np
                     extra_keywords={'weights': kernel.flatten(),'ignore_value':-1})
         discrete_pos = [map.world_to_map(node.current, discrete=True) for node in map.nodes]            
         y = np.array([new_density_map[s] for s in discrete_pos]) 
+        y = np.clip(y,0,1)
     elif target_space_type in TARGET_SPACE_TYPE_TO_NAME:
         discrete_pos = [map.world_to_map(node.current,discrete=True) for node in map.nodes]
         y = np.clip([density_map[s] for s in discrete_pos],0,1)
