@@ -59,15 +59,16 @@ def threshold_graph_to_nodes(
     return threshold[idx]
 
 def normalize_threshold(threshold: torch.Tensor,batch_dict: Dict[str, torch.Tensor], logits:torch.Tensor, node_type: str = 'node'):
-    return threshold
-    # idx = batch_dict[node_type]
-    # logits_means = torch.stack([logits[node_type][idx==ii].mean(dim=0) for ii in torch.unique(idx)])
-    # new_threshold = threshold - logits_means
-    # return new_threshold
+    idx = batch_dict[node_type]
+    logits_means = torch.stack([logits[node_type][idx==ii].mean(dim=0) for ii in torch.unique(idx)])
+    new_threshold = threshold - logits_means
+    return new_threshold
     
 
 def train(train_loader,model,optimizer,loss_function:LossFunction,threshold_model=None,num_prune=0,device='cuda:0',run: wandb.Run =None):
     model.train()
+    # if threshold_model is not None:
+    #     threshold_model.eval()
     train_loss = []
     train_time = []
     for batch in train_loader:
@@ -78,15 +79,6 @@ def train(train_loader,model,optimizer,loss_function:LossFunction,threshold_mode
             out = model(device_batch.x_dict, device_batch.edge_index_dict,device_batch.edge_attr_dict,device_batch.batch_dict)
             
             additional_args = {}
-            if threshold_model is not None:
-                x_dict = get_threshold_x_dict(device_batch.x_dict,out)
-                with torch.no_grad():
-                    threshold = threshold_model(x_dict, device_batch.edge_index_dict,device_batch.edge_attr_dict,device_batch.batch_dict)
-                    threshold = normalize_threshold(threshold, device_batch.batch_dict, out, 'node')
-                additional_args['threshold'] = threshold_graph_to_nodes(
-                    threshold, device_batch.batch_dict
-                )
-
             loss = loss_function(out['node'],
                                 device_batch['node'].y.reshape(-1,1),
                                 device_batch.edge_index_dict,
@@ -109,6 +101,8 @@ def train(train_loader,model,optimizer,loss_function:LossFunction,threshold_mode
 
 def test(test_loader,model,loss_function:LossFunction,threshold_model=None,num_prune=0,device='cuda:0',run: wandb.Run =None):
     model.eval()
+    # if threshold_model is not None:
+    #     threshold_model.eval()
     test_loss = []
     test_time = []
     with torch.no_grad():
@@ -119,15 +113,6 @@ def test(test_loader,model,loss_function:LossFunction,threshold_model=None,num_p
                 out = model(device_batch.x_dict, device_batch.edge_index_dict,device_batch.edge_attr_dict,device_batch.batch_dict)
 
                 additional_args = {}
-                if threshold_model is not None:
-                    x_dict = get_threshold_x_dict(device_batch.x_dict,out)
-                    with torch.no_grad():
-                        threshold = threshold_model(x_dict, device_batch.edge_index_dict,device_batch.edge_attr_dict,device_batch.batch_dict)
-                        threshold = normalize_threshold(threshold, device_batch.batch_dict, out, 'node')
-                    additional_args['threshold'] = threshold_graph_to_nodes(
-                        threshold, device_batch.batch_dict
-                    )
-
                 loss = loss_function(out['node'],
                                 device_batch['node'].y.reshape(-1,1),
                                 device_batch.edge_index_dict,
@@ -147,7 +132,8 @@ def test(test_loader,model,loss_function:LossFunction,threshold_model=None,num_p
 
 def train_threshold(train_loader,threshold_model,threshold_optimizer,loss_function:LossFunction,model,num_prune=0,
                     device='cuda:0',run: wandb.Run =None):
-    model.train()
+    model.eval()
+    threshold_model.train()
     train_loss = []
     train_time = []
     for batch in train_loader:
@@ -193,6 +179,7 @@ def train_threshold(train_loader,threshold_model,threshold_optimizer,loss_functi
 
 def test_threshold(test_loader,threshold_model,loss_function:LossFunction,model,num_prune=0,device='cuda:0',run: wandb.Run =None):
     model.eval()
+    threshold_model.eval()
     test_loss = []
     test_time = []
     with torch.no_grad():
