@@ -181,7 +181,7 @@ class RRG(BasePathPlanner):
         # Sample goal directly with specified probability
         if random.random() < self.goal_sample_rate:
             goal_ind = random.choice(range(len(self.goal)))
-            return Node(self.goal[goal_ind], None, 0, 0)
+            return Node(tuple(self.goal[goal_ind]), None, 0, 0)
 
         point = []
         # Generate random integer point within grid bounds
@@ -193,7 +193,7 @@ class RRG(BasePathPlanner):
         if self.discrete:
             point = self.map_.point_float_to_int(point)
 
-        return Node(point, None, 0, 0)
+        return Node(tuple(point), None, 0, 0)
 
     def _get_nearest_node(
         self,
@@ -317,7 +317,7 @@ class RRG(BasePathPlanner):
         if self.discrete:
             new_point = self.map_.point_float_to_int(new_point)
 
-        return Node(new_point, None, 0, 0)
+        return Node(tuple(new_point), None, 0, 0)
 
     def _faiss_add_node(self, node: Node, index, nodes):
         """
