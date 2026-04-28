@@ -96,9 +96,9 @@ def process_single_case_trajectories(args: Tuple) -> Tuple[bool, Path]:
         
         if visualize_density_map:
             visualizer = Visualizer2D()
-            masked_map = ~map_.get_obstacle_map()
-            visualizer.plot_grid_map(map_, masked_map=masked_map)
-            visualizer.plot_density_map(density_map/len(permutations))
+            visualizer.plot_grid_map(map_)
+            obstacle_mask = (map_.get_obstacle_map()).astype(np.uint8)
+            visualizer.plot_density_map(density_map, masked_map=obstacle_mask, use_fig_colorbar=False)
             density_map_visualization_file = get_density_map_visualization_file(gt_dir, solution_name_suffix, agent_velocity)
             visualizer.savefig(density_map_visualization_file)
             visualizer.close()

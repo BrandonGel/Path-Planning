@@ -126,6 +126,7 @@ def collect_graph_tasks(
         num_cases: int = 3,
         case_range: List[int] = [0, 16],
         specific_cases: List[int] = [0, 5, 10],
+        num_graphs: int = None,
         agent_velocity: float = 0.0,
         gnn_folder_name: str = None,
         show: bool = False,
@@ -178,6 +179,8 @@ def collect_graph_tasks(
         for road_map_type in road_map_types:
             sample_road_map_path = generate_roadmap_path(sample_base_path, road_map_type)
             graph_dirs = get_graph_dirs(sample_road_map_path)
+            if num_graphs is not None:
+                graph_dirs = graph_dirs[:num_graphs]
             for graph_dir in graph_dirs:
                 if gnn_folder_name is not None:
                     gnn_sampler_path = generate_gnn_sampler_path(graph_dir, gnn_folder_name)

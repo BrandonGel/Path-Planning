@@ -225,12 +225,12 @@ def shuffle_agents_goals(inpt: Dict, agent_goal_index: List[int]) -> Dict:
         agents[i]["goal"] = start_goals[agent_goal_index[i + len(agents)]]
     return agents
 
-def create_map(param: Dict, generate_new_graph: bool = False,graph_file: Path =None,verbose: bool = True):
+def create_map(param: Dict, generate_new_graph: bool = False,graph_file: Path =None,verbose: bool = True,args: dict = {}):
     bounds = param["map"]["bounds"]
     resolution = param["map"]["resolution"]
     if graph_file and graph_file.exists() and not generate_new_graph:
         map_ = GraphSampler(bounds=bounds, resolution=resolution, start=[], goal=[])
-        map_.load_graph_sampler(graph_file)
+        map_.load_graph_sampler(graph_file,args)
     else:
         obstacles = np.array(param["map"]["obstacles"])
         agents = param["agents"]
@@ -289,10 +289,15 @@ def generate_permutation(inpt: Dict, config: Dict, case_path: Path, generate_new
     # do not create duplicates across runs.
     perm_base = generate_perm_base_path(case_path)
     existing_count = 0
+    existing_perm_ids = []
     if perm_base.exists():
         for p in perm_base.iterdir():
             if p.is_dir() and (p / "input.yaml").exists():
                 existing_count += 1
+                try:
+                    existing_perm_ids.append(int(p.name.split("_")[-1]))
+                except Exception:
+                    pass
                 if not generate_new_graph:
                     try:
                         with open(p / "input.yaml", "r") as f:
@@ -307,20 +312,40 @@ def generate_permutation(inpt: Dict, config: Dict, case_path: Path, generate_new
                             # If the stored value is not iterable/int-castable, just skip it.
                             pass
 
+    # Solver scans up to nb_permutations_tries when solve_till_success=True, so
+    # permutation generation must materialize the same ID range.
+    target_permutations = nb_permutations_tries if solve_till_success else nb_permutations
+
+    # For a regenerated graph, treat previous permutations as stale and rebuild
+    # from perm_0 (do not use old existing_count to limit generation).
+    if generate_new_graph:
+        existing_count = 0
+        existing_perm_ids = []
+        unique_permutations = set()
+
     # If we already have enough permutations and the graph is unchanged, do nothing.
-    if existing_count >= nb_permutations and not generate_new_graph:
+    if existing_count >= target_permutations and not generate_new_graph:
         return
 
     # Determine how many additional permutations we still need (if any).
-    remaining = max(0, nb_permutations - existing_count)
+    remaining = max(0, target_permutations - existing_count)
     if remaining == 0 and not generate_new_graph:
         return
 
     # For a new graph, we start from scratch; otherwise we only add missing perms.
     start_perm_id = 0 if generate_new_graph else existing_count
 
+    # When solve_till_success=True we use nb_permutations_tries as the attempt
+    # budget but still stop once we have written `remaining` new files.
     num_tries = nb_permutations_tries if solve_till_success else remaining
+
+    # Track how many new files have been written in this call (independent of
+    # how many entries were pre-loaded into unique_permutations from disk).
+    new_perm_count = 0
+    generated_perm_ids = []
     for ii in range(num_tries):
+        if new_perm_count >= remaining:
+            break
         max_unique_attempts = 1000
         unique_attempts = 0
         while tuple(start_goal_index) in unique_permutations:
@@ -334,6 +359,7 @@ def generate_permutation(inpt: Dict, config: Dict, case_path: Path, generate_new
             break
 
         unique_permutations.add(tuple(start_goal_index))
+        new_perm_count += 1
         agents_shuffled = shuffle_agents_goals(inpt, start_goal_index)
         inpt_copy = copy.deepcopy(inpt)
         inpt_copy["agents"] = agents_shuffled
@@ -343,7 +369,10 @@ def generate_permutation(inpt: Dict, config: Dict, case_path: Path, generate_new
         except AttributeError:
             inpt_copy["start_goal_index"] = list(start_goal_index)
 
-        perm_id = start_perm_id + len(unique_permutations) - 1
+        # Use new_perm_count (not len(unique_permutations)) so pre-loaded existing
+        # entries do not offset the id. perm_ids are contiguous from start_perm_id.
+        perm_id = start_perm_id + new_perm_count - 1
+        generated_perm_ids.append(int(perm_id))
         _,perm_file = generate_input_perm_yaml_path(case_path, perm_id)
         with open(perm_file, "w") as f:
             yaml.safe_dump(_to_native_yaml(inpt_copy), f)

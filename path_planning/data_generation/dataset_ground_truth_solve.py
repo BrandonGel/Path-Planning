@@ -83,6 +83,7 @@ def process_single_case(args: Tuple) -> Tuple[float, float, int]:
     case_path,map_path = generate_base_case_path(path, case_id, road_map_type)   
     solve_till_success = config.get("solve_till_success", False)
     generate_new_graph = config.get("generate_new_graph", False)
+    resolve_solution = config.get("resolve_solution", False)
 
     input_file = get_input_file_path(case_path)
     assert input_file.exists(), f"Input file {input_file} does not exist"
@@ -92,7 +93,6 @@ def process_single_case(args: Tuple) -> Tuple[float, float, int]:
     # Read through permutations already generated
     nb_permutations = config["nb_permutations"]
     nb_permutations_tries = config['nb_permutations_tries']
-    solve_till_success = config.get("solve_till_success", False)
     num_tries = nb_permutations_tries if solve_till_success else nb_permutations
 
     # Track unique permutations (as tuples of agent indices)
@@ -106,13 +106,16 @@ def process_single_case(args: Tuple) -> Tuple[float, float, int]:
     graph_file = get_graph_file_path(map_path,graph_file_name)
 
     perm_ids_unfinished = []
+    existing_perm_ids = []
     num_attempts = 0
     for perm_id in range(num_tries):
         perm_path,_ = generate_input_perm_yaml_path(case_path, perm_id)
+        if (perm_path / "input.yaml").exists():
+            existing_perm_ids.append(int(perm_id))
         mapf_path = generate_mapf_path(perm_path, mapf_solver_name)
         roadmap_path = generate_roadmap_path(mapf_path, road_map_type)
         solution_file = get_solution_file_path(roadmap_path, solution_name_suffix, agent_velocity)
-        if not solution_file.exists() or generate_new_graph:
+        if not solution_file.exists() or generate_new_graph or resolve_solution:
             perm_ids_unfinished.append(perm_id)
         else:
             with open(solution_file, "r") as f:
@@ -123,7 +126,7 @@ def process_single_case(args: Tuple) -> Tuple[float, float, int]:
             num_attempts = perm_id + 1
             break
 
-    map_ = create_map(inpt, graph_file = graph_file,verbose=verbose)
+    map_ = create_map(inpt, graph_file = graph_file,verbose=verbose,args={"use_constraint_sweep": True})
 
     mapf_solver_config = {
         "mapf_solver_name": config.get("mapf_solver_name", "cbs"),
@@ -167,7 +170,7 @@ def process_single_case(args: Tuple) -> Tuple[float, float, int]:
     
     return num_success, num_attempts, case_id
 
-def create_solutions(path: Path, num_cases: int, config: Dict,  num_workers: int = cpu_count(),graph_file_name: Path = None, verbose: bool = True):
+def create_solutions(path: Path, num_cases: int, config: Dict,  num_workers: int = cpu_count(),graph_files: list = None, verbose: bool = True):
     """
     Create multiple MAPF instances and their solutions with parallel processing.
 
@@ -184,7 +187,8 @@ def create_solutions(path: Path, num_cases: int, config: Dict,  num_workers: int
     # Prepare case tasks
     case_tasks = []
     for i in range(0, num_cases):
-        task = (i, path, config,  graph_file_name,verbose)
+        graph_file= graph_files[i] if graph_files is not None else None
+        task = (i, path, config,  graph_file,verbose)
         case_tasks.append(task)
 
     # Process cases in parallel

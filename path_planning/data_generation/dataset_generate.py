@@ -218,8 +218,6 @@ def transform_graph_map_to_gnn(map_: GraphSampler):
             start_goal_edges_list.append((u_idx, v_idx))
             start_goal_weights_list.append(edge_weight)
 
-    
-    
     # Convert to numpy arrays and save as compressed npz (much smaller than pickle)
     node_to_node_edges_arr = edges.astype(np.int32)
     node_to_node_weights_arr = edata.astype(np.float32)
@@ -243,6 +241,7 @@ def process_single_case_graphs(args: Tuple[Path, dict]) -> Tuple[bool, Path]:
 
 
     use_discrete_space = config["use_discrete_space"] if "use_discrete_space" in config else False
+    generate_grid_nodes = config["generate_grid_nodes"] if "generate_grid_nodes" in config else False
     num_samples = config["num_samples"] if "num_samples" in config else 1000
     num_neighbors = config["num_neighbors"] if "num_neighbors" in config else 4.0
     min_edge_len = config["min_edge_len"] if "min_edge_len" in config else 0.0
@@ -293,7 +292,7 @@ def process_single_case_graphs(args: Tuple[Path, dict]) -> Tuple[bool, Path]:
             map_.set_inflation_radius(radius=agent_radius+np.sqrt(2)/2*resolution)
             # Starts and Goals are assumed to be in grid space
             map_.set_parameters(
-                sample_num=0 if use_discrete_space else num_samples,
+                sample_num=num_samples,
                 num_neighbors=num_neighbors,
                 min_edge_len=min_edge_len,
                 max_edge_len=max_edge_len,
@@ -316,8 +315,8 @@ def process_single_case_graphs(args: Tuple[Path, dict]) -> Tuple[bool, Path]:
                 prob_map = get_prob_map(target_space, map_, density_map,config=config)
             else:
                 prob_map = None
-            samp_from_prob_map_ratio = config["samp_from_prob_map_ratio"] if "samp_from_prob_map_ratio" in config else 0.5
-            map_.generateRandomNodes(generate_grid_nodes=use_discrete_space,prob_map=prob_map,samp_from_prob_map_ratio=samp_from_prob_map_ratio)
+            samp_from_prob_map_ratio = config["samp_from_prob_map_ratio"] if "samp_from_prob_map_ratio" in config else 0
+            map_.generateRandomNodes(generate_grid_nodes=generate_grid_nodes,prob_map=prob_map,samp_from_prob_map_ratio=samp_from_prob_map_ratio)
             map_.generate_map(road_map_type,map_.nodes)
 
             ndata,node_to_node_edges_arr, node_to_node_weights_arr, start_goal_edges_arr, start_goal_weights_arr = transform_graph_map_to_gnn(map_)
