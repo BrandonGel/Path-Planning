@@ -22,6 +22,18 @@ torch.serialization.add_safe_globals([torch_geometric.data.storage.BaseStorage])
 torch.serialization.add_safe_globals([torch_geometric.data.storage.NodeStorage])
 torch.serialization.add_safe_globals([torch_geometric.data.storage.EdgeStorage])
 
+
+def _min_max_normalize_columns(x: np.ndarray) -> np.ndarray:
+    """Scale each column to [0, 1] via (x - min) / (max - min). Constant columns -> 0 (no NaNs)."""
+    orig_dtype = np.asarray(x).dtype
+    x = np.asarray(x, dtype=np.float64)
+    mn = x.min(axis=0, keepdims=True)
+    mx = x.max(axis=0, keepdims=True)
+    rng = mx - mn
+    out = np.divide(x - mn, rng, out=np.zeros_like(x), where=rng > 0)
+    return out.astype(orig_dtype, copy=False)
+
+
 class HeteroData(HeteroDataBase):
     def __init__(self,):
         super().__init__()
@@ -64,10 +76,10 @@ def _load_single_graph(files: Tuple[Path, Path]) -> HeteroData:
     node_ndata[:,:dims] = node_ndata[:,:dims] / bounds
     node_to_node_edges = data_dict['edge_index'].T
     node_to_node_edata = data_dict['edge_attr'].reshape(len(data_dict['edge_attr']),-1)
-    node_to_node_edata = (node_to_node_edata-node_to_node_edata.min(axis=0,keepdims=True))/node_to_node_edata.max(axis=0,keepdims=True)
+    node_to_node_edata = _min_max_normalize_columns(node_to_node_edata)
     node_approx_node_edges = data_dict['approx_edge_index'].T
     node_aprox_node_edata = data_dict['approx_edge_attr'].reshape(len(data_dict['approx_edge_attr']),-1)
-    node_aprox_node_edata = (node_aprox_node_edata-node_aprox_node_edata.min(axis=0,keepdims=True))/node_aprox_node_edata.max(axis=0,keepdims=True)
+    node_aprox_node_edata = _min_max_normalize_columns(node_aprox_node_edata)
     binary_id = str(data_dict['binary_id'])
     # Load target
     y: np.ndarray = np.load(target_file)
