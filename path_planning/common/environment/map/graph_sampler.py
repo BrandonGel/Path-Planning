@@ -1,4 +1,5 @@
 from typing import Any, List, Tuple
+import heapq
 import numpy as np
 from scipy.spatial import KDTree, Delaunay
 from path_planning.common.environment.node import Node
@@ -17,9 +18,8 @@ def validate_roadmap_type(roadmap_type: str):
     if roadmap_type not in ROADMAP_TYPES:
         return False
     return True
-
 class GraphSampler(Grid):
-    def __init__(self,*args,start,goal,sample_num=0,num_neighbors = 13.0, min_edge_len = 1e-10, max_edge_len = 30.0,goal_sample_rate=0.1,use_discrete_space=True,use_constraint_sweep=True,record_sweep=True,use_exact_collision_check=True,**kwargs):
+    def __init__(self,*args,start,goal,sample_num=0,num_neighbors = 13.0, min_edge_len = 1e-10, max_edge_len = 30.0,goal_sample_rate=0.1,use_discrete_space=True,use_constraint_sweep=True,record_sweep=True,use_exact_collision_check=True,use_dijkstra=True,**kwargs):
         super().__init__(*args, **kwargs)
 
         # Check if start and goal are lists, non-empty, and not None
@@ -59,6 +59,7 @@ class GraphSampler(Grid):
         self.use_exact_collision_check = use_exact_collision_check
         self.constraint_sweep = CGAL_Sweep(record_sweep=record_sweep,use_exact_collision_check=use_exact_collision_check)
         self.sample_kd_tree = None
+        self.use_dijkstra = use_dijkstra
 
     def __str__(self) -> str:
         return "Graph Sampler"
@@ -112,33 +113,58 @@ class GraphSampler(Grid):
     def get_node_index(self, node: Node) -> int:
         return self.node_index_dict[node]
 
+    def _dijkstra(self, source: int) -> List[Tuple[int, float]]:
+        n = len(self.nodes)
+        INF = float("inf")
+        dist = [INF] * n
+        dist[source] = 0.0
+        heap = [(0.0, source)]
+        while heap:
+            d, u = heapq.heappop(heap)
+            if d > dist[u]:
+                continue
+            for v in self.road_map[u]:
+                key = (u, v)
+                if key not in self.edge_indices_dict:
+                    continue
+                w = self.edge_weights[self.edge_indices_dict[key]]
+                nd = d + w
+                if nd < dist[v]:
+                    dist[v] = nd
+                    heapq.heappush(heap, (nd, v))
+        return [(v, dist[v]) for v in range(n) if dist[v] < float("inf")]
+
     def get_start_nodes_with_all_edges(self):
         if len(self.start_to_all_edges_dict) > 0:
             return self.start_to_all_edges_dict
-        if len(self.edges) > 0:
-            u_indices = [self.start_nodes_index[node] for node in self.get_start_nodes()]
-            self.start_to_all_edges_dict = {u_index : [(v_index,self.edge_weights[self.edge_indices_dict[(u_index,v_index)]]) for v_index in self.road_map[u_index]] for u_index in u_indices}
-            return self.start_to_all_edges_dict
-        # Pruned or degenerate roadmap: every node may be isolated, so ``calculate_edges``
-        # produced no edge tuples, but ``road_map`` is still valid (empty neighbor lists).
-        if len(self.nodes) > 0 and getattr(self, "road_map", None) is not None:
-            u_indices = [self.start_nodes_index[node] for node in self.get_start_nodes()]
-            self.start_to_all_edges_dict = {u_index: [] for u_index in u_indices}
-            return self.start_to_all_edges_dict
-        raise ValueError("Edges have not been generated yet. Please generate the roadmap first.")
+        if (
+            len(self.nodes) == 0
+            or self.road_map is None
+            or len(self.road_map) != len(self.nodes)
+        ):
+            raise ValueError("Edges have not been generated yet. Please generate the roadmap first.")
+        u_indices = [self.start_nodes_index[node] for node in self.get_start_nodes()]
+        if self.use_dijkstra:
+            self.start_to_all_edges_dict = {u: self._dijkstra(u) for u in u_indices}
+        else:
+            self.start_to_all_edges_dict = {u: [(v,self.get_cost(self.nodes[u],self.nodes[v])) for v in range(len(self.nodes))] for u in u_indices}
+        return self.start_to_all_edges_dict
 
     def get_goal_nodes_with_all_edges(self):
         if len(self.goal_to_all_edges_dict) > 0:
             return self.goal_to_all_edges_dict
-        if len(self.edges) > 0:
-            u_indices = [self.goal_nodes_index[node] for node in self.get_goal_nodes()]
-            self.goal_to_all_edges_dict = {u_index : [(v_index,self.edge_weights[self.edge_indices_dict[(u_index,v_index)]]) for v_index in self.road_map[u_index]] for u_index in u_indices}
-            return self.goal_to_all_edges_dict
-        if len(self.nodes) > 0 and getattr(self, "road_map", None) is not None:
-            u_indices = [self.goal_nodes_index[node] for node in self.get_goal_nodes()]
-            self.goal_to_all_edges_dict = {u_index: [] for u_index in u_indices}
-            return self.goal_to_all_edges_dict
-        raise ValueError("Edges have not been generated yet. Please generate the roadmap first.")
+        if (
+            len(self.nodes) == 0
+            or self.road_map is None
+            or len(self.road_map) != len(self.nodes)    
+        ):
+            raise ValueError("Edges have not been generated yet. Please generate the roadmap first.")
+        u_indices = [self.goal_nodes_index[node] for node in self.get_goal_nodes()]
+        if self.use_dijkstra:
+            self.goal_to_all_edges_dict = {u: self._dijkstra(u) for u in u_indices}
+        else:
+            self.goal_to_all_edges_dict = {u: [(v,self.get_cost(self.nodes[u],self.nodes[v])) for v in range(len(self.nodes))] for u in u_indices}
+        return self.goal_to_all_edges_dict
 
     def calculate_edges(self,roadmap: List[List[int]],roadmap_edge_weights: List[List[float]] = None) -> Tuple[List[Tuple[int,int]], dict, List[float]]:
         edges_seen = set()
@@ -398,20 +424,30 @@ class GraphSampler(Grid):
             num_prob_map_samples = int(self.sample_num * samp_from_prob_map_ratio)
             weighted_normalized_points = np.clip(np.random.random((num_prob_map_samples,self.dim))-0.5,-0.5,0.5) + 1e-10
             weighted_points = np.zeros((num_prob_map_samples,self.dim))
+
+            prob_map_flat = prob_map.flatten()
+            prob_map_flat /= np.sum(prob_map_flat)
             if num_prob_map_samples > 0:
-                prob_map_flat = prob_map.flatten()
-                prob_map_flat /= np.sum(prob_map_flat)
                 prob_map_indices = np.random.choice(len(prob_map_flat), size=num_prob_map_samples, p=prob_map_flat)
                 prob_map_points = np.array([np.unravel_index(idx, prob_map.shape) for idx in prob_map_indices])
                 # Convert to world coordinates
                 prob_map_points_world = np.array([self.map_to_world(tuple(point)) for point in prob_map_points])
                 weighted_points = prob_map_points_world + weighted_normalized_points
 
-            num_uniform_samples = self.sample_num - num_prob_map_samples
-            uniform_normalized_points = np.random.random((num_uniform_samples,self.dim))
-            uniform_points = uniform_normalized_points * (bounds[:,1] - bounds[:,0]) + bounds[:,0]
-            points = np.concatenate((weighted_points,uniform_points))
-
+            # num_uniform_samples = self.sample_num - num_prob_map_samples
+            # uniform_normalized_points = np.random.random((num_uniform_samples,self.dim))
+            # uniform_points = uniform_normalized_points * (bounds[:,1] - bounds[:,0]) + bounds[:,0]
+            # points = np.concatenate((weighted_points,uniform_points))
+            unchosen_prob_map_flat = 1 - prob_map_flat
+            unchosen_prob_map_flat /= np.sum(unchosen_prob_map_flat)
+            num_unchosen_samples = self.sample_num - num_prob_map_samples
+            unchosen_normalized_points = np.clip(np.random.random((num_unchosen_samples,self.dim))-0.5,-0.5,0.5) + 1e-10
+            unchosen_prob_map_indices = np.random.choice(len(prob_map_flat), size=num_unchosen_samples, p=unchosen_prob_map_flat)
+            unchosen_prob_map_points = np.array([np.unravel_index(idx, prob_map.shape) for idx in unchosen_prob_map_indices])
+            # Convert to world coordinates
+            unchosen_prob_map_points_world = np.array([self.map_to_world(tuple(point)) for point in unchosen_prob_map_points])
+            unchosen_prob_map_indices_weighted_points = unchosen_prob_map_points_world + unchosen_normalized_points
+            points = np.concatenate((weighted_points,unchosen_prob_map_indices_weighted_points))
             return points,num_prob_map_samples
 
     def generateRandomNodes(self, generate_grid_nodes = False,prob_map = None,samp_from_prob_map_ratio = 0.5):
@@ -637,7 +673,7 @@ class GraphSampler(Grid):
 
         # Add start node to the graph and necessary lists
         for start_node_coord in self.start:
-            start_node = Node(start_node_coord, None, 0, 0)
+            start_node = Node(tuple(start_node_coord), None, 0, 0)
             start_nodes.append(start_node)
             nodes.append(start_node)
             self.node_index_dict[start_node] = len(nodes) - 1
@@ -647,7 +683,7 @@ class GraphSampler(Grid):
 
         # Add goal node to graph if not already present
         for goal_node_coord in self.goal:
-            goal_node = Node(goal_node_coord, None, 0, 0)
+            goal_node = Node(tuple(goal_node_coord), None, 0, 0)
             goal_nodes.append(goal_node)
             if goal_node not in self.node_index_dict:
                 nodes.append(goal_node)
