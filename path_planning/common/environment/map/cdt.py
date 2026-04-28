@@ -428,7 +428,7 @@ def connect_midpoints(triangles:np.ndarray,verts:np.ndarray,bnd_pts:np.ndarray,b
 
 def connect_centroids(triangles: np.ndarray, verts: np.ndarray, bnd_pts:np.ndarray, bnd_segs:np.ndarray, start_goal_indices={}):
     """
-    Compute triangle centroids and connect neighboring triangles' centroids, creating a Voronoi graph.
+    Compute triangle centroids and connect neighboring triangles' centroids
 
     Two triangles are considered neighbors if they share an undirected edge.
 
@@ -495,7 +495,7 @@ def connect_centroids(triangles: np.ndarray, verts: np.ndarray, bnd_pts:np.ndarr
 
 def connect_voronoi(triangles: np.ndarray, verts: np.ndarray, bnd_pts:np.ndarray, bnd_segs:np.ndarray, start_goal_indices={}):
     """
-    Compute triangle centroids and connect neighboring triangles' centroids, creating a Voronoi graph.
+    Compute triangle circumcenters and connect neighboring triangles' circumcenters, creating a Voronoi graph.
 
     Two triangles are considered neighbors if they share an undirected edge.
 
@@ -565,8 +565,7 @@ def get_planar_graph(map_,mask:np.ndarray, use_option:str = 'cdt'):
     start_goal_indices = map_.start_nodes_index | map_.goal_nodes_index
     
     bnd_pts,bnd_segs,holes = get_boundary(map_,mask)
-    # all_points = get_all_points(interior_points,bnd_pts)
-    all_points = np.vstack([bnd_pts, interior_points], dtype=float)
+    all_points = get_all_points(interior_points, bnd_pts)
     cdt = get_constrained_delaunay_triangulation(all_points,bnd_segs,holes)
     if use_option == 'cdt':
         points,neighbors = connect_cdt(cdt)
