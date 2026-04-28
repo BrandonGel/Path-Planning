@@ -89,9 +89,6 @@ def bce_loss(
     batch_dict=None,
     weight=None,
     pos_weight=False,
-    alpha=1,
-    threshold=0,
-    threshold_alpha=1,
 ):
     if pos_weight:
         n_pos = (y_true > 0).sum().to(dtype=y_true.dtype)
@@ -99,14 +96,13 @@ def bce_loss(
         pos_weight_t = n_pos / n_neg.clamp_min(1)
     else:
         pos_weight_t = None
-    y_logits = get_logits(y_logits, threshold_alpha, threshold)
     return F.binary_cross_entropy_with_logits(
         y_logits, y_true, weight=weight, pos_weight=pos_weight_t
     )
 
 
-def mse_loss(y_logits, y_true, batch_dict=None, threshold_alpha=1, threshold=0):
-    y_pred = get_probability(y_logits, threshold_alpha, threshold)
+def mse_loss(y_logits, y_true, batch_dict=None):
+    y_pred = torch.sigmoid(y_logits)
     return F.mse_loss(y_pred, y_true)
 
 
@@ -115,10 +111,8 @@ def kld_loss(
     y_true,
     batch_dict=None,
     reduction="batchmean",
-    threshold_alpha=1,
-    threshold=0,
 ):
-    y_pred = get_probability(y_logits, threshold_alpha, threshold)
+    y_pred = torch.sigmoid(y_logits)
     y_pred_log = torch.log(y_pred)
     return F.kl_div(y_pred_log, y_true, reduction=reduction, log_target=False)
 
@@ -130,14 +124,10 @@ def focal_loss(
     alpha=0.25,
     gamma=2,
     reduction="mean",
-    threshold_alpha=1,
-    threshold=0,
 ):
-    y_logits = get_logits(y_logits, threshold_alpha, threshold)
     return sigmoid_focal_loss(
         y_logits, y_true, alpha=alpha, gamma=gamma, reduction=reduction
     )
-
 
 def soft_focal_loss(
     y_logits,
@@ -146,10 +136,7 @@ def soft_focal_loss(
     alpha=0.25,
     gamma=2,
     reduction="mean",
-    threshold_alpha=1,
-    threshold=0,
 ):
-    y_logits = get_logits(y_logits, threshold_alpha, threshold)
     ce_loss = F.binary_cross_entropy_with_logits(y_logits, y_true, reduction="none")
     y_pred = torch.sigmoid(y_logits)
     loss = alpha * torch.abs(y_pred - y_true).pow(gamma) * ce_loss
@@ -159,9 +146,61 @@ def soft_focal_loss(
         return loss.sum()
     raise ValueError(f"Invalid reduction: {reduction}")
 
+def ldam_loss(
+    y_logits,
+    y_true,
+    batch_dict=None,
+    reduction="mean",
+    max_margin=0.5,
+    probability_decision_threshold=0.5,
+    threshold_alpha=1,
+    threshold=0,
+    n_pos_global: Optional[float] = None,
+    n_neg_global: Optional[float] = None,
+):
+    """Label-Distribution-Aware Margin loss (binary logits).
 
-def dice_loss(y_logits, y_true, batch_dict=None, smooth=1, threshold_alpha=1, threshold=0):
-    y_pred = get_probability(y_logits, threshold_alpha, threshold)
+    Per Cao et al., margins scale as n_j^(-1/4) and are normalized so
+    max(m_pos, m_neg) equals ``max_margin`` 
+    Positive (negative) examples use adjusted logits z - m_pos (z + m_neg).
+    Samples strictly between the two probability thresholds get no margin
+    (plain BCE on ``z``).
+
+    If ``n_pos_global`` / ``n_neg_global`` are set (e.g. full-dataset class
+    counts), margins use those counts instead of the current batch.
+    """
+    z = get_logits(y_logits, threshold_alpha, threshold)
+    y_true = y_true.to(device=z.device, dtype=z.dtype)
+    if y_true.shape != z.shape:
+        y_true = y_true.reshape_as(z)
+    y_pos = y_true > probability_decision_threshold
+    y_neg = y_true < (1 - probability_decision_threshold)
+
+    if n_pos_global is not None and n_neg_global is not None:
+        n_pos = torch.tensor(
+            float(n_pos_global), device=z.device, dtype=z.dtype
+        ).clamp_min(1.0)
+        n_neg = torch.tensor(
+            float(n_neg_global), device=z.device, dtype=z.dtype
+        ).clamp_min(1.0)
+    else:
+        n_pos = y_pos.sum().to(dtype=z.dtype).clamp_min(1.0)
+        n_neg = y_neg.sum().to(dtype=z.dtype).clamp_min(1.0)
+
+    r_pos = n_pos.pow(-0.25)
+    r_neg = n_neg.pow(-0.25)
+    denom = torch.maximum(r_pos, r_neg)
+    m_pos = max_margin * r_pos / denom
+    m_neg = max_margin * r_neg / denom
+
+    z_adj = z.clone()
+    z_adj = torch.where(y_pos, z - m_pos, z_adj)
+    z_adj = torch.where(y_neg, z + m_neg, z_adj)
+
+    return F.binary_cross_entropy_with_logits(z_adj, y_true, reduction=reduction)
+
+def dice_loss(y_logits, y_true, batch_dict=None, smooth=1):
+    y_pred = torch.sigmoid(y_logits)
     intersection = (y_pred * y_true).sum()
     union = y_pred.sum() + y_true.sum()
     dice = (2 * intersection + smooth) / (union + smooth)
@@ -175,10 +214,8 @@ def laplacian_loss(
     batch_dict=None,
     edge_types: Optional[Union[List[Tuple[str, str, str]], Tuple[str, str, str]]] = None,
     use_edge_weight=False,
-    threshold_alpha=1,
-    threshold=0,
 ):
-    y_pred = get_probability(y_logits, threshold_alpha, threshold)
+    y_pred = torch.sigmoid(y_logits)
     loss = torch.zeros((), device=y_pred.device, dtype=y_pred.dtype)
     for edge_type in _normalize_edge_types(edge_types):
         e_index = edge_index[edge_type]
@@ -200,10 +237,8 @@ def graphsage_unsupervised_loss(
     batch_dict=None,
     edge_types: Optional[Union[List[Tuple[str, str, str]], Tuple[str, str, str]]] = None,
     p=2,
-    threshold_alpha=1,
-    threshold=0,
 ):
-    z = get_logits(y_logits, threshold_alpha, threshold)
+    z = y_logits
     loss = torch.zeros((), device=z.device, dtype=z.dtype)
     for edge_type in _normalize_edge_types(edge_types):
         ei = edge_index[edge_type]
@@ -228,6 +263,7 @@ loss_fcn_types = {
     "kld": kld_loss,
     "focal": focal_loss,
     "soft_focal": soft_focal_loss,
+    "ldam": ldam_loss,
     "dice": dice_loss,
     "laplacian": laplacian_loss,
     "graphsage_unsupervised": graphsage_unsupervised_loss,
@@ -245,7 +281,13 @@ def get_lost_fcn(loss_type: Optional[Union[str, List[str], dict]] = None) -> Dic
             raise ValueError(f"Invalid loss type: {loss_type}")
         return {key: loss_fcn_types[key]}
     if isinstance(loss_type, list):
-        return {lt.lower(): loss_fcn_types[lt.lower()] for lt in loss_type}
+        out: Dict[str, Callable] = {}
+        for lt in loss_type:
+            key = lt.lower()
+            if key not in loss_fcn_types:
+                raise ValueError(f"Invalid loss type: {lt}")
+            out[key] = loss_fcn_types[key]
+        return out
     if isinstance(loss_type, dict):
         out: Dict[str, Callable] = {}
         for lt in loss_type.keys():
