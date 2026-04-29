@@ -56,12 +56,14 @@ if __name__ == "__main__":
     parser.add_argument("-t","--time_limit",type=float, default=60, help="time_limit for the solver in seconds")
     parser.add_argument("-m","--max_iterations",type=int, default=10000, help="max iterations for the solver")
     parser.add_argument("-mapf","--mapf_solver_name",type=str, default="cbs", choices=["cbs", "icbs", "lacam", "lacam_random"], help="MAPF solver to use")
-    parser.add_argument("-gng","--generate_new_graph",type=bool, default=False, help="generate new graph")
+    parser.add_argument("-gng","--generate_new_graph",action="store_true", help="generate new graph")
     parser.add_argument("-w","--num_workers",type=int, default=1, help="number of parallel workers for cases (default: auto-detect CPU cores)")
-    parser.add_argument("-verbose","--verbose",type=bool, default=True, help="verbose")
+    parser.add_argument("-verbose","--verbose",dest="verbose",action="store_true", help="verbose")
+    parser.add_argument("-cfg","--config",type=str, default='config/map.yaml', help="config file")
+
     args = parser.parse_args()
     
-    with open('config/map.yaml', 'r') as f:
+    with open(args.config, 'r') as f:
         map_config = yaml.load(f,Loader=yaml.FullLoader)
     map_config['agent_velocity'] = 0.0
     map_config['road_map_type'] = "grid"

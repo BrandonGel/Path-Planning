@@ -92,8 +92,9 @@ def get_all_permutations(cases_to_viz: Path, permutation_mode: str = "first_n", 
         else:
             permutations_to_viz = perm_dirs[:3]  # Default to first 3
 
-        map_path = generate_map_path(case_path,road_map_type)
-        graph_file = get_graph_file_path(map_path,graph_file_name)
+        map_path = generate_map_path(case_path)
+        roadmap_path = generate_roadmap_path(map_path, road_map_type)
+        graph_file = get_graph_file_path(roadmap_path,graph_file_name)
         if not graph_file.exists():
             raise Exception(f"Graph file {graph_file} does not exist")
 
@@ -105,10 +106,10 @@ if __name__ == "__main__":
     """Main entry point for dataset generation."""
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("-s","--path",type=str, default='benchmark/train', help="input file containing map and obstacles")
-    parser.add_argument("-b","--bounds",type=float, nargs='+', default=[0,32.0,0,32.0], help="bounds of the map as x_min x_max y_min y_max (e.g., 0 32.0 0 32.0)")
+    parser.add_argument("-s","--path",type=str, default='/home/bho36/Dropbox/Team_Path_Planning/brandon_graph_data/train', help="input file containing map and obstacles")
+    parser.add_argument("-b","--bounds",type=float, nargs='+', default=[0,64.0,0,64.0], help="bounds of the map as x_min x_max y_min y_max (e.g., 0 32.0 0 32.0)")
     parser.add_argument("-n","--nb_agents",type=int, default=4, help="number of agents")
-    parser.add_argument("-o","--nb_obstacles",type=float, default=0.1, help="number of obstacles or obstacle density")
+    parser.add_argument("-o","--nb_obstacles",type=float, default=0.025, help="number of obstacles or obstacle density")
     parser.add_argument("-r","--resolution",type=float, default=1.0, help="resolution of the map")
     parser.add_argument("-ar","--agent_radius",type=float, default=0.0, help="agent radius")
     parser.add_argument("-ms","--mapf_solver_name",type=str, default="cbs", help="mapf solver name")
@@ -122,14 +123,15 @@ if __name__ == "__main__":
     parser.add_argument("-pn","--num_permutations",type=int, default=4, help="number of permutations to visualize")
     parser.add_argument("-pr","--permutations_range",type=int, nargs=2, default=[0, 16], help="range of permutations to visualize")
     parser.add_argument("-ps","--specific_permutations",type=int, nargs='+', default=[0, 5, 10], help="specific permutations to visualize")
-    parser.add_argument("-ss","--show_static",type=bool, default=True, help="show static paths")
-    parser.add_argument("-sa","--show_animation",type=bool, default=False, help="show animation")
+    parser.add_argument("-ss","--show_static",dest="show_static",action="store_true", help="show static paths")
+    parser.add_argument("-sa","--show_animation",action="store_true", help="show animation")
+    parser.add_argument("-cfg","--config",type=str, default='config/map.yaml', help="config file")
     parser.add_argument("-w", "--num_workers", type=int, default=None,
                         help="number of parallel workers (default: auto-detect CPU cores)")
-    parser.add_argument("-v","--verbose",type=bool, default=False, help="verbose")
+    parser.add_argument("-v","--verbose",action="store_true", help="verbose")
     args = parser.parse_args()
     
-    with open('config/map.yaml', 'r') as f:
+    with open(args.config, 'r') as f:
         map_config = yaml.load(f,Loader=yaml.FullLoader)
     map_config = set_map_config(map_config=map_config,args=args)
     base_path = map_config['path']
@@ -142,6 +144,8 @@ if __name__ == "__main__":
     show_static = args.show_static
     show_animation = args.show_animation
     assert os.path.exists(path), f"Path {path} does not exist"
+    if not show_static and not show_animation:
+        raise ValueError("At least one of show_static or show_animation must be True")
 
     cases_to_viz = get_all_cases(path, case_mode=args.case_mode, num_cases=args.num_cases, case_range=args.case_range, specific_cases=args.specific_cases)
     tasks = get_all_permutations(cases_to_viz, permutation_mode=args.permutation_mode, num_permutations=args.num_permutations, permutations_range=args.permutations_range, specific_permutations=args.specific_permutations)
