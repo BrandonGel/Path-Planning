@@ -114,9 +114,14 @@ def get_circumcenter(p1:np.ndarray, p2:np.ndarray, p3:np.ndarray):
 
 
 def get_boundary(map_,mask:np.ndarray):
+    dim = getattr(map_, "dim", 2)
+    if dim != 2 or mask.ndim != 2:
+        raise NotImplementedError(
+            "Planar/CDT boundary extraction requires a 2D occupancy grid (dim=2, mask H×W)."
+        )
     use_discrete_space = map_.use_discrete_space
-    offset = map_.map_to_world((0,0)) if use_discrete_space else (0,0) 
-    
+    offset = map_.map_to_world((0, 0)) if use_discrete_space else (0.0, 0.0)
+
     mask = (map_.type_map.data == TYPES.OBSTACLE) | (map_.type_map.data == TYPES.INFLATION)
     H, W = mask.shape
     res = float(map_.resolution)

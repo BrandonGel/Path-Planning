@@ -548,6 +548,8 @@ class GraphSampler(Grid):
             self.generate_planar_map(samples,use_option='centroids')
         elif roadmap_type == 'voronoi':
             self.generate_planar_map(samples,use_option='voronoi')
+        elif roadmap_type == 'dt':
+            self.generate_planar_map(samples, use_option='dt')
         elif roadmap_type == 'rrg':
             self.generate_rrg(samples)
         else:
@@ -608,10 +610,71 @@ class GraphSampler(Grid):
         self.edges, self.edge_indices_dict, self.edge_weights = self.calculate_edges(road_map, edge_weights)
         return road_map
 
-    def generate_planar_map(self, samples: List[Node],use_option:str = 'cdt'):
+    def generate_planar_map(self, samples: List[Node], use_option: str = 'cdt'):
+        """Build a planar roadmap from CDT over obstacles or from sample-point Delaunay (`dt`)."""
+        if use_option == 'dt':
+            n = len(samples)
+            if n == 0:
+                self.road_map = []
+                self.road_map_edge_weights = []
+                self.edges, self.edge_indices_dict, self.edge_weights = self.calculate_edges([], [])
+                self.nodes = []
+                return []
+
+            planar_map: List[List[int]] = [[] for _ in range(n)]
+            edge_weights: List[List[float]] = [[] for _ in range(n)]
+            edge_list: dict = {}
+            pts = np.array([samp.current for samp in samples])
+            tri = Delaunay(pts)
+            self.sample_kd_tree = KDTree(pts)
+
+            edges = [
+                tuple(edge)
+                for edge in np.concatenate(
+                    [tri.simplices[:, [0, 1]], tri.simplices[:, [1, 2]], tri.simplices[:, [2, 0]]],
+                    axis=0,
+                ).tolist()
+            ]
+            selected_edges: List[Tuple[int, int]] = []
+            selected_weights: List[float] = []
+            for edge in edges:
+                if edge in edge_list:
+                    continue
+                edge_list[edge] = 1
+                edge_list[edge[::-1]] = 1
+                node_s = samples[edge[0]]
+                node_n = samples[edge[1]]
+                s_pos = pts[edge[0]]
+                n_pos = pts[edge[1]]
+                e_weight = self.get_cost(node_s, node_n)
+                if (
+                    not self.in_collision(s_pos, n_pos)
+                    and not self.in_collision(n_pos, s_pos)
+                    and e_weight >= self.min_edge_length
+                    and e_weight <= self.max_edge_length
+                ):
+                    selected_edges.append(edge)
+                    selected_weights.append(e_weight)
+
+            for edge, weight in zip(selected_edges, selected_weights):
+                planar_map[edge[0]].append(edge[1])
+                planar_map[edge[1]].append(edge[0])
+                edge_weights[edge[0]].append(weight)
+                edge_weights[edge[1]].append(weight)
+
+            self.nodes = samples
+            self.num_total_nodes = n
+            self.cost_matrix = cdist(pts, pts, metric='euclidean')
+            self.road_map = planar_map
+            self.road_map_edge_weights = edge_weights
+            self.edges, self.edge_indices_dict, self.edge_weights = self.calculate_edges(
+                planar_map, edge_weights
+            )
+            return planar_map
+
         nodes = []
         mask = (self.type_map.data == TYPES.OBSTACLE) | (self.type_map.data == TYPES.INFLATION)
-        points,planar_map= get_planar_graph(self,mask,use_option=use_option)
+        points, planar_map = get_planar_graph(self, mask, use_option=use_option)
         edge_weights = [[] for ii in range(len(planar_map))]
 
         # Re-register the nodes after applying constrained delaunay triangulation
