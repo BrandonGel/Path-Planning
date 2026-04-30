@@ -30,12 +30,17 @@ def run_graph_sampler(graph_sampler,start,goal,generate_grid_nodes = True,sample
     num_edges = sum([len(edges) for edges in road_map])
     print(f"Generated {num_edges} road map edges in {time.time() - st} seconds")
 
+    if map_.dim == 2:
+        roadmap_type = 'cdt'
+    else:
+        roadmap_type = 'dt'
     st = time.time()
-    planar_map = graph_sampler.generate_planar_map(nodes)
+    planar_map = graph_sampler.generate_planar_map(nodes, use_option=roadmap_type)
+    planar_nodes = graph_sampler.nodes
     num_edges = sum([len(edges) for edges in planar_map])   
     print(f"Generated {num_edges} planar map edges in {time.time() - st} seconds")
 
-    return graph_sampler,nodes, road_map,planar_map
+    return graph_sampler, nodes, road_map, planar_nodes, planar_map
 
 
 if __name__ == "__main__":
@@ -45,7 +50,7 @@ if __name__ == "__main__":
     start = [(5,15),(44,15)]
     goal = [(44,19), (20,25)]
     print("Running graph sampler on 2D map with discrete space and grid nodes...")
-    map_,nodes, road_map,planar_map = run_graph_sampler(map_,start,goal,sample_num = 0)
+    map_,nodes, road_map, planar_nodes, planar_map = run_graph_sampler(map_,start,goal,sample_num = 0)
     vis = Visualizer2D()
     vis.plot_grid_map(map_)
     vis.plot_road_map(map_,nodes,road_map)
@@ -55,7 +60,7 @@ if __name__ == "__main__":
 
     vis = Visualizer2D()
     vis.plot_grid_map(map_)
-    vis.plot_road_map(map_,nodes,planar_map)
+    vis.plot_road_map(map_,planar_nodes,planar_map)
     vis.savefig('figs/graph_sampler/graph_sampler_2d_planarmap_discrete_space.png')
     vis.show()
     vis.close()
@@ -65,7 +70,7 @@ if __name__ == "__main__":
     start = [(5,15),(44,15)]
     goal = [(44,19), (20,25)]
     print("Running graph sampler on 2D map with continuous space and random sampling nodes...")
-    map_,nodes, road_map,planar_map = run_graph_sampler(map_,start,goal,sample_num = 1000,generate_grid_nodes=False)
+    map_,nodes, road_map, planar_nodes, planar_map = run_graph_sampler(map_,start,goal,sample_num = 1000,generate_grid_nodes=False)
     vis = Visualizer2D()
     vis.plot_grid_map(map_)
     vis.plot_road_map(map_,nodes,road_map,map_frame=False)
@@ -75,7 +80,7 @@ if __name__ == "__main__":
 
     vis = Visualizer2D()
     vis.plot_grid_map(map_)
-    vis.plot_road_map(map_,nodes,planar_map,map_frame=False)
+    vis.plot_road_map(map_,planar_nodes,planar_map,map_frame=False)
     vis.savefig('figs/graph_sampler/graph_sampler_2d_planarmap.png')
     vis.show()
     vis.close()
@@ -85,7 +90,7 @@ if __name__ == "__main__":
     start = [(25, 5, 5)]
     goal = [(5, 25, 25)]
     print("Running graph sampler on 3D map with discrete space and random sampling nodes...")
-    map_,nodes, road_map,planar_map = run_graph_sampler(map_,start,goal,generate_grid_nodes = False,sample_num =1000)
+    map_,nodes, road_map, planar_nodes, planar_map = run_graph_sampler(map_,start,goal,generate_grid_nodes = False,sample_num =1000)
     vis = Visualizer3D()
     vis.plot_grid_map(map_)
     vis.plot_road_map(map_,nodes,road_map)
@@ -95,7 +100,7 @@ if __name__ == "__main__":
 
     vis = Visualizer3D()
     vis.plot_grid_map(map_)
-    vis.plot_road_map(map_,nodes,planar_map)
+    vis.plot_road_map(map_,planar_nodes,planar_map)
     vis.show()
     vis.savefig('figs/graph_sampler/graph_sampler_3d_planarmap_discrete_space.png')
     vis.close()
@@ -105,7 +110,7 @@ if __name__ == "__main__":
     start = [(25, 5, 5)]
     goal = [(5, 25, 25)]
     print("Running graph sampler on 3D map with continuous space and random sampling nodes...")
-    map_,nodes, road_map,planar_map = run_graph_sampler(map_,start,goal,generate_grid_nodes = False,sample_num =1000)
+    map_,nodes, road_map, planar_nodes, planar_map = run_graph_sampler(map_,start,goal,generate_grid_nodes = False,sample_num =1000)
     vis = Visualizer3D()
     vis.plot_grid_map(map_)
     vis.plot_road_map(map_,nodes,road_map)

@@ -40,9 +40,9 @@ class Visualizer2D(BaseVisualizer2D):
                     TYPES.CUSTOM: "#bbbbbb",
                 },
                 zorder: dict = {
-                    'density_map': 5,
                     'grid_map': 10,
                     'voxels': 10,
+                    'density_map': 15,
                     'esdf': 20,
                     'road_map': 25,
                     'expand_tree_edge': 30,
@@ -68,6 +68,10 @@ class Visualizer2D(BaseVisualizer2D):
         )
         self.figsize = figsize
         self.fig.tight_layout()
+        self.ax.spines['top'].set_visible(False)
+        self.ax.spines['right'].set_visible(False)
+        self.ax.spines['left'].set_visible(False)
+        self.ax.spines['bottom'].set_visible(False)
 
     def set_fig_size(self, width: float, height: float, aspect_ratio: float = 0.0):
         if aspect_ratio != 0.0:
@@ -93,12 +97,9 @@ class Visualizer2D(BaseVisualizer2D):
 
         self.grid_map = grid_map
         self.dim = grid_map.dim
-        type_data = grid_map.type_map.data
+        type_data = grid_map.type_map.data.copy()
 
-        if masked_map is not None:
-            type_data = np.ma.masked_where(masked_map == 1, type_data)
-
-        plt.imshow(
+        self.ax.imshow(
             np.transpose(type_data), 
             cmap=self.cmap, 
             norm=self.norm, 
@@ -109,7 +110,7 @@ class Visualizer2D(BaseVisualizer2D):
             )
 
         if show_esdf:   # draw esdf hotmap
-            plt.imshow(
+            self.ax.imshow(
                 np.transpose(grid_map.esdf),
                 cmap="jet",
                 origin="lower",
@@ -118,10 +119,10 @@ class Visualizer2D(BaseVisualizer2D):
                 alpha=alpha_esdf,
                 zorder=self.zorder['esdf'],
             )
-            plt.colorbar(label="ESDF distance")
+            self.ax.colorbar(label="ESDF distance")
             
         if equal: 
-            plt.axis("equal")
+            self.ax.axis("equal")
         
     def plot_road_map(self,
                         map_: Grid,
@@ -129,10 +130,14 @@ class Visualizer2D(BaseVisualizer2D):
                         road_map: List[List[int]],
                         node_color: str = "#8c564b", 
                         edge_color: str = "#e377c2", 
-                        node_size: float = 1, 
+                        node_size: float = 20, 
+                        start_size: float = 0,
+                        goal_size: float = 0,
                         linewidth: float = 1.0, 
                         node_alpha: float = 1.0,
                         edge_alpha: float = 0.3,
+                        node_value: List[float] = None,
+                        show_edge: bool = True,
                         cmap: mcolors.Colormap = None,
                         map_frame: bool = True) -> None:
         """
@@ -154,21 +159,26 @@ class Visualizer2D(BaseVisualizer2D):
         else:
             x_coords = [node.current[0] for node in nodes]
             y_coords = [node.current[1] for node in nodes]
-        for i, edges in enumerate(road_map):
-            if len(edges) == 0:
-                continue
-            x1, y1 = x_coords[i], y_coords[i]
-            # if not (x1 in points[ind1][:,0] and y1 in points[ind1][:,1]) and not (x1 in points[ind2][:,0] and x1 in points[ind2][:,1]):
-            #     continue
-            for edge_idx in edges:
-                if edge_idx < len(x_coords):  # Safety check
-                    x2, y2 = x_coords[edge_idx], y_coords[edge_idx]
-                    self.ax.plot([x1, x2], [y1, y2], edge_color, linewidth=linewidth, alpha=edge_alpha, zorder=self.zorder['road_map'])
+        if show_edge:
+            for i, edges in enumerate(road_map):
+                if len(edges) == 0:
+                    continue
+                x1, y1 = x_coords[i], y_coords[i]
+                for edge_idx in edges:
+                    if edge_idx < len(x_coords):  # Safety check
+                        x2, y2 = x_coords[edge_idx], y_coords[edge_idx]
+                        self.ax.plot([x1, x2], [y1, y2], edge_color, linewidth=linewidth, alpha=edge_alpha, zorder=self.zorder['road_map'])
 
         # Plot all nodes
-        self.ax.scatter(x_coords, y_coords, c=node_color, s=node_size, alpha=node_alpha, zorder=self.zorder['road_map'], label='Sample nodes', cmap=cmap)
+        if node_value is not None:
+            vmin = min(0,np.min(node_value))
+            vmax = max(1,np.max(node_value))
+            self.ax.scatter(x_coords, y_coords, c=node_value, edgecolors='black', s=node_size, alpha=node_alpha, zorder=self.zorder['road_map'], label='Sample nodes', cmap=cmap, vmin=vmin, vmax=vmax)
+        else:
+            self.ax.scatter(x_coords, y_coords, c=node_color, edgecolors='black', s=node_size, alpha=node_alpha, zorder=self.zorder['road_map'], label='Sample nodes')
         
         # Plot start nodes (handle both list and single value)
+        start_size = start_size if start_size > 0 else node_size
         if hasattr(map_, 'start') and map_.start is not None:
             if isinstance(map_.start, list) and len(map_.start) > 0:
                 # Multiple start positions
@@ -178,7 +188,7 @@ class Visualizer2D(BaseVisualizer2D):
                     else:
                         start = start
                     if start is not None and len(start) >= 2:
-                        self.ax.scatter(start[0], start[1], c='red', s=node_size, alpha=1, zorder=self.zorder['expand_tree_node'], label='Start' if start == map_.start[0] else '')
+                        self.ax.scatter(start[0], start[1], c='red', s=start_size, alpha=1, zorder=self.zorder['expand_tree_node'], label='Start' if start == map_.start[0] else '')
             else:
                 # Single start position (not a list)
                 if map_frame:   
@@ -186,8 +196,9 @@ class Visualizer2D(BaseVisualizer2D):
                 else:
                     start = map_.start
                 if len(start) >= 2:
-                    self.ax.scatter(start[0], start[1], c='red', s=node_size, alpha=1, zorder=self.zorder['expand_tree_node'], label='Start')
+                    self.ax.scatter(start[0], start[1], c='red', s=start_size, alpha=1, zorder=self.zorder['expand_tree_node'], label='Start')
 
+        goal_size = goal_size if goal_size > 0 else node_size
         if hasattr(map_, 'goal') and map_.goal is not None:
             if isinstance(map_.goal, list) and len(map_.goal) > 0:
                 for goal in map_.goal:
@@ -196,14 +207,14 @@ class Visualizer2D(BaseVisualizer2D):
                     else:
                         goal = goal
                     if goal is not None and len(goal) >= 2:
-                        self.ax.scatter(goal[0], goal[1], c='blue', s=node_size, alpha=1, zorder=self.zorder['expand_tree_node'], label='Goal')
+                        self.ax.scatter(goal[0], goal[1], c='blue', s=goal_size, alpha=1, zorder=self.zorder['expand_tree_node'], label='Goal')
             else:
                 if map_frame:   
                     goal = map_.map_to_world(map_.goal)
                 else:
                     goal = map_.goal
                 if len(goal) >= 2:
-                    self.ax.scatter(goal[0], goal[1], c='blue', s=node_size, alpha=1, zorder=self.zorder['expand_tree_node'], label='Goal')
+                    self.ax.scatter(goal[0], goal[1], c='blue', s=goal_size, alpha=1, zorder=self.zorder['expand_tree_node'], label='Goal')
 
     def animate(self,file_name,map, schedule, road_map=None, skip_frames=1, intermediate_frames=3,speed=1,map_frame=True,radius=0.0):
 
@@ -282,7 +293,7 @@ class Visualizer2D(BaseVisualizer2D):
                     d2 = agents_array[j]
                     pos1 = np.array(d1.center)
                     pos2 = np.array(d2.center)
-                    if np.linalg.norm(pos1 - pos2) < 0.7:
+                    if np.linalg.norm(pos1 - pos2) < 2*radius:
                         d1.set_facecolor('red')
                         d2.set_facecolor('red')
                         print("COLLISION! (agent-agent) ({}, {})".format(i, j))
@@ -318,7 +329,7 @@ class Visualizer2D(BaseVisualizer2D):
             dpi=200)
         self.set_fig_size(self.figsize[0], self.figsize[1])
 
-    def plot_density_map(self, density_map: np.ndarray, grid_map: Grid=None, equal: bool = False, alpha: float = 0.6,masked_map = None,interpolation: str = 'bilinear',use_fig_colorbar: bool = True) -> None:
+    def plot_density_map(self, density_map: np.ndarray, grid_map: Grid=None, equal: bool = False, alpha: float = 1.0,masked_map = None,interpolation: str = 'bilinear',use_fig_colorbar: bool = True) -> None:
         '''
         Plot density map as a heatmap that can be superimposed on other visualizations.
 
@@ -340,26 +351,49 @@ class Visualizer2D(BaseVisualizer2D):
 
         assert self.grid_map is not None, "Grid map is not set"
 
-        # Create a masked array to hide zero values
-        if masked_map is not None:
-            density_map = np.ma.masked_where(masked_map == 1, density_map)
+        # Render density map over the full extent; the masked_map overlay is
+        # painted on top afterwards at full opacity to segment those cells.
+        density_map_plot = density_map.copy()
+        cmap_density = self.cmap_density
 
 
         im = self.ax.imshow(
-            np.transpose(density_map), 
-            cmap=self.cmap_density, 
+            np.transpose(density_map_plot), 
+            cmap=cmap_density, 
             origin='lower', 
             interpolation=interpolation, 
             extent=[*self.grid_map.bounds[0], *self.grid_map.bounds[1]],
+            vmin=0,
+            vmax=max(np.max(density_map),1),
             zorder=self.zorder['density_map'],  # Use esdf zorder to appear above grid_map but below paths
             alpha=alpha,
             )
-        # Adjust axes position to make room for colorbar
-        pos = self.ax.get_position()
-        self.ax.set_position([pos.x0, pos.y0, pos.width * 0.92, pos.height])
-        # Create a colorbar that matches the height of the plot
+
+        # Repaint masked_map==1 cells at full opacity using the underlying grid-map
+        # colormap so they are always fully visible regardless of cell type.
+        if masked_map is not None and hasattr(self.grid_map, "type_map") and hasattr(self.grid_map.type_map, "data"):
+            type_data_visible = np.ma.array(
+                self.grid_map.type_map.data.copy(),
+                mask=(masked_map == 0),
+            )
+            visible_cmap = self.cmap.copy()
+            visible_cmap.set_bad(alpha=0.0)
+            self.ax.imshow(
+                np.transpose(type_data_visible),
+                cmap=visible_cmap,
+                norm=self.norm,
+                origin='lower',
+                interpolation='nearest',
+                extent=[*self.grid_map.bounds[0], *self.grid_map.bounds[1]],
+                zorder=self.zorder['density_map'] + 0.1,
+                alpha=1.0,
+            )
         
         if use_fig_colorbar:
+            # Adjust axes position to make room for colorbar
+            pos = self.ax.get_position()
+            # Create a colorbar that matches the height of the plot
+            self.ax.set_position([pos.x0, pos.y0, pos.width * 0.92, pos.height])
             divider = make_axes_locatable(self.ax)
             cax = divider.append_axes("right", size="5%", pad=0.05)
             self.fig.colorbar(im, cax=cax, orientation='vertical', label="Frequency")

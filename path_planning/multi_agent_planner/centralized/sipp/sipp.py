@@ -18,6 +18,7 @@ from path_planning.common.environment.map.graph_sampler import GraphSampler
 from path_planning.common.environment.node import Node
 import math
 from path_planning.multi_agent_planner.data_type import HEURISTIC_TYPE
+from path_planning.multi_agent_planner.centralized.sipp.graph_generation import SippNode
 
 class SippPlanner(SippGraph):
     def __init__(self, graph_map: GraphSampler,dynamic_obstacles:dict = {},agents:list = [],radius:float = 0.0,velocity:float = 0.0,use_constraint_sweep:bool = True, heuristic_type: str = 'manhattan',time_limit: float | None = None, max_iterations: int | None = None,verbose: bool = False,sipp_max_iterations: int = 10000):
@@ -80,11 +81,11 @@ class SippPlanner(SippGraph):
         depart_t = arrive_t - m_time
         if arrive_t > vertex_interval[1]:
             return None
+        if depart_t > edge_interval[1] + 1e-9:
+            return None
         if not self.sipp_graph[start_pos].is_in_safe_interval(depart_t):
             return None
         if not self.sipp_graph[neighbour].is_in_safe_interval(arrive_t):
-            return None
-        if not self.sipp_graph[(start_pos,neighbour)].is_in_safe_interval(depart_t):
             return None
         return arrive_t
 
@@ -95,7 +96,7 @@ class SippPlanner(SippGraph):
         neighbour_list = self.get_valid_neighbours(goal_pos)
         edge_safe_forever = True
         for neighbour_pos in neighbour_list:
-            edge_safe_forever &= self.sipp_graph[(neighbour_pos,goal_pos)].is_in_safe_interval(depart_t,float('inf'))
+            edge_safe_forever &= not self.sipp_graph[(neighbour_pos,goal_pos)].is_in_unsafe_interval(depart_t, float('inf'))
             if not edge_safe_forever:
                 break
         return goal_vertex_safe_forever and edge_safe_forever
@@ -134,11 +135,23 @@ class SippPlanner(SippGraph):
                 else:
                     early_depart_t = state.time
                     late_depart_t = state.interval[1]
-                    for i_edge in self.sipp_graph[(start_pos,neighbour_pos)].interval_list:
+                    unsafe_interval_list = self.sipp_graph[(start_pos,neighbour_pos)].get_unsafe_intervals(early_depart_t, end_t)
+                    safe_node = SippNode()
+                    safe_node.interval_list = [(early_depart_t, late_depart_t)]
+                    for i_unsafe in range(len(unsafe_interval_list)):
+                        t1_unsafe, t2_unsafe = unsafe_interval_list[i_unsafe]
+                        # Correct unsafe departure window: any departure in [t1_unsafe - m_time,
+                        # t2_unsafe] risks agent B being on this edge during the collision window.
+                        # Using m_time as the lower-bound offset is the tightest conservative
+                        # bound: B must depart no earlier than m_time before t1_unsafe to reach
+                        # any point on the edge by t1_unsafe, and no later than t2_unsafe to
+                        # still be on the edge when the collision window closes.
+                        t_min_unsafe = t1_unsafe - m_time
+                        t_max_unsafe = t2_unsafe
+                        safe_node.split_interval(t_min_unsafe, t_max_unsafe)
+
+                    for i_edge in safe_node.interval_list:
                         if i_edge[0] > late_depart_t or i_edge[1] < early_depart_t:
-                            continue
-                        # Skip if edge (departure) interval does not overlap arrival window shifted to departure time
-                        if i_edge[1] < i[0] - m_time or i_edge[0] > i[1] - m_time:
                             continue
 
                         t = self.get_earliest_no_collision_arrival_time_body(start_t, i,i_edge, start_pos, neighbour_pos,m_time)
@@ -153,7 +166,7 @@ class SippPlanner(SippGraph):
                         s = State(neighbour_pos, t, i)
                         successors.append(s)
                         costs.append(cost)
-                        time_taken.append((w_cost, m_time))
+                        time_taken.append((w_cost, m_time))                     
         return successors, costs, time_taken
 
     def get_heuristic(self, position,goal):
@@ -168,7 +181,7 @@ class SippPlanner(SippGraph):
     def compute_plan(self):
         solution_info = {}
         solution = {}
-        st = time.time()
+        st = time.perf_counter()
         best_solution = None
         best_solution_cost = float('inf')
         best_success = False
@@ -177,6 +190,9 @@ class SippPlanner(SippGraph):
         for _ in range(self.max_iterations):
             self.shuffle_agents()
             self.reset_graph()
+            self.plan = {}
+            self.plan_cost = {}
+            self.action_cost = {}
             iterations += 1
             success = True
             total_cost = 0
@@ -187,6 +203,15 @@ class SippPlanner(SippGraph):
                 if len(self.sipp_graph[start].interval_list) == 0 or len(self.sipp_graph[goal].interval_list) == 0:
                     success = False
                     break
+                # If start already equals goal, low-level search should terminate immediately.
+                # Treat this as a zero-cost single-state plan and continue.
+                if start == goal:
+                    initial_state = State(start, 0, self.sipp_graph[start].interval_list[0])
+                    self.plan[agent["name"]] = [initial_state]
+                    self.plan_cost[agent["name"]] = 0.0
+                    self.action_cost[agent["name"]] = [(0.0, 0.0)]
+                    self.update_intervals([[initial_state]], [[(0.0, 0.0)]], [agent["name"]])
+                    continue
                 initial_state = State(start, 0, self.sipp_graph[start].interval_list[0])
                 initial_state_key = (start, initial_state.interval)
 
@@ -206,9 +231,11 @@ class SippPlanner(SippGraph):
                 goal_state   = None
                 goal_cost = float('inf')
                 low_level_iterations = 0
-                while open_heap and not goal_reached and low_level_iterations < self.sipp_max_iterations:
+                while open_heap and not goal_reached and low_level_iterations < self.sipp_max_iterations and time.perf_counter() - st < self.time_limit:
                     low_level_iterations += 1
                     _, _, current = heapq.heappop(open_heap)
+                    # if round(current.position[0],2) == 11. and round(current.position[1],2) == 17. and round(current.time,2) == 2.19:
+                    #     print(current)
                     current_state_key = (current.position, current.interval)
                     if current_state_key in closed_set:
                         continue
@@ -258,7 +285,7 @@ class SippPlanner(SippGraph):
                 best_solution_cost = total_cost
                 best_solution = self.get_plan()
                 best_success = True
-        self.total_time += time.time() - st
+        self.total_time += time.perf_counter() - st
         self.total_iterations = min(self.max_iterations, iterations)
         solution =best_solution if best_success else {}
         solution_info["runtime"] = self.total_time
@@ -280,6 +307,8 @@ class SippPlanner(SippGraph):
     def get_plan(self):
         solution = {}
         for agent in self.agent_names:
+            if agent not in self.plan or agent not in self.action_cost:
+                continue
             plan = self.plan[agent]
             action_cost = self.action_cost[agent]
             path_list = []

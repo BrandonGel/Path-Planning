@@ -46,10 +46,7 @@ def solve_mapf(map_, agents,mapf_solver_config:dict) -> Tuple[dict, float]:
         solution, solution_info = ccbs.search()
     else:
         raise ValueError(f"Invalid algorithm: {mapf_solver_name}")
-    if agent_radius != 0 and solution_info["success"]:
-        collisions = check_collision(solution, agent_radius, verbose=False)
-        if collisions:
-            solution_info["success"] = False
+    solution_info = check_solution_collision(solution,agent_radius,solution_info)
     summary = summarize_solution(solution,solution_info,mapf_solver_config,map_)
     return summary
 
@@ -114,6 +111,16 @@ def computer_solution_cost(solution:dict):
     all_cost_dict["makespan"] = makespan
     all_cost_dict["success"] = success
     return cost_dict, all_cost_dict
+
+def check_solution_collision(solution,agent_radius,solution_info):
+    solution_info_collision = solution_info.copy()
+    solution_info_collision["collision"] = False
+    if agent_radius != 0 and solution_info["success"]:
+        collisions = check_collision(solution, agent_radius, verbose=False)
+        if collisions:
+            solution_info_collision["success"] = False
+            solution_info_collision["collision"] = True
+    return solution_info_collision
 
 def summarize_solution(solution,solution_info,mapf_solver_config,map_):
     agent_cost, total_cost = computer_solution_cost(solution)

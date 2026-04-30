@@ -1,58 +1,83 @@
 seed: 42
-loss:
-  type:
-    # - mse
-    # - bce
-    # - dice
-    # - kld
-    - focal
-    - laplacian
-    # - graphsage_unsupervised
-  weights:
-    # - 1.0
-    # - 0.5
-    # - 0.5
-    # - 1.0
-    - 1.0
-    - 0.01
-    # - 0.01
-  args:
-    # - null
-    # - weight: null
-    #   pos_weight: False
-    # - null
-    # - null
-    - alpha: 0.25
-      gamma: 2
-    - edge_types: 
-      - !!python/tuple [node, to, node]
-      p: 2
-    # - edge_types: 
-    #   - !!python/tuple [node, to, node]
-    #   p: 2
-model:
-  type: gat
-  num_blocks: 3
-  hidden_channels: 16
-  in_channels: -1
-  out_channels: 1
-  num_heads: 8
-  edge_dim: 1
-  concat: true
-  residual: true
-  dropout: 0.2
-  num_start_layers: 1
-  num_mlp_layers: 2
-  activation_function: relu
-  to_hetero_aggr: sum
-  compile: false
+evaluator:
+  loss:
+    soft_focal:
+      weight: 1.0
+      args:
+        alpha: 0.25
+        gamma: 2
+    laplacian:
+      weight: 0.01
+      args:
+        edge_types: 
+          - !!python/tuple [node, to, node]
+        use_edge_weight: False
+  model:
+    type: gatv2
+    num_blocks: 3
+    hidden_channels: 16
+    in_channels: -1
+    out_channels: 1
+    num_heads: 8
+    edge_dim: 1
+    concat: true
+    residual: true
+    dropout: 0.2
+    num_start_layers: 1
+    num_mlp_layers: 2
+    activation_function: leaky_relu
+    to_hetero_aggr: sum
+  optimizer:
+    type: adamw
+    lr: 0.0005
+    weight_decay: 0.0005
+threshold:
+  use: False
+  threshold_alpha: 1.0
+  loss:
+    ldam:
+      weight: 1.0
+      args:
+        max_margin: 0.5
+        probability_decision_threshold: 0.5
+    threshold_collapse:
+      weight: 0.01
+      args:
+        null
+    threshold_chasing_score:
+      weight: 0.01
+      args:
+        null
+  model:
+    type: gatv2
+    node_in_channels: -1
+    node_out_channels: 1
+    num_mlp_start_layers: 1
+    node_mlp_start_channels: 16
+    num_gnn_blocks: 3
+    gnn_hidden_channels: 16
+    num_mlp_end_layers: 2
+    node_mlp_end_channels: 16
+    edge_in_channels: -1
+    edge_use_mlp_start: True
+    edge_mlp_start_channels: 8
+    num_heads: 4
+    concat: True
+    residual: True
+    dropout: 0.2
+    use_edge_dim: True
+    activation_function: leaky_relu
+    to_hetero_aggr: sum
+    pooling_function: mean
+  optimizer:
+    type: adamw
+    lr: 0.0001
+    weight_decay: 0.0005
+device:
+  compile: true
   compile_dynamic: true
-optimizer:
-  type: adamw
-  lr: 0.0001
-  weight_decay: 0.0005
 train:
-  batch_size: 128
+  batch_size: 256
   test_size: 0.1
   num_epochs: 2500
   resume_epoch: 0
@@ -62,6 +87,7 @@ train:
   load_folder: 'logs'
   gradient_clip_val: 5.0
   num_workers: 19
+  num_prune: 0
 dataset:
   folder_path: null
   load_file: null

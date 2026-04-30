@@ -27,7 +27,6 @@ python scripts/generate/run_visualize_gt.py -s benchmark/train -y benchmark/trai
 
 '''
 
-from path_planning.data_generation.dataset_ground_truth import create_path_parameter_directory
 from path_planning.data_generation.dataset_visualize_ground_truth import load_and_visualize_case
 import argparse
 from pathlib import Path
@@ -36,73 +35,12 @@ import os
 from multiprocessing import Pool, cpu_count
 from tqdm import tqdm
 import numpy as np
+from path_planning.utils.util import set_map_config
+from path_planning.data_generation.dataset_util import *
+from path_planning.data_generation.dataset_visualize_ground_truth import visualize_gt
 
 
-def visualize_case_worker(args):
-    """Worker function for parallel visualization."""
-    perm_dir, show_static, show_animation, case_name = args
-    try:
-        load_and_visualize_case(perm_dir, show_static=show_static, show_animation=show_animation)
-        return True, case_name, perm_dir.name
-    except Exception as e:
-        return False, case_name, f"{perm_dir.name}: {str(e)}"
-
-
-if __name__ == "__main__":
-    """Main entry point for dataset generation."""
-
-    parser = argparse.ArgumentParser()
-    parser.add_argument("-s","--path",type=str, default='benchmark/train', help="input file containing map and obstacles")
-    parser.add_argument("-b","--bounds",type=float, nargs='+', default=[0,32.0,0,32.0], help="bounds of the map as x_min x_max y_min y_max (e.g., 0 32.0 0 32.0)")
-    parser.add_argument("-n","--nb_agents",type=int, default=4, help="number of agents")
-    parser.add_argument("-o","--nb_obstacles",type=float, default=0.1, help="number of obstacles or obstacle density")
-    parser.add_argument("-p","--nb_permutations",type=int, default=16, help="number of permutations")
-    parser.add_argument("-r","--resolution",type=float, default=1.0, help="resolution of the map")
-    parser.add_argument("-y","--config",type=str, default='', help="config file to use")
-    parser.add_argument("-cm","--case_mode",type=str, default='first_n', choices=['all', 'first_n', 'range', 'specific'], help="mode to visualize the dataset")
-    parser.add_argument("-cn","--num_cases",type=int, default=3, help="number of cases to visualize")
-    parser.add_argument("-cr","--case_range",type=int, nargs=2, default=[0, 16], help="range of cases to visualize")
-    parser.add_argument("-cs","--specific_cases",type=int, nargs='+', default=[0, 5, 10], help="specific cases to visualize")
-    parser.add_argument("-pv","--permutation_mode",type=str, default='first_n', choices=['all', 'first_n', 'range', 'specific'], help="mode to visualize the dataset")
-    parser.add_argument("-pn","--num_permutations",type=int, default=4, help="number of permutations to visualize")
-    parser.add_argument("-pr","--permutations_range",type=int, nargs=2, default=[0, 16], help="range of permutations to visualize")
-    parser.add_argument("-ps","--specific_permutations",type=int, nargs='+', default=[0, 5, 10], help="specific permutations to visualize")
-    parser.add_argument("-ss","--show_static",type=bool, default=True, help="show static paths")
-    parser.add_argument("-sa","--show_animation",type=bool, default=False, help="show animation")
-    parser.add_argument("-w", "--num_workers", type=int, default=None,
-                        help="number of parallel workers (default: auto-detect CPU cores)")
-    args = parser.parse_args()
-    
-    # Convert bounds from flat list to nested list format
-    if isinstance(args.bounds, list):
-        if len(args.bounds) == 2:
-            bounds = [[0, args.bounds[1]], [0, args.bounds[0]]]
-        elif len(args.bounds) == 3:
-            bounds = [[0, args.bounds[1]], [0, args.bounds[0]], [0, args.bounds[2]]]
-        elif len(args.bounds) == 4:
-            bounds = [[args.bounds[0], args.bounds[1]], [args.bounds[2], args.bounds[3]]]
-        elif len(args.bounds) == 6:
-            bounds = [[args.bounds[0], args.bounds[1]], [args.bounds[2], args.bounds[3]], [args.bounds[4], args.bounds[5]]]
-        else:
-            raise ValueError(f"Invalid bounds: {args.bounds}")
-    else:
-        bounds = args.bounds  # Use default or from config
-
-    base_path = Path(args.path)
-    if args.config != '':
-        with open(args.config, 'r') as yaml_file:
-            config = yaml.load(yaml_file, Loader=yaml.FullLoader)
-    else:
-        config = {
-            "bounds": bounds,
-            "resolution": args.resolution,
-            "nb_agents": args.nb_agents,
-            "nb_obstacles": args.nb_obstacles,
-            "nb_permutations": args.nb_permutations,
-        }
-    path = create_path_parameter_directory(base_path, config,dump_config=False)
-    assert os.path.exists(path), f"Path {path} does not exist"
-
+def get_all_cases(path: Path, case_mode: str = "first_n", num_cases: int = 3, case_range: list[int] = [0, 16], specific_cases: list[int] = [0, 5, 10]):
     # Get all case directories
     case_dirs = sorted([d for d in path.iterdir() if d.is_dir() and d.name.startswith("case_") and len(os.listdir(d)) > 0],
                     key=lambda x: int(x.name.split("_")[1]))
@@ -113,10 +51,10 @@ if __name__ == "__main__":
 
     # User can modify this to visualize specific cases
     # Options: "all", "first_n", "range", "specific"
-    viz_mode = args.case_mode  # Change this to control which cases to visualize
-    n_cases = args.num_cases  # Number of cases if using "first_n"
-    case_range = np.array(args.case_range).astype(int).flatten()  # Range if using "range"
-    specific_cases = np.array(args.specific_cases).astype(int).flatten()  # Specific case numbers if using "specific"
+    viz_mode = case_mode  # Change this to control which cases to visualize
+    n_cases = num_cases  # Number of cases if using "first_n"
+    case_range = np.array(case_range).astype(int).flatten()  # Range if using "range"
+    specific_cases = np.array(specific_cases).astype(int).flatten()  # Specific case numbers if using "specific"
 
     # Select cases to visualize
     if viz_mode == "all":
@@ -129,17 +67,19 @@ if __name__ == "__main__":
         cases_to_viz = [case_dirs[i] for i in specific_cases if i < len(case_dirs)]
     else:
         cases_to_viz = case_dirs[:3]  # Default to first 3
+    return cases_to_viz
 
-    perm_mode = args.permutation_mode  # Change this to control which permutations to visualize
-    n_permutations = args.num_permutations
-    permutations_range = np.array(args.permutations_range).astype(int).flatten()  # Range if using "range"
-    specific_permutations = np.array(args.specific_permutations).astype(int).flatten()  # Specific permutation numbers if using "specific"
+def get_all_permutations(cases_to_viz: Path, permutation_mode: str = "first_n", num_permutations: int = 4, permutations_range: list[int] = [0, 16], specific_permutations: list[int] = [0, 5, 10],graph_file_name: str = None):
+    perm_mode = permutation_mode  # Change this to control which permutations to visualize
+    n_permutations = num_permutations
+    permutations_range = np.array(permutations_range).astype(int).flatten()  # Range if using "range"
+    specific_permutations = np.array(specific_permutations).astype(int).flatten()  # Specific permutation numbers if using "specific"
 
     # Collect all tasks (case + permutation combinations)
     tasks = []
     for case_path in cases_to_viz:
-        root = case_path / "ground_truth" if (case_path / "ground_truth").exists() else case_path
-        perm_dirs = sorted([d for d in root.iterdir() if d.is_dir() and d.name.startswith("perm_") and len(os.listdir(d)) > 0],
+        perm_path = generate_perm_base_path(case_path)
+        perm_dirs = sorted([d for d in perm_path.iterdir() if d.is_dir() and d.name.startswith("perm_") and len(os.listdir(d)) > 0],
                            key=lambda x: int(x.name.split("_")[1]))
         if perm_mode == "all":
             permutations_to_viz = perm_dirs
@@ -151,35 +91,66 @@ if __name__ == "__main__":
             permutations_to_viz = [perm_dirs[i] for i in specific_permutations if i < len(perm_dirs)]
         else:
             permutations_to_viz = perm_dirs[:3]  # Default to first 3
+
+        map_path = generate_map_path(case_path)
+        roadmap_path = generate_roadmap_path(map_path, road_map_type)
+        graph_file = get_graph_file_path(roadmap_path,graph_file_name)
+        if not graph_file.exists():
+            raise Exception(f"Graph file {graph_file} does not exist")
+
         for perm_dir in permutations_to_viz:
-            tasks.append((perm_dir, args.show_static, args.show_animation, case_path.name))
+            tasks.append([case_path,perm_dir, graph_file])
+    return tasks
+    
+if __name__ == "__main__":
+    """Main entry point for dataset generation."""
 
-    num_workers = args.num_workers if args.num_workers is not None else cpu_count()
-    successful = 0
-    failed = 0
-    print(f"\nVisualizing {len(tasks)} permutations across {len(cases_to_viz)} cases with {num_workers} workers...")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-s","--path",type=str, default='/home/bho36/Dropbox/Team_Path_Planning/brandon_graph_data/train', help="input file containing map and obstacles")
+    parser.add_argument("-b","--bounds",type=float, nargs='+', default=[0,64.0,0,64.0], help="bounds of the map as x_min x_max y_min y_max (e.g., 0 32.0 0 32.0)")
+    parser.add_argument("-n","--nb_agents",type=int, default=4, help="number of agents")
+    parser.add_argument("-o","--nb_obstacles",type=float, default=0.025, help="number of obstacles or obstacle density")
+    parser.add_argument("-r","--resolution",type=float, default=1.0, help="resolution of the map")
+    parser.add_argument("-ar","--agent_radius",type=float, default=0.0, help="agent radius")
+    parser.add_argument("-ms","--mapf_solver_name",type=str, default="cbs", help="mapf solver name")
+    parser.add_argument("-rmt","--road_map_type",type=str, default="grid", help="road map type")
+    parser.add_argument("-av","--agent_velocity",type=float, default=0.0, help="agent velocity")
+    parser.add_argument("-cm","--case_mode",type=str, default='first_n', choices=['all', 'first_n', 'range', 'specific'], help="mode to visualize the dataset")
+    parser.add_argument("-cn","--num_cases",type=int, default=3, help="number of cases to visualize")
+    parser.add_argument("-cr","--case_range",type=int, nargs=2, default=[0, 16], help="range of cases to visualize")
+    parser.add_argument("-cs","--specific_cases",type=int, nargs='+', default=[0, 5, 10], help="specific cases to visualize")
+    parser.add_argument("-pv","--permutation_mode",type=str, default='first_n', choices=['all', 'first_n', 'range', 'specific'], help="mode to visualize the dataset")
+    parser.add_argument("-pn","--num_permutations",type=int, default=4, help="number of permutations to visualize")
+    parser.add_argument("-pr","--permutations_range",type=int, nargs=2, default=[0, 16], help="range of permutations to visualize")
+    parser.add_argument("-ps","--specific_permutations",type=int, nargs='+', default=[0, 5, 10], help="specific permutations to visualize")
+    parser.add_argument("-ss","--show_static",dest="show_static",action="store_true", help="show static paths")
+    parser.add_argument("-sa","--show_animation",action="store_true", help="show animation")
+    parser.add_argument("-cfg","--config",type=str, default='config/map.yaml', help="config file")
+    parser.add_argument("-w", "--num_workers", type=int, default=None,
+                        help="number of parallel workers (default: auto-detect CPU cores)")
+    parser.add_argument("-v","--verbose",action="store_true", help="verbose")
+    args = parser.parse_args()
+    
+    with open(args.config, 'r') as f:
+        map_config = yaml.load(f,Loader=yaml.FullLoader)
+    map_config = set_map_config(map_config=map_config,args=args)
+    base_path = map_config['path']
+    path = create_path_parameter_directory(base_path, map_config,dump_config=False)
+    mapf_solver_name = map_config['mapf_solver_name']
+    road_map_type = map_config['road_map_type']
+    agent_velocity = map_config['agent_velocity']
+    num_workers = map_config['num_workers'] 
+    verbose = map_config['verbose']
+    show_static = args.show_static
+    show_animation = args.show_animation
+    assert os.path.exists(path), f"Path {path} does not exist"
+    if not show_static and not show_animation:
+        raise ValueError("At least one of show_static or show_animation must be True")
 
-    if num_workers > 1 and len(tasks) > 1:
-        with Pool(processes=num_workers) as pool:
-            for success, case_name, result in tqdm(
-                pool.imap_unordered(visualize_case_worker, tasks),
-                total=len(tasks),
-                desc="Visualizing cases",
-            ):
-                if success:
-                    successful += 1
-                else:
-                    failed += 1
-                    print(f"Error in {case_name}: {result}")
-    else:
-        for task in tqdm(tasks, desc="Visualizing cases"):
-            success, case_name, result = visualize_case_worker(task)
-            if success:
-                successful += 1
-            else:
-                failed += 1
-                print(f"Error in {case_name}: {result}")
+    cases_to_viz = get_all_cases(path, case_mode=args.case_mode, num_cases=args.num_cases, case_range=args.case_range, specific_cases=args.specific_cases)
+    tasks = get_all_permutations(cases_to_viz, permutation_mode=args.permutation_mode, num_permutations=args.num_permutations, permutations_range=args.permutations_range, specific_permutations=args.specific_permutations)
 
-    print("\n" + "="*60)
-    print(f"Visualization complete: {successful} succeeded, {failed} failed")
-    print("="*60)
+    for task in tasks:
+        task.extend([mapf_solver_name, road_map_type, agent_velocity, show_static, show_animation, verbose])
+
+    visualize_gt(tasks, num_workers=num_workers)

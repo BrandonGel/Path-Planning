@@ -22,6 +22,8 @@ Useing Weighted sampling (weighted_sampling True) and sample from the target spa
 python scripts/generate/run_generate.py -s benchmark/train/map32.0x32.0_resolution1.0/agents4_obst0.1 --num_samples 1000 --num_neighbors 13.0 --min_edge_len 1e-10 --max_edge_len 5.0000001 --num_graph_samples 1 --road_map_type prm --target_space convolution_binary --generate_new_graph True --is_start_goal_discrete True --weighted_sampling True --samp_from_prob_map_ratio 0.5
 '''
 
+
+
 import argparse
 from pathlib import Path
 from path_planning.data_generation.dataset_generate import generate_graph_samples
@@ -32,20 +34,27 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument("-seed","--seed",type=int, default=42, help="seed")
-    parser.add_argument("-s","--path",type=str, nargs='+', default=['benchmark/train/map32.0x32.0_resolution1.0/agents4_obst0.1'], help="input file containing map and obstacles")
-    parser.add_argument("-ds","--use_discrete_space",type=bool, default=False, help="use discrete space")
+    parser.add_argument("-s","--path",type=str, nargs='+', default=['/home/bho36/Dropbox/Team_Path_Planning/brandon_graph_data/train'], help="input file containing map and obstacles")
+    parser.add_argument("-ds","--use_discrete_space",action="store_true", help="use discrete space")
     parser.add_argument("-ns","--num_samples",type=int, default=1000, help="number of samples")
     parser.add_argument("-nn","--num_neighbors",type=float, default=13.0, help="number of neighbors")
     parser.add_argument("-min_el","--min_edge_len",type=float, default=1e-10, help="minimum edge length")
     parser.add_argument("-max_el","--max_edge_len",type=float, default=5+1e-10, help="maximum edge length")
     parser.add_argument("-ngs","--num_graph_samples",type=int, default=1, help="number of graph samples")
     parser.add_argument("-rmt","--road_map_type",type=str, default='prm', help="road map type")
+    parser.add_argument("-rmt_gt","--road_map_type_gt",type=str, default='grid', help="road map type for ground truth")
+    parser.add_argument("-ggn","--generate_grid_nodes",action="store_true", help="generate grid nodes")
+    parser.add_argument("-av","--agent_velocity",type=float, default=0.0, help="agent velocity")
     parser.add_argument("-ts","--target_space",type=str, default='convolution_binary', help="target space")
-    parser.add_argument("-gn","--generate_new_graph",type=bool, default=True, help="generate new graph")
-    parser.add_argument("-isg","--is_start_goal_discrete",type=bool, default=True, help="use discrete space for start and goal")
-    parser.add_argument("-w","--num_workers",type=int, default=None, help="number of parallel workers for cases (default: auto-detect CPU cores)")
-    parser.add_argument("-ws","--weighted_sampling",type=bool, default=True, help="weighted sampling")
+    parser.add_argument("-gng","--generate_new_graph",dest="generate_new_graph",action="store_true", help="generate new graph")
+    parser.add_argument("-gfn","--graph_file_name",type=str, default=None, help="graph file name")
+    parser.add_argument("-isg","--is_start_goal_discrete",dest="is_start_goal_discrete",action="store_true", help="use discrete space for start and goal")
+    parser.add_argument("--no-is-start-goal-discrete",dest="is_start_goal_discrete",action="store_false", help="disable discrete space for start and goal")
+    parser.add_argument("-w","--num_workers",type=int, default=1, help="number of parallel workers for cases (default: auto-detect CPU cores)")
+    parser.add_argument("-ws","--weighted_sampling",dest="weighted_sampling",action="store_true", help="weighted sampling")
     parser.add_argument("-spfr","--samp_from_prob_map_ratio",type=float, default=0.5, help="sample from prob map ratio")
+    parser.add_argument("-num_hops","--num_hops",type=int, default=5, help="number of hops")
+    parser.set_defaults(is_start_goal_discrete=True)
     args = parser.parse_args()
     
     
@@ -60,11 +69,15 @@ if __name__ == "__main__":
             "max_edge_len": args.max_edge_len,
             "num_graph_samples": args.num_graph_samples,
             "road_map_type": args.road_map_type,
+            "road_map_type_gt": args.road_map_type_gt,
+            "agent_velocity": args.agent_velocity,
             "target_space": args.target_space,
             "generate_new_graph": args.generate_new_graph,
+            "graph_file_name": args.graph_file_name,
             "is_start_goal_discrete": args.is_start_goal_discrete,
             "weighted_sampling": args.weighted_sampling,
             "samp_from_prob_map_ratio": args.samp_from_prob_map_ratio,
+            "num_hops": args.num_hops,
         }
     for file_path in folder_path:
         generate_graph_samples(file_path,config,num_workers=num_workers)

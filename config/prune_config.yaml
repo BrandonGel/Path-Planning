@@ -1,0 +1,20 @@
+prune_gnn: true
+prune_mode: null
+prune_std_scale: 0.0
+prune_value: 0.5
+k_hop: 0
+threshold_scale: 1.0
+
+# prune_gnn: true
+# prune_mode: mean
+# prune_std_scale: null
+# prune_value: null
+# k_hop: -1
+# threshold_scale: 1.0
+
+# prune_gnn: false
+# prune_mode: mean
+# prune_std_scale: 0.0
+# prune_value: 0.5
+# k_hop: -1
+# threshold_scale: 1.0

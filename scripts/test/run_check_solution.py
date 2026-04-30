@@ -109,7 +109,7 @@ if __name__ == "__main__":
     filtered_sol_files = []
     for f in all_sol_files:
         # Solver directory is the parent of the solution file
-        solver_name = f.parent.name
+        solver_name = f.parent.parent.name
         if solver_filter is not None and solver_name != solver_filter:
             continue
         filtered_sol_files.append(f)
@@ -181,3 +181,14 @@ if __name__ == "__main__":
             handle_result(result, verbose=verbose)
 
     print(f"Finished checking. Total anomalies: {len(anomalies)}")
+    for anomaly in anomalies:
+        print(f"Anomaly detected for {anomaly[0]}")
+        print(f"Anomaly details:")
+        for key, value in anomaly[1].items():
+            if type(value) == dict:
+                print(f"{key}:")
+                for k, v in value.items():
+                    print(f"  {k}: {v}")
+            else:
+                print(f"{key}: {value}")
+        print("--------------------------------")

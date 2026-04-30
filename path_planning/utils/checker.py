@@ -22,6 +22,9 @@ def check_velocity_anomaly(solution,is_using_constant_speed: bool = False,verbos
         t_diff = np.diff(path[:,0], axis=0)
         v_diff = diff[t_diff > 1e-10] / t_diff[t_diff > 1e-10].reshape(-1,1)
         speed = np.linalg.norm(v_diff, axis=1)
+        if speed.size == 0:
+            # No motion segments for this agent (e.g., start==goal), so nothing to validate.
+            continue
 
         median_speed = np.median(speed)
         if is_using_constant_speed and np.any(speed-median_speed> 1e-9) :
@@ -152,7 +155,6 @@ def check_collision(solution, r, verbose: bool = True):
                 g_start = t_start + local_start
                 g_end = t_start + local_end
                 pair_intervals.append((g_start, g_end,t_start, t_end))
-                no_collision = False
 
             # Optionally merge overlapping/adjacent intervals for this pair
             if pair_intervals:

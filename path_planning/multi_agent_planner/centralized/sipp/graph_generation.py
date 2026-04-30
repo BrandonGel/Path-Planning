@@ -1,11 +1,7 @@
-import argparse
-import yaml
-from bisect import bisect
 from path_planning.common.environment.map.graph_sampler import GraphSampler
 from path_planning.common.environment.node import Node
 from typing import Any, List, Tuple
 import numpy as np
-from collections import deque
 
 class State(object):
     def __init__(self, position=(-1,-1), t=0, interval=(0,float('inf'))):
@@ -101,6 +97,27 @@ class SippNode(object):
                 j += 1
         self.interval_list = result
 
+# Used for only when the agent is moving on an edge and not on a vertex
+class SippEdge(object):
+    def __init__(self):
+        self.unsafe_interval_list = []
+
+    def add_unsafe_interval(self, t1, t2):
+        self.unsafe_interval_list.append((t1, t2))
+
+    def get_unsafe_intervals(self, t1,t2):
+        unsafe_interval_list = []
+        for ii in range(len(self.unsafe_interval_list)):    
+            t1_unsafe, t2_unsafe  = self.unsafe_interval_list[ii]
+            if t1_unsafe <= t2 and t1 <= t2_unsafe:
+                unsafe_interval_list.append((t1_unsafe, t2_unsafe))
+        return unsafe_interval_list
+
+    def is_in_unsafe_interval(self, t1, t2):
+        for t1_unsafe, t2_unsafe in self.unsafe_interval_list:
+            if t1_unsafe <= t2 and t1 <= t2_unsafe:
+                return True
+        return False
 
 class SippGraph(object):
     def __init__(self, graph_map: GraphSampler,dynamic_obstacles:dict = {},radius:float = 0.0,velocity:float = 0.0,use_constraint_sweep:bool = True, heuristic_type: str = 'manhattan',time_limit: float | None = None, max_iterations: int | None = None,verbose: bool = False):
@@ -108,6 +125,10 @@ class SippGraph(object):
         self.dyn_obstacles = {}
         self.sipp_graph = {}
         if radius > 0:
+            # Radius-based SIPP always relies on constraint sweep queries.
+            # Force-enable the graph flag to prevent get_constraint_sweep returning None.
+            if hasattr(self.graph_map, "use_constraint_sweep") and not self.graph_map.use_constraint_sweep:
+                self.graph_map.use_constraint_sweep = True
             self.graph_map.set_constraint_sweep()
         self.radius = radius
         self.velocity = velocity
@@ -120,7 +141,6 @@ class SippGraph(object):
         self.time_limit = time_limit if time_limit is not None and time_limit > 0 else float('inf')
         self.max_iterations = max_iterations if max_iterations is not None and max_iterations > 0 else 1
         self.verbose = verbose
-        self.time_limit = time_limit
         self.total_time = 0
         self.total_iterations = 0
 
@@ -135,8 +155,8 @@ class SippGraph(object):
             src_idx, tgt_idx = edge
             src_pos = self.graph_map.nodes[src_idx].current
             tgt_pos = self.graph_map.nodes[tgt_idx].current
-            self.sipp_graph[(src_pos, tgt_pos)] = SippNode()
-            self.sipp_graph[(tgt_pos, src_pos)] = SippNode()
+            self.sipp_graph[(src_pos, tgt_pos)] = SippEdge()
+            self.sipp_graph[(tgt_pos, src_pos)] = SippEdge()
 
     def init_intervals(self,dyn_obstacles:dict = {}):
         if not dyn_obstacles or len(dyn_obstacles) == 0: return
@@ -156,8 +176,8 @@ class SippGraph(object):
                         next_t = float('inf')
                         for vertex_pos, vertex_interval in overlapping_vertices.items():
                             self.sipp_graph[vertex_pos].split_interval(t, next_t)
-                        for edge_pos, edge_interval in overlapping_edges.items():
-                            self.sipp_graph[edge_pos].split_interval(t, next_t)
+                        # for edge_pos, edge_interval in overlapping_edges.items():
+                        #     self.sipp_graph[edge_pos].split_interval(t, next_t)
                         continue
                     else:
                         next_location = schedule[i + 1]
@@ -170,10 +190,12 @@ class SippGraph(object):
                         t2 = t+t_end 
                         self.sipp_graph[vertex_pos].split_interval(t1, t2)
                     for edge_pos, edge_interval in overlapping_edges.items():
-                        t_start,t_end = edge_interval
-                        t1 = max(0,t+t_start)
-                        t2 = max(0,t+t_end)
-                        self.sipp_graph[edge_pos].split_interval(t1, t2)
+                        t_start,t_end,p1,p2 = edge_interval
+                        self.sipp_graph[edge_pos].add_unsafe_interval(t+t_start, t+t_end, p1, p2, dyn_name)
+                        # t_start,t_end = edge_interval
+                        # t1 = max(0,t+t_start)
+                        # t2 = max(0,t+t_end)
+                        # self.sipp_graph[edge_pos].split_interval(t1, t2)
                 else:
                     t1 = t
                     t2 = t1 + 1 if not last_t else float('inf')
@@ -184,13 +206,6 @@ class SippGraph(object):
     def update_intervals(self,plans: List[List[State]] | List[State] | State,action_costs: List[List[Tuple[float,float]]] | List[Tuple[float,float]] | Tuple[float,float],dyn_names: List[str]):
         if not plans or len(plans) == 0: return
         for plan,action_cost,dyn_name in zip(plans,action_costs,dyn_names):
-            # dyn_plan = []
-            # for i in range(len(plan)):
-            #     dyn_plan.append(State(position=plan[i].position, t=plan[i].time))
-            #     if action_cost[i][0] > 0:
-            #         dyn_plan.append(State(position=plan[i].position, t=plan[i].time + action_cost[i][0]))
-            # self.dyn_obstacles[dyn_name] = dyn_plan
-            # for location in schedule:
             for i in range(len(plan)):
                 location = plan[i]
                 position = location.position
@@ -205,9 +220,7 @@ class SippGraph(object):
                         for vertex_pos, vertex_interval in overlapping_vertices.items():
                             self.sipp_graph[vertex_pos].split_interval(t, next_t)
                         for edge_pos, edge_interval in overlapping_edges.items():
-                            t_start,t_end = edge_interval
-                            t1 = max(0,t+t_start)
-                            self.sipp_graph[edge_pos].split_interval(t1, next_t)
+                            self.sipp_graph[edge_pos].add_unsafe_interval(t, float('inf'))
                         continue
                     
                     # Intermediate time step between two locations
@@ -215,18 +228,13 @@ class SippGraph(object):
                     next_position = next_location.position
                     next_t = next_location.time
                     wait_time, move_time = action_cost[i]
-                    if wait_time:
+                    if wait_time > 1e-10:
                         t0 = t+wait_time
                         overlapping_vertices,overlapping_edges = self._get_constraint_sweep_cached(position, position,self.velocity, 2*self.radius)
                         for vertex_pos, vertex_interval in overlapping_vertices.items():
                             self.sipp_graph[vertex_pos].split_interval(t, t0)
                         for edge_pos, edge_interval in overlapping_edges.items():
-                            t_start,t_end = edge_interval
-                            t1 = max(0,t+t_start)
-                            t2 = max(0,t0)                        
-                            if t1 == 0 and t2 == 0:
-                                continue
-                            self.sipp_graph[edge_pos].split_interval(t1, t2)
+                            self.sipp_graph[edge_pos].add_unsafe_interval(t, t0)
                     else:
                         t0 = t
                     overlapping_vertices,overlapping_edges = self._get_constraint_sweep_cached(position, next_position,self.velocity, 2*self.radius)
@@ -237,11 +245,8 @@ class SippGraph(object):
                         self.sipp_graph[vertex_pos].split_interval(t1, t2)
                     for edge_pos, edge_interval in overlapping_edges.items():
                         t_start,t_end = edge_interval
-                        t1 = max(0,t0+t_start)
-                        t2 = max(0,t0+t_end)                        
-                        if t1 == 0 and t2 == 0:
-                            continue
-                        self.sipp_graph[edge_pos].split_interval(t1, t2)
+                        self.sipp_graph[edge_pos].add_unsafe_interval(t0+t_start, t0+t_end)
+
                     
                 else:
                     t1 = t
@@ -255,8 +260,6 @@ class SippGraph(object):
         return not self.graph_map.in_collision_point(position)
 
     def get_valid_neighbours(self, position):
-        if position in self._valid_neighbours_cache:
-            return self._valid_neighbours_cache[position]
         neighbors = []
         node = Node(tuple(position))
         nodes = self.graph_map.get_neighbors(node)
@@ -265,7 +268,6 @@ class SippGraph(object):
         for node in nodes:
             if self.is_valid_position(node.current):
                 neighbors.append(node.current)
-        self._valid_neighbours_cache[position] = neighbors
         return neighbors
 
     def _get_constraint_sweep_cached(self, p1, p2,v, r):

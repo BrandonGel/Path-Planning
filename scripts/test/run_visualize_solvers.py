@@ -7,7 +7,7 @@ Examples:
   python scripts/test/run_visualize_solvers.py -s benchmark/test
   python scripts/test/run_visualize_solvers.py -s benchmark/test -y path/to/config.yaml -cm first_n -cn 2 -rmt grid -solver lacam
 """
-from path_planning.data_generation.dataset_ground_truth import (
+from path_planning.data_generation.dataset_ground_truth_solve import (
     create_path_parameter_directory,
     create_map,
 )
@@ -58,42 +58,17 @@ if __name__ == "__main__":
     parser.add_argument("-ps", "--specific_permutations", type=int, nargs="+", default=[0, 5, 10], help="specific permutation indices if permutation_mode=specific")
     parser.add_argument("-rmt", "--road_map_type", type=str, default="all", choices=["all", "grid", "prm", "planar"], help="road map type to visualize (all = every type under case)")
     parser.add_argument("-solver", "--solver", type=str, default="all", choices=["all", "cbs", "icbs", "lacam", "lacam_random"], help="solver to visualize (all = every solver under perm)")
-    parser.add_argument("-sh", "--show", type=bool, default=False, help="show the matplotlib figure")
-    parser.add_argument("-ss", "--show_static", type=bool, default=True, help="save static paths.png")
-    parser.add_argument("-sa", "--show_animation", type=bool, default=False, help="save animation.gif")
+    parser.add_argument("-sh", "--show", action="store_true", help="show the matplotlib figure")
+    parser.add_argument("-ss", "--show_static", dest="show_static", action="store_true", help="save static paths.png")
+    parser.add_argument("--no-show-static", dest="show_static", action="store_false", help="disable static path output")
+    parser.add_argument("-sa", "--show_animation", action="store_true", help="save animation.gif")
+    parser.add_argument("-cfg","--config",type=str, default='config/map.yaml', help="config file")
     parser.add_argument("-w", "--num_workers", type=int, default=None, help="number of parallel workers")
     args = parser.parse_args()
 
-    if isinstance(args.bounds, list):
-        if len(args.bounds) == 2:
-            bounds = [[0, args.bounds[1]], [0, args.bounds[0]]]
-        elif len(args.bounds) == 3:
-            bounds = [[0, args.bounds[1]], [0, args.bounds[0]], [0, args.bounds[2]]]
-        elif len(args.bounds) == 4:
-            bounds = [[args.bounds[0], args.bounds[1]], [args.bounds[2], args.bounds[3]]]
-        elif len(args.bounds) == 6:
-            bounds = [
-                [args.bounds[0], args.bounds[1]],
-                [args.bounds[2], args.bounds[3]],
-                [args.bounds[4], args.bounds[5]],
-            ]
-        else:
-            raise ValueError(f"Invalid bounds: {args.bounds}")
-    else:
-        bounds = args.bounds
-
-    base_path = Path(args.path)
-    if args.config != "":
-        with open(args.config, "r") as f:
-            config = yaml.load(f, Loader=yaml.FullLoader)
-    else:
-        config = {
-            "bounds": bounds,
-            "resolution": args.resolution,
-            "nb_agents": args.nb_agents,
-            "nb_obstacles": args.nb_obstacles,
-            "nb_permutations": args.nb_permutations,
-        }
+    with open(args.config, "r") as f:
+        config = yaml.load(f, Loader=yaml.FullLoader)
+    base_path = Path(config['path'])
     path = create_path_parameter_directory(base_path, config, dump_config=False)
     if not path.exists():
         print(f"Path {path} does not exist")
