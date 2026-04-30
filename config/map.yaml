@@ -1,0 +1,32 @@
+# Map config defaults (see path_planning.utils.util.set_map_config)
+
+seed: 42
+path: null
+bounds: [[0, 32.0], [0, 32.0]]
+nb_agents: 4
+nb_obstacles: 0.1
+resolution: 1.0
+agent_radius: 0.0
+agent_velocity: 0.0
+num_cases: 1
+nb_permutations: 64
+nb_permutations_tries: 128
+time_limit: 60
+max_iterations: 10000
+mapf_solver_name: cbs
+road_map_type: grid
+solve_till_success: false
+use_discrete_space: true
+generate_new_graph: true
+num_samples: 0  # used for sample_num when args.num_samples not set
+num_neighbors: 4.0
+min_edge_len: 1.0e-10
+max_edge_len: 1.1
+heuristic_type: manhattan
+is_start_goal_discrete: true
+weighted_sampling: true
+samp_from_prob_map_ratio: 0.5
+num_graph_samples: 1
+target_space: convolution_binary
+num_workers: null
+verbose: false

@@ -1,0 +1,92 @@
+seed: 42
+evaluator:
+  loss:
+    mse:
+      weight: 1.0
+      args:
+        - null
+    bce:
+      weight: 1.0
+      args:
+        - null
+    dice:
+      weight: 1.0
+      args:
+        - null
+    kld:
+      weight: 1.0
+      args:
+        - null
+    focal:
+      weight: 1.0
+      args:
+        alpha: 0.25
+        gamma: 2
+    laplacian:
+      weight: 0.01
+      args:
+        edge_types: 
+          - !!python/tuple [node, to, node]
+        use_edge_weight: False
+    graphsage_unsupervised:
+      weight: 1.0
+      args:
+        edge_types: 
+          - !!python/tuple [node, to, node]
+  model:
+    type: transformer
+    node_in_channels: -1
+    node_out_channels: 1
+    num_mlp_start_layers: 1
+    node_mlp_start_channels: 64
+    num_gnn_blocks: 3
+    gnn_hidden_channels: 16
+    num_mlp_end_layers: 2
+    node_mlp_end_channels: 32
+    edge_in_channels: -1
+    edge_use_mlp_start: True
+    edge_mlp_start_channels: 16
+    num_heads: 4
+    concat: True
+    residual: False
+    dropout: 0.0
+    use_edge_dim: True
+    activation_function: leaky_relu
+    to_hetero_aggr: sum
+    pooling_function: None
+  optimizer:
+  type: adamw
+  lr: 0.0001
+  weight_decay: 0.0005
+threshold:
+  use: false
+  threshold_alpha: 1.0
+  loss:
+  model:
+  optimizer:
+device:
+  compile: false
+  compile_dynamic: true
+train:
+  batch_size: 128
+  test_size: 0.1
+  num_epochs: 2500
+  resume_epoch: 0
+  save_epoch: 100
+  verbose_epoch: 10
+  save_folder: 'logs'
+  load_folder: 'logs/gatv2_compile/wandb/run-20260217_053355-gm2raqbw/files/model'
+  gradient_clip_val: 5.0
+  num_workers: 19
+  num_prune: 0
+dataset:
+  folder_path: 
+    - /home/bho36/Dropbox/Team_Path_Planning/brandon_graph_data/train/map32x32_resolution1.0/agents1_obst0.1
+    - /home/bho36/Dropbox/Team_Path_Planning/brandon_graph_data/train/map32x32_resolution1.0/agents2_obst0.1
+    - /home/bho36/Dropbox/Team_Path_Planning/brandon_graph_data/train/map32x32_resolution1.0/agents4_obst0.1
+  load_file: null
+  save_file: null
+  config:
+    use_discrete_space: false
+    road_map_type: 'prm'
+    target_space: 'convolution_binary'
