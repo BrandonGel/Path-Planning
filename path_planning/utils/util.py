@@ -10,7 +10,7 @@ import os
 import torch
 import argparse
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 import math
 import random
 from multiprocessing import cpu_count
@@ -71,16 +71,22 @@ def convert_grid_to_yaml(env: pmp.common.Grid, agents: list = [], filename: str 
     # Ensure all values are floats
     bounds = [[float(b) for b in bound] for bound in bounds]
 
-    # Convert the obstacle_map to . and T
-    obstacles =  np.stack(np.where(env.type_map.data == TYPES.OBSTACLE)).T
-    obstacles = obstacles.tolist()
-    
+    # Convert obstacle grid indices to world-coordinate centers (coordinate contract:
+    # YAML always stores world coords so the file is resolution-portable).
+    obstacle_indices = np.stack(np.where(env.type_map.data == TYPES.OBSTACLE)).T
+    obstacles = [
+        [float(x) for x in np.asarray(env.map_to_world(tuple(int(v) for v in idx))).reshape(-1)]
+        for idx in obstacle_indices
+    ]
+    obs_size = getattr(env, "obs_size", 0.5)
+
     # Prepare YAML data structure
     yaml_data = {
         'map': {
             'dimensions': dimensions,
             'bounds': bounds,
             'resolution': env.resolution,
+            'obs_size': float(obs_size),
             'obstacles': obstacles
         },
         'agents': agents
@@ -95,6 +101,92 @@ def convert_grid_to_yaml(env: pmp.common.Grid, agents: list = [], filename: str 
         os.makedirs(os.path.dirname(filename))
     with open(filename, 'w') as f:
         yaml.dump(yaml_data, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
+
+def obstacles_world_to_grid(map_: GraphSampler | Grid, obstacles_world, obs_size: float) -> np.ndarray:
+    """
+    Rasterize world-frame obstacle centers into grid/map indices.
+
+    Each obstacle is interpreted as an axis-aligned hypercube centered at the
+    given world coordinate with side length ``obs_size`` (world units).
+    """
+    if obstacles_world is None or len(obstacles_world) == 0:
+        return np.empty((0, len(map_.shape)), dtype=int)
+    dim = len(map_.shape)
+    bounds = np.asarray(map_.bounds, dtype=float)
+    resolution = float(map_.resolution)
+    half = max(float(obs_size), 0.0) / 2.0
+    obstacle_cells = set()
+    for center in obstacles_world:
+        c = np.asarray(center, dtype=float).reshape(-1)
+        if c.size != dim:
+            continue
+        axis_ranges = []
+        for d in range(dim):
+            low = c[d] - half
+            high = c[d] + half
+            # If obs_size is zero, keep a single discrete cell at center.
+            if high <= low:
+                idx = int(np.floor((c[d] - bounds[d, 0]) / resolution + 1e-9))
+                start_idx = idx
+                end_idx = idx + 1
+            else:
+                start_idx = int(np.floor((low - bounds[d, 0]) / resolution + 1e-9))
+                end_idx = int(np.ceil((high - bounds[d, 0]) / resolution - 1e-9))
+            start_idx = max(0, start_idx)
+            end_idx = min(int(map_.shape[d]), max(start_idx + 1, end_idx))
+            axis_ranges.append(range(start_idx, end_idx))
+        for cell in np.array(np.meshgrid(*axis_ranges)).T.reshape(-1, dim):
+            obstacle_cells.add(tuple(int(x) for x in cell.tolist()))
+    if not obstacle_cells:
+        return np.empty((0, dim), dtype=int)
+    return np.asarray(sorted(obstacle_cells), dtype=int)
+
+
+def validate_obstacle_map_config(
+    map_: "GraphSampler | Grid",
+    obstacles_world,
+    obs_size: float,
+) -> None:
+    """
+    Validate that obstacle world positions align to grid cell centers and that
+    obs_size is non-negative.
+
+    Raises ValueError if any obstacle center does not snap to a grid cell for the
+    map's resolution. Emits a warning (does not raise) when obs_size is positive
+    but smaller than one resolution step (footprint covers < 1 cell per side).
+    """
+    import warnings
+
+    resolution = float(map_.resolution)
+    bounds = np.asarray(map_.bounds, dtype=float)
+
+    if obs_size < 0:
+        raise ValueError(f"obs_size must be non-negative, got {obs_size}")
+    if 0 < obs_size < resolution:
+        warnings.warn(
+            f"obs_size={obs_size} < resolution={resolution}: obstacle footprint covers "
+            f"less than one cell per side. Consider obs_size >= {resolution}.",
+            stacklevel=2,
+        )
+
+    if obstacles_world is None:
+        return
+    # Valid positions are cell origins (k * resolution) or cell centers
+    # ((k + 0.5) * resolution), both of which are multiples of resolution/2.
+    # Cap at 0.5 so fine obstacles (0.5-spaced) are accepted in coarse grids
+    # (resolution > 1.0) — obstacles_world_to_grid merges them into coarse cells.
+    half_res = min(resolution / 2.0, 0.5)
+    for center in obstacles_world:
+        c = np.asarray(center, dtype=float).reshape(-1)
+        for d in range(len(c)):
+            frac = (c[d] - bounds[d, 0]) / half_res
+            if abs(frac - round(frac)) > 1e-6:
+                raise ValueError(
+                    f"Obstacle center {list(float(x) for x in c)} does not align to a "
+                    f"grid cell with resolution={resolution} "
+                    f"(dim {d}: offset from nearest half-step={frac - round(frac):.2e})"
+                )
+
 
 def read_grid_from_yaml(filename: str):
     """
@@ -111,9 +203,12 @@ def read_grid_from_yaml(filename: str):
     dimensions = yaml_data['map']['dimensions'] if 'dimensions' in yaml_data['map'] else [0, 0]
     bounds = yaml_data['map']['bounds'] if 'bounds' in yaml_data['map'] else [[0, dim] for dim in dimensions]
     resolution = yaml_data['map']['resolution'] if 'resolution' in yaml_data['map'] else 1.0
-    obstacles = np.array(yaml_data['map']['obstacles']) if 'obstacles' in yaml_data['map'] else []
+    obstacles_world = np.array(yaml_data['map']['obstacles']) if 'obstacles' in yaml_data['map'] else []
+    obs_size = yaml_data.get("obs_size", yaml_data.get("map", {}).get("obs_size", 0.5))
     
     env = Grid(bounds=bounds, resolution=resolution)
+    validate_obstacle_map_config(env, obstacles_world, obs_size)
+    obstacles = obstacles_world_to_grid(env, obstacles_world, obs_size)
     if len(dimensions) == 2:
         env.type_map[obstacles[:,0], obstacles[:,1]] = TYPES.OBSTACLE 
     elif len(dimensions) == 3:
@@ -125,6 +220,12 @@ def read_grid_from_yaml(filename: str):
 def read_graph_sampler_from_yaml(filename: str,use_discrete_space: bool = True,graph_file: str = None, args: dict = {}):
     """
     Read a YAML file and recreate a GraphSampler environment.
+
+    ``map.obstacles`` in the YAML are world-frame obstacle centers. They are
+    rasterized into grid indices before applying to the map. Agent positions are
+    not applied here; load agents via :func:`read_agents_from_yaml` and convert with
+    :func:`agents_yaml_to_roadmap_frame` before ``set_start`` / ``set_goal`` when needed.
+
     Args:
         filename: The filename of the YAML file to read.
     Returns:
@@ -137,11 +238,14 @@ def read_graph_sampler_from_yaml(filename: str,use_discrete_space: bool = True,g
     dimensions = yaml_data['map']['dimensions'] if 'dimensions' in yaml_data['map'] else [0, 0]
     bounds = yaml_data['map']['bounds'] if 'bounds' in yaml_data['map'] else [[0, dim] for dim in dimensions]
     resolution = yaml_data['map']['resolution'] if 'resolution' in yaml_data['map'] else 1.0
-    obstacles = np.array(yaml_data['map']['obstacles']) if 'obstacles' in yaml_data['map'] else []
+    obstacles_world = np.array(yaml_data['map']['obstacles']) if 'obstacles' in yaml_data['map'] else []
+    obs_size = yaml_data.get("obs_size", yaml_data.get("map", {}).get("obs_size", 0.5))
     
     
     env = GraphSampler(bounds=bounds, resolution=resolution,start=[],goal=[],use_discrete_space=use_discrete_space)
     if graph_file is None:
+        validate_obstacle_map_config(env, obstacles_world, obs_size)
+        obstacles = obstacles_world_to_grid(env, obstacles_world, obs_size)
         if len(dimensions) == 2 or len(dimensions) == 3:
             env.set_obstacles(obstacles)
         else:
@@ -170,14 +274,82 @@ def read_map_from_yaml(filename: str):
 def read_agents_from_yaml(filename: str):
     """
     Read a YAML file and recreate a list of agents.
+
+    Coordinate contract (ground-truth pipeline): each agent's ``start`` and ``goal``
+    are **world coordinates** (same units as ``map.bounds`` / ``map.resolution``).
+    Obstacle positions live under ``map.obstacles`` as **world-coordinate centers**
+    and are rasterized by map readers.
+
     Args:
         filename: The filename of the YAML file to read.
     Returns:
-        agents: A list of agents.
+        agents: A list of agent dicts (``name``, ``start``, ``goal``).
     """
     with open(filename, 'r') as yaml_file:
         yaml_data = yaml.load(yaml_file, Loader=yaml.FullLoader)
     return yaml_data['agents']
+
+
+def read_agents_for_map(map_yaml: str, *, fallback_agents_yaml: Optional[str] = None) -> List[dict]:
+    """
+    Load ``agents`` from the same YAML as the map when present and non-empty;
+    otherwise load from ``fallback_agents_yaml`` (e.g. base map with agent definitions).
+
+    Args:
+        map_yaml: Path to map YAML (must contain a top-level ``map`` and optionally ``agents``).
+        fallback_agents_yaml: If the map file has no agents, read this file instead.
+
+    Returns:
+        List of agent dicts suitable for :func:`read_graph_sampler_from_yaml` workflow.
+    """
+    with open(map_yaml, "r") as yaml_file:
+        yaml_data = yaml.load(yaml_file, Loader=yaml.FullLoader)
+    agents = yaml_data.get("agents")
+    if agents:
+        return agents
+    if fallback_agents_yaml:
+        return read_agents_from_yaml(fallback_agents_yaml)
+    return []
+
+
+def _coord_to_tuple(v, *, as_int: bool) -> tuple:
+    """Normalize a length-D coordinate from list/ndarray/tuple to a fixed tuple."""
+    arr = np.asarray(v, dtype=np.float64 if not as_int else np.int64).reshape(-1)
+    if as_int:
+        return tuple(int(x) for x in arr.tolist())
+    return tuple(float(x) for x in arr.tolist())
+
+
+def agents_yaml_to_roadmap_frame(map_: GraphSampler, agents: List[dict]) -> List[dict]:
+    """
+    Convert agent ``start`` / ``goal`` from input YAML (world coordinates) into the
+    frame expected by ``GraphSampler`` and MAPF solvers.
+
+    - If ``map_.use_discrete_space`` is True: world → grid indices via
+      ``world_to_map(..., discrete=True)``.
+    - Otherwise: pass world coordinates through unchanged (continuous roadmap).
+
+    Args:
+        map_: Constructed ``GraphSampler`` for the instance (bounds/resolution set).
+        agents: Agent dicts as returned by :func:`read_agents_from_yaml`.
+
+    Returns:
+        New list of agent dicts with ``start`` / ``goal`` in roadmap-native coordinates.
+    """
+    out: List[dict] = []
+    discrete = getattr(map_, "use_discrete_space", True)
+    for a in agents:
+        name = a.get("name", "agent")
+        if discrete:
+            s = map_.world_to_map(_coord_to_tuple(a["start"], as_int=False), discrete=True)
+            g = map_.world_to_map(_coord_to_tuple(a["goal"], as_int=False), discrete=True)
+            s_t = _coord_to_tuple(s, as_int=True)
+            g_t = _coord_to_tuple(g, as_int=True)
+        else:
+            s_t = _coord_to_tuple(a["start"], as_int=False)
+            g_t = _coord_to_tuple(a["goal"], as_int=False)
+        out.append({"name": name, "start": s_t, "goal": g_t})
+    return out
 
 def to_builtin(obj):
     if isinstance(obj, dict):

@@ -6,6 +6,7 @@ bounds: [[0, 32.0], [0, 32.0]]
 nb_agents: 4
 nb_obstacles: 0.1
 resolution: 1.0
+obs_size: 0.5
 agent_radius: 0.0
 agent_velocity: 0.0
 num_cases: 1
@@ -23,6 +24,7 @@ num_neighbors: 4.0
 min_edge_len: 1.0e-10
 max_edge_len: 1.1
 heuristic_type: manhattan
+# Ignored for GNN graph gen: input.yaml agents are always in world coordinates.
 is_start_goal_discrete: true
 weighted_sampling: true
 samp_from_prob_map_ratio: 0.5

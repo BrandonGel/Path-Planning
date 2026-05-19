@@ -2,7 +2,11 @@
 Dataset generation for MAPF training using the ground truth dataset.
 """
 
-from path_planning.utils.util import read_graph_sampler_from_yaml, read_agents_from_yaml
+from path_planning.utils.util import (
+    read_graph_sampler_from_yaml,
+    read_agents_from_yaml,
+    agents_yaml_to_roadmap_frame,
+)
 import os
 import tempfile
 import numpy as np
@@ -252,7 +256,7 @@ def process_single_case_graphs(args: Tuple[Path, dict]) -> Tuple[bool, Path]:
     target_space = config["target_space"] if "target_space" in config else "binary"
     generate_new_graph = config["generate_new_graph"] if "generate_new_graph" in config else True
     agent_velocity = config["agent_velocity"] if "agent_velocity" in config else 0.0
-    is_start_goal_discrete = config["is_start_goal_discrete"] if "is_start_goal_discrete" in config else True
+    # ``is_start_goal_discrete`` in config is ignored: YAML agents are always world coords.
     graph_file_name = config["graph_file_name"] if "graph_file_name" in config else None
     agent_radius = config["agent_radius"] if "agent_radius" in config else 0.0
     resolution = config["resolution"] if "resolution" in config else 1.0
@@ -290,22 +294,15 @@ def process_single_case_graphs(args: Tuple[Path, dict]) -> Tuple[bool, Path]:
                 input_file, use_discrete_space=use_discrete_space
             )
             map_.set_inflation_radius(radius=agent_radius+np.sqrt(2)/2*resolution)
-            # Starts and Goals are assumed to be in grid space
             map_.set_parameters(
                 sample_num=num_samples,
                 num_neighbors=num_neighbors,
                 min_edge_len=min_edge_len,
                 max_edge_len=max_edge_len,
             )
-            if is_start_goal_discrete and not use_discrete_space:
-                start = [map_.map_to_world(agent["start"]) for agent in agents]
-                goal = [map_.map_to_world(agent["goal"]) for agent in agents]
-            elif not is_start_goal_discrete and use_discrete_space:
-                start = [map_.world_to_map(agent["start"],discrete=True) for agent in agents]
-                goal = [map_.world_to_map(agent["goal"],discrete=True) for agent in agents]
-            else:
-                start = [agent["start"] for agent in agents]
-                goal = [agent["goal"] for agent in agents]
+            agents_rt = agents_yaml_to_roadmap_frame(map_, agents)
+            start = [a["start"] for a in agents_rt]
+            goal = [a["goal"] for a in agents_rt]
             map_.set_start(start)
             map_.set_goal(goal)
 

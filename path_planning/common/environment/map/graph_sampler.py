@@ -31,6 +31,7 @@ class GraphSampler(Grid):
         self.goal = goal
         self.grid_points = []
         self.obstacles = []
+        self.obs_size = 0.5
         self.inflation_radius = 0.0
         self.sample_num = sample_num
         self.num_total_nodes = self.sample_num + len(self.start) + len(self.goal)
@@ -75,20 +76,14 @@ class GraphSampler(Grid):
         self.max_edge_length = max_edge_len
 
     def set_start(self, start):
-        if self.use_discrete_space:
-            start_pixel = start
-        else:
-            start_pixel = [self.world_to_map(s,discrete=True) for s in start]
         self.start = start
+        start_pixel = [self.world_to_map(s,discrete=True) for s in start]
         for s in start_pixel:
             self.type_map[tuple(s)] = TYPES.START
         
     def set_goal(self, goal):
-        if self.use_discrete_space:
-            goal_pixel = goal
-        else:
-            goal_pixel =  [self.world_to_map(g,discrete=True) for g in goal]
         self.goal = goal
+        goal_pixel =  [self.world_to_map(g,discrete=True) for g in goal]
         for g in goal_pixel:
             self.type_map[tuple(g)] = TYPES.GOAL
     
@@ -222,13 +217,29 @@ class GraphSampler(Grid):
         """
         Get the neighbors of a node.
         """
-        if self.road_map is None or node not in self.node_index_dict:
+        if self.road_map is None:
             return []
-        neighbors =  [self.nodes[i] for i in self.road_map[self.node_index_dict[node]]]
+        idx = None
+        if node in self.node_index_dict:
+            idx = self.node_index_dict[node]
+        else:
+            try:
+                if getattr(self, "sample_kd_tree", None) is not None:
+                    dist, nn = self.sample_kd_tree.query(
+                        np.asarray(getattr(node, "current"), dtype=float).reshape(1, -1), k=1
+                    )
+                    dist = float(dist.reshape(-1)[0])
+                    nn = int(nn.reshape(-1)[0])
+                    if dist <= 1e-6 and 0 <= nn < len(self.nodes):
+                        idx = nn
+            except Exception:
+                idx = None
+        if idx is None:
+            return []
+        neighbors = [self.nodes[i] for i in self.road_map[int(idx)]]
         if self.track_with_link:
             neighbors = [neighbor.link(node) for neighbor in neighbors]
         return neighbors
-
 
     def line_of_sight(self, p1: Tuple[float, ...], p2: Tuple[float, ...]) -> bool:
         """
@@ -460,7 +471,7 @@ class GraphSampler(Grid):
             pixels = [self.world_to_map(point,discrete=True) for point in points]
             for ii in range(self.sample_num):
                 if self.use_discrete_space:
-                    current = tuple(self.world_to_map(points[ii])) # Convert to discrete space but not into int
+                    current = tuple(self.map_to_world(self.world_to_map(points[ii]),discrete=True)) # Convert to discrete space but not into int
                 else:
                     current = tuple(points[ii])
                 node = Node(current,None,0,0)
@@ -483,34 +494,25 @@ class GraphSampler(Grid):
         if generate_grid_nodes:
             # Iterate through all grid points in the mesh
             # Get grid shape (number of cells in each dimension)
-            if hasattr(self, 'shape'):
-                grid_shape = self.shape
-            else:
-                # Fallback: calculate shape from bounds and resolution
-                bounds = np.array(self.bounds)
-                resolution = getattr(self, 'resolution', 1.0)
-                grid_shape = tuple(int((bounds[d][1] - bounds[d][0]) / resolution) for d in range(self.dim))
+            bounds = np.array(self.bounds)
+            resolution = getattr(self, 'resolution', 1.0)
+            grid_shape = tuple(int((bounds[d][1] - bounds[d][0]) / resolution) for d in range(self.dim))
             
             # Generate all grid coordinate combinations using itertools.product
-            grid_ranges = [range(grid_shape[d]) for d in range(self.dim)]
+            grid_ranges = [np.arange(grid_shape[d]) for d in range(self.dim)]
             
             # Iterate through all combinations of grid coordinates
             for grid_coords in product(*grid_ranges):
                 # Convert to tuple for indexing
-                grid_coords_tuple = tuple(grid_coords)
+                grid_coords_tuple = tuple([bounds[d,0]+resolution*grid_coords[d] for d in range(self.dim)])
                 
                 # Check if this grid cell is expandable (not in collision)
-                if self.is_expandable(grid_coords_tuple):
-                    # Adjust the world coordinates to avoid precision and rounding issues
-                    if self.use_discrete_space:
-                        current = grid_coords_tuple
-                    else:
-                        current =tuple(i for i in self.map_to_world(grid_coords_tuple))
-                    node = Node(current, None, 0, 0)
+                if self.is_expandable(grid_coords):
+                    node = Node(grid_coords_tuple, None, 0, 0)
                     nodes.append(node)
                     self.node_index_dict[node] = len(nodes) - 1
                     self.grid_nodes_index[node] = len(nodes)-1
-                    self.grid_points.append(current)
+                    self.grid_points.append(grid_coords_tuple)
         
         for start in self.start:
             node = Node(tuple(start),None,0,0)
@@ -847,7 +849,7 @@ class GraphSampler(Grid):
         for ii in range(len(points)):
             pos = points[ii]
             if self.use_discrete_space:
-                pixel = tuple(self.world_to_map(pos)) # Convert to discrete space but not into int
+                pixel = tuple(self.map_to_world(self.world_to_map(pos,discrete=True))) # Convert to discrete space but not into int
             else:
                 pixel = tuple(pos)
             node = Node(pos,None,0,0)
@@ -907,21 +909,43 @@ class GraphSampler(Grid):
 
     def set_constraint_sweep(self):
         self.constraint_sweep.set_graph([node.current for node in self.nodes],self.edges)
+        # Precompute tuples for fast per-index coordinate access — avoids the
+        # repeated `self.nodes[idx].current` attribute walk in the hot path.
+        self._node_current_tuples = [tuple(n.current) for n in self.nodes]
+        # Memoize the coordinate-converted sweep result so identical queries
+        # don't re-pay the set-comprehension cost on every CBS conflict check.
+        self._constraint_sweep_locations_cache = {}
 
     def get_constraint_sweep(self, p1: tuple[float,float], p2: tuple[float,float],v: float = 0.0, r: float = 0.5, use_interval: bool = False,get_time_interval: bool = False):
         if not self.use_constraint_sweep:
             return None
         if use_interval:
             overlapping_vertices,overlapping_edges = self.constraint_sweep.overlapping_interval_cgal(p1, p2,v, r,get_time_interval=get_time_interval)
+            node_tuples = getattr(self, "_node_current_tuples", None)
+            if node_tuples is None:
+                node_tuples = [tuple(n.current) for n in self.nodes]
             if get_time_interval:
-                vertices_interval = dict({self.nodes[vertex_index].current: vertex_interval for vertex_index, vertex_interval in overlapping_vertices.items()})
-                edges_interval = dict({(self.nodes[edge_idx[0]].current, self.nodes[edge_idx[1]].current): edge_interval for edge_idx, edge_interval in overlapping_edges.items()})
-                return vertices_interval,edges_interval
-            vertices_locations = set(self.nodes[vertex_index].current for vertex_index in overlapping_vertices)
-            edges_locations = set((self.nodes[edge_idx[0]].current, self.nodes[edge_idx[1]].current) for edge_idx in overlapping_edges)
-            return vertices_locations,edges_locations
-        overlapping_edges = self.constraint_sweep.overlapping_graph_elements_cgal(p1, p2,v, r)
-        edges_locations = set((self.nodes[edge_idx[0]].current, self.nodes[edge_idx[1]].current) for edge_idx in overlapping_edges)
+                vertices_interval = {node_tuples[vi]: iv for vi, iv in overlapping_vertices.items()}
+                edges_interval = {(node_tuples[e[0]], node_tuples[e[1]]): iv for e, iv in overlapping_edges.items()}
+                return vertices_interval, edges_interval
+            vertices_locations = set(node_tuples[vi] for vi in overlapping_vertices)
+            edges_locations = set((node_tuples[e[0]], node_tuples[e[1]]) for e in overlapping_edges)
+            return vertices_locations, edges_locations
+
+        cache = getattr(self, "_constraint_sweep_locations_cache", None)
+        if cache is not None:
+            cache_key = (p1, p2, v, r)
+            cached = cache.get(cache_key)
+            if cached is not None:
+                return cached
+
+        overlapping_edges = self.constraint_sweep.overlapping_graph_elements_cgal(p1, p2, v, r)
+        node_tuples = getattr(self, "_node_current_tuples", None)
+        if node_tuples is None:
+            node_tuples = [tuple(n.current) for n in self.nodes]
+        edges_locations = set((node_tuples[e[0]], node_tuples[e[1]]) for e in overlapping_edges)
+        if cache is not None:
+            cache[cache_key] = edges_locations
         return edges_locations
 
     def get_constraint_segment(self, p1a: Tuple[float, ...],p1b: Tuple[float, ...],p2a: Tuple[float, ...],p2b: Tuple[float, ...],v: float = 0.0,r: float = 0.5) -> bool:
@@ -1004,6 +1028,7 @@ class GraphSampler(Grid):
             "grid_points": self.grid_points,
             "nodes": self.nodes,
             "obstacles": self.obstacles,
+            "obs_size": self.obs_size,
             "inflation_radius": self.inflation_radius,
             "track_with_link": self.track_with_link,
             "road_map": self.road_map,
@@ -1032,8 +1057,9 @@ class GraphSampler(Grid):
 
         self.nodes = data["nodes"]
         self.obstacles = data["obstacles"]
+        self.obs_size = data["obs_size"] if "obs_size" in data else 0.5
         self.inflation_radius = data["inflation_radius"]
-        self.set_obstacles(self.obstacles)
+        self.set_obstacles(self.obstacles, self.obs_size)
         self.set_inflation_radius(self.inflation_radius)
         self.track_with_link = data["track_with_link"]
         self.grid_points = data["grid_points"]
@@ -1135,7 +1161,7 @@ class GraphSampler(Grid):
 
         def transform_pos(p: Tuple[float, ...]) -> Tuple[float, ...]:
             if self.use_discrete_space:
-                p_grid = tuple(int(round(float(v))) for v in p)
+                p_grid = tuple(self.world_to_map(p,discrete=True))
                 new_coords = rotate_grid_nd(p_grid)
                 return tuple(float(v) for v in new_coords)
             return transform_pos_continuous(p)

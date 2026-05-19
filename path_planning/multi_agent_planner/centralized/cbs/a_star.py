@@ -7,17 +7,19 @@ author: Ashwin Bose (@atb033)
 """
 import heapq
 from itertools import count
+
 class AStar():
     def __init__(self, env, max_iterations= -1):
         self.agent_dict = env.agent_dict
         self.admissible_heuristic = env.admissible_heuristic
         self.is_at_goal = env.is_at_goal
         self.get_neighbors = env.get_neighbors
+        self.get_step_cost = env.get_step_cost
         self.max_iterations = max_iterations if max_iterations > 0 or max_iterations is None else float("inf")
 
     def reconstruct_path(self, came_from, current):
         total_path = [current]
-        while current in came_from.keys():
+        while current in came_from:
             current = came_from[current]
             total_path.append(current)
         return total_path[::-1]
@@ -27,8 +29,6 @@ class AStar():
         low level search 
         """
         initial_state = self.agent_dict[agent_name]["start"]
-        step_cost = 1
-        
 
         closed_set = set()
         counter = count()
@@ -69,9 +69,9 @@ class AStar():
                 if neighbor in closed_set:
                     continue
                 
-                tentative_g_score = g_score.setdefault(current, float("inf"))  + step_cost
+                tentative_g_score = g_score[current] + self.get_step_cost(current, neighbor)
 
-                if neighbor not in open_set or tentative_g_score < g_score.setdefault(neighbor, float("inf")):
+                if neighbor not in open_set or tentative_g_score < g_score.get(neighbor, float("inf")):
                     came_from[neighbor] = current
                     g_score[neighbor] = tentative_g_score
                     f_score_neighbor = g_score[neighbor] + self.admissible_heuristic(neighbor, agent_name)

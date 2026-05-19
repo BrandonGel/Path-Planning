@@ -10,6 +10,7 @@ from typing import Tuple
 import numpy as np
 import time
 from path_planning.utils.checker import check_collision
+from path_planning.utils.util import agents_yaml_to_roadmap_frame
 
 def solve_mapf(map_, agents,mapf_solver_config:dict) -> Tuple[dict, float]:
     mapf_solver_name = mapf_solver_config['mapf_solver_name'].lower()
@@ -18,30 +19,71 @@ def solve_mapf(map_, agents,mapf_solver_config:dict) -> Tuple[dict, float]:
     time_limit = mapf_solver_config['time_limit']
     max_iterations = mapf_solver_config['max_iterations']
     heuristic_type = mapf_solver_config['heuristic_type']
+    # YAML stores world starts/goals. For GraphSampler-based solvers, we keep agents in
+    # the same world frame as map nodes (even in discrete mode where nodes lie on a grid).
+    if getattr(map_, "use_discrete_space", False):
+        agents_rt = agents
+    else:
+        agents_rt = agents_yaml_to_roadmap_frame(map_, agents)
+    # Low-level A* (inside CBS/ICBS) may need a larger budget than the high-level CBS iteration cap,
+    # especially once constraints are introduced (time-expanded state space).
+    try:
+        num_nodes = int(len(getattr(map_, "nodes", [])))
+    except Exception:
+        num_nodes = 0
+    low_level_astar_max_iterations = int(max(int(max_iterations), num_nodes * 5, 10000))
+    low_level_cap = mapf_solver_config.get("low_level_astar_max_iterations")
+    if low_level_cap is not None:
+        low_level_astar_max_iterations = min(low_level_astar_max_iterations, int(low_level_cap))
+
+    use_exact_collision_check = mapf_solver_config.get("use_exact_collision_check")
+    if use_exact_collision_check is not None and getattr(map_, "constraint_sweep", None) is not None:
+        map_.constraint_sweep.use_exact_collision_check = bool(use_exact_collision_check)
+
     if mapf_solver_name == 'cbs':
-        env = Environment(map_, agents, radius=agent_radius, use_constraint_sweep=True,heuristic_type=heuristic_type)
+        env = Environment(
+            map_,
+            agents_rt,
+            astar_max_iterations=low_level_astar_max_iterations,
+            radius=agent_radius,
+            use_constraint_sweep=True,
+            heuristic_type=heuristic_type,
+        )
         cbs = CBS(env,time_limit=time_limit,max_iterations=max_iterations,verbose=False)
         solution,solution_info = cbs.search()
     elif mapf_solver_name == 'icbs':
-        env = IEnvironment(map_, agents, radius=agent_radius, use_constraint_sweep=True,heuristic_type=heuristic_type)
+        env = IEnvironment(
+            map_,
+            agents_rt,
+            astar_max_iterations=low_level_astar_max_iterations,
+            radius=agent_radius,
+            use_constraint_sweep=True,
+            heuristic_type=heuristic_type,
+        )
         icbs = ICBS(env,time_limit=time_limit,max_iterations=max_iterations,verbose=False)
         solution, solution_info = icbs.search()
     elif mapf_solver_name == 'lacam':
-        starts,goals = set_starts_goals_config(map_.start,map_.goal)
+        starts, goals = set_starts_goals_config(
+            [a["start"] for a in agents_rt],
+            [a["goal"] for a in agents_rt],
+        )
         planner = LaCAM()
         solution_config = planner.solve(map_, starts, goals,seed=0,time_limit_ms=1000*time_limit,max_iterations=max_iterations,verbose=0)
         solution, solution_info = planner.get_solution_dict(solution_config)
     elif mapf_solver_name == 'lacam_random':
-        starts,goals = set_starts_goals_config(map_.start,map_.goal)
+        starts, goals = set_starts_goals_config(
+            [a["start"] for a in agents_rt],
+            [a["goal"] for a in agents_rt],
+        )
         planner = LaCAM_random()
         solution_config = planner.solve(map_, starts, goals,seed=0,time_limit_ms=1000*time_limit,max_iterations=max_iterations,verbose=0)
         solution, solution_info = planner.get_solution_dict(solution_config)
     elif mapf_solver_name == 'sipp':
         dynamic_obstacles = dict()
-        sipp_planner = SippPlanner(map_,dynamic_obstacles,agents,agent_radius,agent_velocity,heuristic_type=heuristic_type,time_limit=time_limit,max_iterations=max_iterations)
+        sipp_planner = SippPlanner(map_,dynamic_obstacles,agents_rt,agent_radius,agent_velocity,heuristic_type=heuristic_type,time_limit=time_limit,max_iterations=max_iterations)
         solution,solution_info = sipp_planner.compute_plan()
     elif mapf_solver_name == 'ccbs':
-        env = CCBS_Environment(map_,{}, agents, radius=agent_radius, velocity=agent_velocity, use_constraint_sweep=True,heuristic_type=heuristic_type)
+        env = CCBS_Environment(map_,{}, agents_rt, radius=agent_radius, velocity=agent_velocity, use_constraint_sweep=True,heuristic_type=heuristic_type)
         ccbs = CCBS(env,time_limit=time_limit,max_iterations=max_iterations,verbose=False)
         solution, solution_info = ccbs.search()
     else:
@@ -135,6 +177,8 @@ def summarize_solution(solution,solution_info,mapf_solver_config,map_):
     summary["time_limit"] = mapf_solver_config["time_limit"]
     summary["max_iterations"] = mapf_solver_config["max_iterations"]
     summary["heuristic_type"] = mapf_solver_config["heuristic_type"]
+    if mapf_solver_config.get("low_level_astar_max_iterations") is not None:
+        summary["low_level_astar_max_iterations"] = int(mapf_solver_config["low_level_astar_max_iterations"])
     summary["num_nodes"] = len(map_.nodes)
     summary["num_edges"] = len(map_.edges)
     return summary

@@ -13,7 +13,11 @@ from path_planning.data_generation.dataset_label import get_trajectory_map
 from path_planning.data_generation.dataset_util import *
 from multiprocessing import Pool, cpu_count
 from tqdm import tqdm
-from path_planning.utils.util import read_graph_sampler_from_yaml, read_agents_from_yaml
+from path_planning.utils.util import (
+    read_graph_sampler_from_yaml,
+    read_agents_from_yaml,
+    agents_yaml_to_roadmap_frame,
+)
 
 def load_and_visualize_case(perm_path: Path,graph_file: Path = None,mapf_solver_name: str = "cbs",road_map_type: str = "grid", agent_velocity: float = 0.0, show_static=True, show_animation=True,verbose=True):
     """
@@ -42,16 +46,18 @@ def load_and_visualize_case(perm_path: Path,graph_file: Path = None,mapf_solver_
     if not solution_data["success"]:
         print(f"Solution not successful: {solution_file}")
     
-    # Set agent positions
-    start = [agent['start'] for agent in agents]
-    goal = [agent['goal'] for agent in agents]
+    # Set agent positions (YAML world coords → roadmap frame for type_map)
+    agents_rt = agents_yaml_to_roadmap_frame(map_, agents)
+    start = [a["start"] for a in agents_rt]
+    goal = [a["goal"] for a in agents_rt]
     map_.set_start(start)
     map_.set_goal(goal)
-    
-    
+
+    n_obstacles = len(map_.obstacles) if getattr(map_, "obstacles", None) else 0
+
     # Print case info
     if verbose:
-        print(f"{solution_file.parent.parent.name} + {solution_file.name} | Agents: {len(agents)} | SoC: {solution_data['flowtime']} | Obstacles: {len(obstacles)}")
+        print(f"{solution_file.parent.parent.name} + {solution_file.name} | Agents: {len(agents)} | SoC: {solution_data['flowtime']} | Obstacles: {n_obstacles}")
     
     # Static visualization
     if show_static:
@@ -63,6 +69,10 @@ def load_and_visualize_case(perm_path: Path,graph_file: Path = None,mapf_solver_
         schedule = solution_data["schedule"]
         for agent_name, trajectory in schedule.items():
             path = np.array([[point['x'], point['y']] for point in trajectory])
+            if map_.use_discrete_space:
+                path = np.array(
+                    [map_.map_to_world((float(px), float(py))) for px, py in path]
+                )
             vis.plot_path(path)
 
         if hasattr(map_, "nodes") and hasattr(map_, "road_map") and map_.nodes and map_.road_map is not None:
