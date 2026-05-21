@@ -125,10 +125,22 @@ class Environment(SippBaseEnvironment):
         self.agent_dict = {}
         self.make_agent_dict()
         SippBaseEnvironment.__init__(self, graph_map, dynamic_obstacles,agents,radius,velocity,use_constraint_sweep,heuristic_type,time_limit,max_iterations,verbose)
-        assert radius > 0, "Radius must be greater than 0 for CCBS"
-        assert velocity > 0, "Velocity must be greater than 0 for CCBS"
+        assert radius >= 0, "Radius must be non-negative"
+        assert velocity >= 0, "Velocity must be non-negative"
         self.sipp = SIPP(self, sipp_max_iterations=sipp_max_iterations, verbose=verbose)
         self.collision_radius = (2 * radius) ** 2
+        # When radius == 0 the CGAL sweep returns empty sets (its filters use
+        # `d2 < r*r` with r==0 and `r - 1e-10` < 0). Substitute a tiny effective
+        # radius so the sweep still recognises exact positional matches, while
+        # check_collision keeps strict point-agent semantics via its own 1e-10
+        # epsilon. The substitute must be small enough that no two distinct
+        # vertices in the graph fall within it.
+        self._sweep_radius_eps = 1e-6
+        # CCBS-specific sweep cache: stores set-based (location-only) sweep
+        # results. Kept separate from SippGraph._constraint_sweep_cache, which
+        # stores dict-based (time-interval) results consumed by
+        # init_intervals/update_intervals.
+        self._constraint_sweep_locations_cache = {}
         self.constraints = Constraints()
         self.constraint_dict = {agent["name"]: Constraints() for agent in agents}
         self.t_buffer = 1 if radius == 0 else 1e-10
@@ -202,7 +214,10 @@ class Environment(SippBaseEnvironment):
         vel12 = velocity2 - velocity1
         a = np.dot(vel12, vel12)
         b = 2*np.dot(pos1a2a, vel12)
-        c = np.dot(pos1a2a, pos1a2a) - (self.radius*2)**2 + 1e-10
+        # Subtract a small epsilon so grazing contact (dist == 2r) is treated
+        # as a collision. This keeps detection conservative and consistent with
+        # path_planning.utils.checker.check_collision.
+        c = np.dot(pos1a2a, pos1a2a) - (self.radius*2)**2 - 1e-10
         d = b**2 - 4*a*c
 
         if a == 0:
@@ -227,20 +242,12 @@ class Environment(SippBaseEnvironment):
         return t1, t2, tmin
         
     def get_conflicts(self, solution,solution_action_cost,get_first_conflict: bool = True):
-        result = Conflict()
         conflicts = []
 
-        for agent in solution.keys():
-            plan = solution[agent]
-            action_cost = solution_action_cost[agent]
-            for i in range(len(plan) - 1):
-                position_1 = plan[i].position
-                position_2 = plan[i+1].position
-                action = action_cost[i]
-                wait_time, _ = action
-                if wait_time > 0:
-                    self._get_constraint_sweep_cached(position_1, position_1,self.velocity, 2*self.radius)
-                self._get_constraint_sweep_cached(position_1, position_2,self.velocity, 2*self.radius)
+        # NOTE: the constraint sweeps are computed lazily and memoized inside
+        # _get_constraint_sweep_locations_cached, so the pair loop below warms
+        # the cache on first use. A separate pre-warm pass would be pure
+        # overhead and has been removed.
 
         # Precompute per-agent arrays once (avoid recomputing for each pair)
         agent_data = {}
@@ -258,7 +265,13 @@ class Environment(SippBaseEnvironment):
                 vel_arr[:-1] = np.diff(pos_arr, axis=0)/denom[:-1]
             else:
                 vel_arr = np.zeros((0, pos_arr.shape[1]), dtype=np.float64)
-            agent_data[agent] = {"pos": pos_arr, "vel": vel_arr, "times": times, "ac": list(ac), "plan": plan}
+            # Axis-aligned bounding box of the agent's swept positions, used as
+            # a cheap broad-phase prune in the pairwise conflict loop below.
+            bbox_min = pos_arr.min(axis=0)
+            bbox_max = pos_arr.max(axis=0)
+            agent_data[agent] = {"pos": pos_arr, "vel": vel_arr, "times": times,
+                                 "ac": list(ac), "plan": plan,
+                                 "bbox_min": bbox_min, "bbox_max": bbox_max}
 
         for agent_1, agent_2 in combinations(solution.keys(), 2):
             d1 = agent_data[agent_1]
@@ -272,6 +285,14 @@ class Environment(SippBaseEnvironment):
             times_2 = d2["times"]
             all_t = sorted(set(times_1 + times_2))
             if len(all_t) < 2:
+                continue
+
+            # Broad-phase prune: if the agents' bounding boxes are separated by
+            # more than the collision diameter (2*radius) along any axis, the
+            # discs can never touch, so skip the whole pair.
+            diameter = 2 * self.radius
+            if (np.any(d1["bbox_min"] - d2["bbox_max"] > diameter) or
+                    np.any(d2["bbox_min"] - d1["bbox_max"] > diameter)):
                 continue
 
             t1_now_idx = 0
@@ -318,58 +339,15 @@ class Environment(SippBaseEnvironment):
                 # Get the overlapping vertices and edges for the two agents
                 overlapping_vertices_1_wait,overlapping_edges_1_wait = {},{}
                 if wait_cost_1 > 0:
-                    overlapping_vertices_1_wait,overlapping_edges_1_wait = self._get_constraint_sweep_cached(v1_now, v1_now,self.velocity, 2*self.radius)
-                overlapping_vertices_1_move,overlapping_edges_1_move = self._get_constraint_sweep_cached(v1_now, v1_next,self.velocity, 2*self.radius)
+                    overlapping_vertices_1_wait,overlapping_edges_1_wait = self._get_constraint_sweep_locations_cached(v1_now, v1_now,self.velocity, 2*self.radius)
+                overlapping_vertices_1_move,overlapping_edges_1_move = self._get_constraint_sweep_locations_cached(v1_now, v1_next,self.velocity, 2*self.radius)
                 overlapping_vertices_1 = [overlapping_vertices_1_wait,overlapping_vertices_1_move]
                 overlapping_edges_1 = [overlapping_edges_1_wait,overlapping_edges_1_move]
 
                 overlapping_vertices_2_wait,overlapping_edges_2_wait = {},{}
                 if wait_cost_2 > 0:
-                    overlapping_vertices_2_wait,overlapping_edges_2_wait = self._get_constraint_sweep_cached(v2_now, v2_now,self.velocity, 2*self.radius)
-                overlapping_vertices_2_move,overlapping_edges_2_move = self._get_constraint_sweep_cached(v2_now, v2_next,self.velocity, 2*self.radius)   
-                overlapping_vertices_2 = [overlapping_vertices_2_wait,overlapping_vertices_2_move]
-                overlapping_edges_2 = [overlapping_edges_2_wait,overlapping_edges_2_move]
-
-                # Get the time intervals for agent 1
-                t1_interval = []
-                if t_start < t1_moving_start:
-                    if t_end >= t1_moving_start:
-                        t1_interval = [(t1_start, t1_moving_start),(t1_moving_start, t_end)]
-                    else:
-                        t1_interval = [(t1_start, t1_moving_start),(t1_moving_start, t1_moving_start)]
-                else:
-                    t1_interval = [(t_start, t_start),(t_start, t_end)]
-
-                # Get the time intervals for agent 2
-                t2_interval = []
-                if t_start < t2_moving_start:
-                    if t_end >= t2_moving_start:
-                        t2_interval = [(t2_start, t2_moving_start),(t2_moving_start, t_end)]
-                    else:
-                        t2_interval = [(t2_start, t2_moving_start),(t2_moving_start, t2_moving_start)]
-                else:
-                    t2_interval = [(t_start, t_start),(t_start, t_end)]
-
-                for it1_idx, t1_int in enumerate(t1_interval):
-                    for it2_idx, t2_int in enumerate(t2_interval):
-                        if t1_int[0] == t1_int[1] or t2_int[0] == t2_int[1]:
-                            continue
-                        overlapping_vertices_1it = overlapping_vertices_1[it1_idx]
-                        overlapping_vertices_2it = overlapping_vertices_2[it2_idx]
-                        overlapping_edges_1it = overlapping_edges_1[it1_idx]
-                        overlapping_edges_2it = overlapping_edges_2[it2_idx]
-                    
-                        if it1_idx == 0 and it2_idx == 0:
-                            if v2_now not in overlapping_vertices_1it or v1_now not in overlapping_vertices_2it:
-                                continue
-
-                            collision_interval1 = (t_start, t_end)
-                            collision_interval2 = (t_start, t_end)
-
-                            result.type1 = Conflict.WAIT
-                            result.type2 = Conflict.WAIT
-                            result.agent_1 = agent_1
-                            result.agent_2 = agent_2
+                    overlapping_vertices_2_wait,overlapping_edges_2_wait = self._get_constraint_sweep_locations_cached(v2_now, v2_now,self.velocity, 2*self.radius)
+                overlapping_vertices_2_move,overlapping_edges_2_move = self._get_constraint_sweep_locations_cached(v2_now, v2_next,self.velocity, 2*self.radius)   
                 overlapping_vertices_2 = [overlapping_vertices_2_wait,overlapping_vertices_2_move]
                 overlapping_edges_2 = [overlapping_edges_2_wait,overlapping_edges_2_move]
 
@@ -611,10 +589,20 @@ class Environment(SippBaseEnvironment):
             solution_cost[agent] = local_cost
         return solution, solution_action_cost, solution_cost
 
-    def _get_constraint_sweep_cached(self, p1, p2,v, r):
-        """Cached wrapper for get_constraint_sweep to avoid duplicate queries."""
+    def _get_constraint_sweep_locations_cached(self, p1, p2, v, r):
+        """Cached set-based sweep query for CCBS conflict detection.
+
+        Returns (vertex_locations: set, edge_locations: set). Uses a dedicated
+        cache so it does not collide with the dict-returning
+        SippGraph._get_constraint_sweep_cached used by init/update_intervals.
+        """
         key = (p1, p2, v, r)
-        if key not in self._constraint_sweep_cache:
-            self._constraint_sweep_cache[key] = self.graph_map.get_constraint_sweep(p1, p2,v, r, use_interval=True,get_time_interval=False)
-        return self._constraint_sweep_cache[key]
+        cache = self._constraint_sweep_locations_cache
+        if key not in cache:
+            # For point agents (radius == 0 => r == 0) the CGAL sweep collapses
+            # to an empty result; substitute a tiny positive radius so vertices
+            # and edges at the exact swept positions are still returned.
+            r_query = r if r > 0 else self._sweep_radius_eps
+            cache[key] = self.graph_map.get_constraint_sweep(p1, p2, v, r_query, use_interval=True, get_time_interval=False)
+        return cache[key]
     

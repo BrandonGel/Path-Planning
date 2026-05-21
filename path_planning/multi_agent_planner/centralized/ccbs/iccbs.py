@@ -1,8 +1,10 @@
 """
-Conflict-based search for multi-agent path planning
+Improved Conflict-based search for multi-agent path planning
 author: Brandon Ho
 original author: Ashwin Bose (@atb033)
-description: This file implements the Conflict-based search algorithm for multi-agent path planning. Modified from the original implementation to work with the new common environment.
+description: This file implements the Improved Conflict-based search algorithm
+(cardinal-conflict prioritization + conflict bypassing) on top of the
+continuous CCBS high-level search.
 """
 
 import heapq
@@ -21,27 +23,33 @@ class ICCBS(CCBS):
         time_limit: float | None = None,
         max_iterations: int | None = None,
         verbose: bool = False,
+        find_num_conflicts: bool = True,
     ):
         """
         :param environment: IEnvironment instance
         :param time_limit: Optional wall-clock time limit (in seconds) for the
-                           high-level CBS search. If None, no time limit is
-                           enforced. If exceeded, the search terminates early
-                           and returns an empty solution.
+                           high-level search. If None, no time limit is
+                           enforced.
+        :param max_iterations: Optional cap on high-level expansions.
+        :param find_num_conflicts: Enable conflict-aware low-level tie-breaking.
+
+        ICCBS always collects all conflicts (``get_first_conflict=False``) so it
+        can classify them as cardinal / semi-cardinal / non-cardinal.
         """
-        self.env = environment
-        self.counter = count()
-        self.open_list = []
-        self.closed_set = set()
-        self.time_limit = time_limit
-        self.max_iterations = max_iterations
-        self.verbose = verbose
-        self.get_first_conflict = False
+        super().__init__(
+            environment,
+            time_limit=time_limit,
+            max_iterations=max_iterations,
+            verbose=verbose,
+            get_first_conflict=False,
+            find_num_conflicts=find_num_conflicts,
+        )
 
     def _get_best_conflict(self, P, conflict_list):
         best_conflict = None
         best_score = float("inf")
         best_costs = None
+        best_action_costs = None
         best_paths = None
 
         for conflict in conflict_list:
@@ -68,7 +76,7 @@ class ICCBS(CCBS):
         costs = {}
         action_costs = {}
         paths = {}
-        
+
         # Save original constraint dict to restore after evaluation
         original_constraint_dict = self.env.constraint_dict
 
@@ -92,8 +100,9 @@ class ICCBS(CCBS):
                     base_solution=P.solution,
                     base_action_cost=P.solution_action_cost,
                     base_cost=P.solution_cost,
+                    find_num_conflicts=self.find_num_conflicts,
                 )
-            
+
             if not path:
                 costs[agent] = float("inf")
                 action_costs[agent] = None
@@ -102,60 +111,75 @@ class ICCBS(CCBS):
                 costs[agent] = cost[agent] - P.solution_cost[agent]
                 action_costs[agent] = action_cost[agent]
                 paths[agent] = path[agent]
-        
+
         # Restore original constraint dict
         self.env.constraint_dict = original_constraint_dict
         return costs, action_costs, paths
 
     def search(self):
+        st = time.time()
+        iterations = 1
+        success = False
+        self._reset_stats()
+        solution = {}
+        solution_info = {}
+
         start = HighLevelNode()
         start.constraint_dict = {}
         for agent in self.env.agent_dict.keys():
             start.constraint_dict[agent] = deepcopy(Constraints())
 
-        start.solution, start.solution_action_cost, start.solution_cost = self.env.compute_solution()
+        start.solution, start.solution_action_cost, start.solution_cost = self.env.compute_solution(
+            find_num_conflicts=self.find_num_conflicts,
+        )
         if not start.solution:
             if self.verbose:
                 print("No initial solution found")
-            return {}
+            return self._finalize({}, solution_info, st, iterations, success)
 
         start.cost = sum(start.solution_cost.values())
 
         # Add start node to heap
         heapq.heappush(self.open_list, (start.cost, next(self.counter), start))
 
-        st = time.time()
-        iterations = 0
         while self.open_list:
-            if self.time_limit is not None and (time.time() - st) > self.time_limit:
+            iterations += 1
+            if (time.time() - st) > self.time_limit:
                 if self.verbose:
                     print(
                         f"Search terminated: time limit of {self.time_limit} seconds exceeded."
                     )
-                return {}
+                break
 
-            if self.max_iterations is not None and iterations >= self.max_iterations:
+            if iterations >= self.max_iterations:
                 if self.verbose:
                     print(
                         f"Search terminated: max iterations of {self.max_iterations} reached."
                     )
-                return {}
+                break
 
             _, P_counter, P = heapq.heappop(self.open_list)
             state_key = self._get_state_key(P)
             if state_key in self.closed_set:
                 continue
             self.closed_set.add(state_key)
+            self.nodes_expanded += 1
 
             self.env.constraint_dict = P.constraint_dict
 
-            conflict_list = self.env.get_conflicts(P.solution, P.solution_action_cost,self.get_first_conflict)
+            conflict_list = self.env.get_conflicts(P.solution, P.solution_action_cost, self.get_first_conflict)
             if not conflict_list:
                 if self.verbose:
                     print("solution found")
-                return self.generate_plan(P.solution, P.solution_action_cost)
+                success = True
+                solution = self.generate_plan(P.solution, P.solution_action_cost)
+                break
+            self.total_conflicts += len(conflict_list)
 
             best_conflict, best_costs, best_action_costs, best_paths, score = self._get_best_conflict(P, conflict_list)
+            if best_conflict is None:
+                continue
+            self._record_conflict_class(score)
 
             bypass_found = False
             for agent, cost_inc in best_costs.items():
@@ -171,29 +195,27 @@ class ICCBS(CCBS):
                         new_node.solution = P.solution.copy()
                         new_node.solution_cost = P.solution_cost.copy()
                         new_node.solution_action_cost = P.solution_action_cost.copy()
-                        new_node.solution[agent] = new_path                        
+                        new_node.solution[agent] = new_path
                         new_node.solution_action_cost[agent] = new_action_cost
                         new_node.cost = P.cost
                         new_node.constraint_dict = temp_constraints
-                        
+
                         if len(self.env.get_conflicts(new_node.solution, new_node.solution_action_cost,self.get_first_conflict)) < len(conflict_list):
                             heapq.heappush(self.open_list, (new_node.cost, next(self.counter), new_node))
                             bypass_found = True
                             break
             if bypass_found:
                 continue
-            
+
             self._branch(P, best_conflict, best_costs)
-            iterations += 1
-            # if iterations > 30:
-            #     break
-        return {}
+
+        return self._finalize(solution, solution_info, st, iterations, success)
 
     def _get_updated_constraints(self, P, agent, conflict):
         """Helper to create a new constraint dictionary for a specific branch/bypass."""
         new_constraints_dict = {}
         conflict_constraints = self.env.create_constraints_from_conflict(conflict)
-        
+
         for a in self.env.agent_dict.keys():
             if a == agent:
                 # Deep copy and add new constraint for the target agent
@@ -216,7 +238,7 @@ class ICCBS(CCBS):
             new_node.solution_cost = P.solution_cost.copy()
             new_node.solution_action_cost = P.solution_action_cost.copy()
             new_node.constraint_dict = self._get_updated_constraints(P, agent, conflict)
-            
+
             self.env.constraint_dict = new_node.constraint_dict
 
             # Re-plan only the affected agent
@@ -225,9 +247,10 @@ class ICCBS(CCBS):
                     base_solution=P.solution,
                     base_action_cost=P.solution_action_cost,
                     base_cost=P.solution_cost,
+                    find_num_conflicts=self.find_num_conflicts,
                 )
-            
-            if res:
+
+            if res and res[0]:
                 new_node.solution, new_node.solution_action_cost, new_node.solution_cost = res
                 new_node.cost = sum(new_node.solution_cost.values())
                 heapq.heappush(self.open_list, (new_node.cost, next(self.counter), new_node))

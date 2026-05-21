@@ -187,6 +187,29 @@ def check_solution(solution):
     check_collision(solution, 1.0)
 
 
+def is_conflict_free(solution, r, verbose: bool = False):
+    """
+    Return True iff no pair of agents in `solution` collides.
+
+    Parameters
+    ----------
+    solution : dict
+        Mapping agent_name -> list of waypoints {"t", "x", "y"}.
+    r : float
+        Agent radius (agents are modeled as discs; collision if distance <= 2r).
+    verbose : bool, optional
+        Whether `check_collision` prints per-collision details.
+
+    Returns
+    -------
+    bool
+        True if the solution is non-empty and collision-free, False otherwise.
+    """
+    if not solution:
+        return False
+    return len(check_collision(solution, r, verbose=verbose)) == 0
+
+
 def check_solution_full(
     solution,
     r: float,

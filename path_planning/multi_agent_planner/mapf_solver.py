@@ -4,6 +4,7 @@ from path_planning.multi_agent_planner.centralized.lacam.lacam import LaCAM
 from path_planning.multi_agent_planner.centralized.lacam.lacam_random import LaCAM as LaCAM_random
 from path_planning.multi_agent_planner.centralized.sipp.sipp import SippPlanner
 from path_planning.multi_agent_planner.centralized.ccbs.ccbs import CCBS
+from path_planning.multi_agent_planner.centralized.ccbs.iccbs import ICCBS
 from path_planning.multi_agent_planner.centralized.ccbs.graph_generation import Environment as CCBS_Environment
 from path_planning.multi_agent_planner.centralized.lacam.utility import set_starts_goals_config, is_valid_mapf_solution
 from typing import Tuple
@@ -86,6 +87,10 @@ def solve_mapf(map_, agents,mapf_solver_config:dict) -> Tuple[dict, float]:
         env = CCBS_Environment(map_,{}, agents_rt, radius=agent_radius, velocity=agent_velocity, use_constraint_sweep=True,heuristic_type=heuristic_type)
         ccbs = CCBS(env,time_limit=time_limit,max_iterations=max_iterations,verbose=False)
         solution, solution_info = ccbs.search()
+    elif mapf_solver_name == 'iccbs':
+        env = CCBS_Environment(map_,{}, agents_rt, radius=agent_radius, velocity=agent_velocity, use_constraint_sweep=True,heuristic_type=heuristic_type)
+        iccbs = ICCBS(env,time_limit=time_limit,max_iterations=max_iterations,verbose=False)
+        solution, solution_info = iccbs.search()
     else:
         raise ValueError(f"Invalid algorithm: {mapf_solver_name}")
     solution_info = check_solution_collision(solution,agent_radius,solution_info)
@@ -107,6 +112,8 @@ def get_mapf_solver(mapf_solver_name:str) -> Tuple[CBS,Environment]:
         return SippPlanner
     elif mapf_solver_name == "ccbs":
         return CCBS,CCBS_Environment
+    elif mapf_solver_name == "iccbs":
+        return ICCBS,CCBS_Environment
     else:
         raise ValueError(f"Invalid algorithm: {mapf_solver_name}")
 
