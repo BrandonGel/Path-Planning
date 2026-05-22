@@ -27,7 +27,6 @@ def run_halton(
     min_edge_len=0.5,
     max_edge_len=5.0,
     halton_cfg=None,
-    save_path=None,
 ):
     """Build a Halton-sampled roadmap and optionally persist it."""
     set_global_seed(42)
@@ -69,11 +68,6 @@ def run_halton(
     num_edges = sum(len(edges) for edges in road_map)
     print(f"Generated {num_edges} {connect_label} edges in {time.time() - st:.2f} s")
     print(f"Roadmap has {len(graph_sampler.nodes)} nodes after {connect_label}")
-
-    if save_path:
-        graph_sampler.save_graph_sampler(save_path)
-        print(f"Saved graph sampler to {save_path}")
-
     return graph_sampler, graph_sampler.nodes, road_map
 
 
@@ -102,7 +96,6 @@ if __name__ == "__main__":
         goal_2d,
         sample_num=1000,
         halton_cfg=halton_cfg,
-        save_path="figs/halton/halton_2d.pkl",
     )
 
     vis = Visualizer2D()
@@ -127,7 +120,6 @@ if __name__ == "__main__":
         goal_3d,
         sample_num=1000,
         halton_cfg=halton_cfg,
-        save_path="figs/halton/halton_3d.pkl",
     )
 
     vis = Visualizer3D()
