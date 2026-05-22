@@ -1,6 +1,7 @@
 from typing import Any, List, Tuple
 import heapq
 import numpy as np
+from path_planning.common.environment.map.halton import halton_sampling
 from scipy.spatial import KDTree, Delaunay
 from path_planning.common.environment.node import Node
 from python_motion_planning.common.env.map.grid import Grid, GridTypeMap
@@ -19,7 +20,7 @@ def validate_roadmap_type(roadmap_type: str):
         return False
     return True
 class GraphSampler(Grid):
-    def __init__(self,*args,start,goal,sample_num=0,num_neighbors = 13.0, min_edge_len = 1e-10, max_edge_len = 30.0,goal_sample_rate=0.1,use_discrete_space=True,use_constraint_sweep=True,record_sweep=True,use_exact_collision_check=True,use_dijkstra=True,**kwargs):
+    def __init__(self,*args,start,goal,sample_num=0,num_neighbors = 13.0, min_edge_len = 1e-10, max_edge_len = 30.0,goal_sample_rate=0.1,use_discrete_space=True,use_constraint_sweep=True,record_sweep=True,use_exact_collision_check=True,use_dijkstra=True,sampling_dist_dict = {},**kwargs):
         super().__init__(*args, **kwargs)
 
         # Check if start and goal are lists, non-empty, and not None
@@ -61,6 +62,7 @@ class GraphSampler(Grid):
         self.constraint_sweep = CGAL_Sweep(record_sweep=record_sweep,use_exact_collision_check=use_exact_collision_check)
         self.sample_kd_tree = None
         self.use_dijkstra = use_dijkstra
+        self.sampling_dist_dict = sampling_dist_dict if sampling_dist_dict else {}
 
     def __str__(self) -> str:
         return "Graph Sampler"
@@ -182,15 +184,16 @@ class GraphSampler(Grid):
         if len(obstacles) == 0:
             return
         if len(obstacles[0]) == 2:
-            self.type_map[obstacles[:,0], obstacles[:,1]] = TYPES.OBSTACLE 
+            self.type_map[obstacles[:,0], obstacles[:,1]] = TYPES.OBSTACLE
         elif len(obstacles[0]) == 3:
-            self.type_map[obstacles[:,0], obstacles[:,1], obstacles[:,2]] = TYPES.OBSTACLE 
+            self.type_map[obstacles[:,0], obstacles[:,1], obstacles[:,2]] = TYPES.OBSTACLE
         else:
             raise ValueError(f"Unsupported dimensions: {len(obstacles.shape)}")
         for obstacle in obstacles:
             pos = tuple(obstacle)
             node = Node(pos,None,0,0)
             self.obstacle_nodes.append(node)
+        self._esdf_initialized = False
 
     def get_obstacle_map(self) -> np.ndarray:
         return self.type_map.data == TYPES.OBSTACLE
@@ -445,10 +448,6 @@ class GraphSampler(Grid):
                 prob_map_points_world = np.array([self.map_to_world(tuple(point)) for point in prob_map_points])
                 weighted_points = prob_map_points_world + weighted_normalized_points
 
-            # num_uniform_samples = self.sample_num - num_prob_map_samples
-            # uniform_normalized_points = np.random.random((num_uniform_samples,self.dim))
-            # uniform_points = uniform_normalized_points * (bounds[:,1] - bounds[:,0]) + bounds[:,0]
-            # points = np.concatenate((weighted_points,uniform_points))
             unchosen_prob_map_flat = 1 - prob_map_flat
             unchosen_prob_map_flat /= np.sum(unchosen_prob_map_flat)
             num_unchosen_samples = self.sample_num - num_prob_map_samples
@@ -461,24 +460,101 @@ class GraphSampler(Grid):
             points = np.concatenate((weighted_points,unchosen_prob_map_indices_weighted_points))
             return points,num_prob_map_samples
 
-    def generateRandomNodes(self, generate_grid_nodes = False,prob_map = None,samp_from_prob_map_ratio = 0.5):
+    # Return the minimum distance from a point to the nearest obstacle or inflation
+    def min_wall_distance(self, p):
+        """
+        World-unit distance from a world-coordinate point (or batch of points) to
+        the nearest OBSTACLE-or-INFLATION cell.
+
+        Uses the precomputed Euclidean Signed Distance Field stored on the Grid
+        base class. `_esdf` is computed with sampling=self.resolution, so values
+        are already in world units (no extra scaling required). Inflation cells
+        are exactly the free cells with 0 < esdf <= inflation_radius, so
+        subtracting `inflation_radius` and clipping to >= 0 collapses both
+        obstacles and inflation to distance zero.
+
+        Args:
+            p: a single world point as a tuple/1-D array of length `dim`,
+               or a (N, dim) array of points.
+        Returns:
+            float if `p` is 1-D, else (N,) numpy array of floats.
+        """
+        if not getattr(self, "_esdf_initialized", False):
+            self.update_esdf()
+            self._esdf_initialized = True
+
+        arr = np.asarray(p, dtype=float)
+        single = arr.ndim == 1
+        pts = np.atleast_2d(arr)
+
+        bounds_lo = np.asarray(self.bounds, dtype=float)[:, 0]
+        inv_res = 1.0 / float(self.resolution)
+        grid_f = (pts - bounds_lo) * inv_res - 0.5
+        grid_i = np.rint(grid_f + 1e-10).astype(int)
+
+        shape = np.asarray(self.shape, dtype=int)
+        in_bounds = np.all((grid_i >= 0) & (grid_i < shape), axis=1)
+        grid_clip = np.clip(grid_i, 0, shape - 1)
+
+        idx = tuple(grid_clip[:, d] for d in range(self.dim))
+        raw = self._esdf[idx].astype(float) - float(self.inflation_radius)
+        dists = np.where(in_bounds, np.clip(raw, 0.0, None), 0.0)
+
+        return float(dists[0]) if single else dists
+
+    def generateRandomNodes(self, generate_grid_nodes = False,prob_map = None,samp_from_prob_map_ratio = 0.5,roadmap_type:str=None):
+        if roadmap_type == 'rrg':
+            return []
+
         num_nodes = 0
+        num_weighted_samples = 0
         bounds = np.array(self.bounds)
         nodes = []
         rejected_weighted_samples = []
+        halton_sampler = None
+        is_halton = roadmap_type is not None and 'halton' in roadmap_type
+        oversample = 1
+        max_outer_iters = 20
+        outer_iter = 0
         while num_nodes < self.sample_num:
-            points,num_weighted_samples = self.sample_from_prob_map(prob_map,samp_from_prob_map_ratio)
+            outer_iter += 1
+            if outer_iter > max_outer_iters:
+                print(
+                    f"Warning: generateRandomNodes hit max_outer_iters={max_outer_iters} "
+                    f"with {num_nodes}/{self.sample_num} nodes; continuing with what was collected."
+                )
+                break
+            if is_halton:
+                halton_cfg = self.sampling_dist_dict.get('halton', {})
+                points, halton_sampler = halton_sampling(
+                    self.sample_num,
+                    self.min_wall_distance,
+                    bounds,
+                    d_min=halton_cfg.get('d_min', 0.3),
+                    d_opt=halton_cfg.get('d_opt', 0.4),
+                    sigma=halton_cfg.get('sigma', 0.5),
+                    floor=halton_cfg.get('floor', 0.2),
+                    halton_sampler=halton_sampler,
+                    oversample=oversample,
+                )
+            else:
+                points,num_weighted_samples = self.sample_from_prob_map(prob_map,samp_from_prob_map_ratio)
+            n_points = len(points)
             pixels = [self.world_to_map(point,discrete=True) for point in points]
-            for ii in range(self.sample_num):
+            accepted_this_round = 0
+            for ii in range(n_points):
                 if self.use_discrete_space:
                     current = tuple(self.map_to_world(self.world_to_map(points[ii]),discrete=True)) # Convert to discrete space but not into int
                 else:
                     current = tuple(points[ii])
                 node = Node(current,None,0,0)
                 if self.is_expandable(tuple(pixels[ii])):
+                    if node in self.node_index_dict:
+                        continue
                     nodes.append(node)
                     self.node_index_dict[node] = len(nodes) - 1
                     num_nodes += 1
+                    accepted_this_round += 1
                 else:
                     # Only track rejected WEIGHTED samples (indices 0 to num_weighted_samples-1)
                     if ii >= num_weighted_samples:
@@ -486,10 +562,19 @@ class GraphSampler(Grid):
                     rejected_weighted_samples.append(points[ii])
                 if num_nodes == self.sample_num:
                     break
-            # Update ratio after processing batch (for next iteration if needed)
-            if num_nodes < self.sample_num and num_weighted_samples > 0:
-                samp_from_prob_map_ratio = len(rejected_weighted_samples) / self.sample_num 
-                samp_from_prob_map_ratio = max(0.0, min(1.0, samp_from_prob_map_ratio))
+            # Update ratio / oversample for next outer iteration if still short.
+            if num_nodes < self.sample_num:
+                if is_halton:
+                    # Bump oversample so we draw enough Halton points next time.
+                    needed = self.sample_num - num_nodes
+                    rate = accepted_this_round / max(1, n_points)
+                    if rate <= 0:
+                        oversample = min(64, max(2, oversample * 2))
+                    else:
+                        oversample = min(64, max(2, int(np.ceil(needed / (self.sample_num * rate)))))
+                elif num_weighted_samples > 0:
+                    samp_from_prob_map_ratio = len(rejected_weighted_samples) / self.sample_num
+                    samp_from_prob_map_ratio = max(0.0, min(1.0, samp_from_prob_map_ratio))
 
         if generate_grid_nodes:
             # Iterate through all grid points in the mesh
@@ -554,6 +639,9 @@ class GraphSampler(Grid):
             self.generate_planar_map(samples, use_option='dt')
         elif roadmap_type == 'rrg':
             self.generate_rrg(samples)
+        elif 'halton' in roadmap_type:
+            use_option = 'cdt' if self.dim == 2 else 'dt'
+            self.generate_planar_map(samples, use_option=use_option)
         else:
             raise ValueError(f"Invalid roadmap type: {roadmap_type}")
 
@@ -997,6 +1085,8 @@ class GraphSampler(Grid):
     def set_inflation_radius(self, radius: float):
         self.inflation_radius = radius
         self.inflate_obstacles(radius)
+        # inflate_obstacles calls update_esdf internally — mark cache valid.
+        self._esdf_initialized = True
 
     def clear_data(self):
         self.road_map = []
@@ -1015,6 +1105,7 @@ class GraphSampler(Grid):
         self.cost_matrix = None
         self.obstacles = []
         self.inflation_radius = 0.0
+        self._esdf_initialized = False
 
     def save_graph_sampler(self, path: str):
         data = {
@@ -1036,6 +1127,7 @@ class GraphSampler(Grid):
             "use_constraint_sweep": self.use_constraint_sweep,
             "record_sweep": self.record_sweep,
             "use_exact_collision_check": self.use_exact_collision_check,
+            "sampling_dist_dict": self.sampling_dist_dict,
         }
 
         with open(path, 'wb') as f:
@@ -1053,6 +1145,7 @@ class GraphSampler(Grid):
         self.set_goal(data["goal"])
         self.set_parameters(data["sample_num"], data["num_neighbors"], data["min_edge_length"], data["max_edge_length"])
         self.num_total_nodes = self.sample_num + len(self.start) + len(self.goal)
+        self.sampling_dist_dict = data.get("sampling_dist_dict", {})
 
 
         self.nodes = data["nodes"]
@@ -1295,6 +1388,7 @@ class GraphSampler(Grid):
             "use_constraint_sweep": self.use_constraint_sweep,
             "record_sweep": self.record_sweep,
             "use_exact_collision_check": self.use_exact_collision_check,
+            "sampling_dist_dict": self.sampling_dist_dict,
         }
 
         # Create a new GraphSampler instance with the same geometric configuration
@@ -1312,6 +1406,7 @@ class GraphSampler(Grid):
             use_constraint_sweep=self.use_constraint_sweep,
             record_sweep=self.record_sweep,
             use_exact_collision_check=self.use_exact_collision_check,
+            sampling_dist_dict=self.sampling_dist_dict,
         )
         pruned_sampler._load_from_dict(pruned_data)
         return pruned_sampler

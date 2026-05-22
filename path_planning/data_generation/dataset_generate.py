@@ -44,6 +44,7 @@ def _clone_graph_sampler(map_: GraphSampler) -> GraphSampler:
             use_constraint_sweep=map_.use_constraint_sweep,
             record_sweep=map_.record_sweep,
             use_exact_collision_check=map_.use_exact_collision_check,
+            sampling_dist_dict=map_.sampling_dist_dict,
         )
         clone.load_graph_sampler(path)
         return clone

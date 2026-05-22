@@ -99,7 +99,8 @@ class InputFile:
         nb_obstacles = kwargs.get("nb_obstacles", 0.1)
         nb_agents = kwargs.get("nb_agents", 4)
         obs_size = kwargs.get("obs_size", 0.5) # size of the obstacle in pixels
-        map_ = GraphSampler(bounds=bounds, resolution=resolution, start=[], goal=[])
+        sampling_dist_dict = kwargs.get("sampling_dist_dict", {})
+        map_ = GraphSampler(bounds=bounds, resolution=resolution, start=[], goal=[], sampling_dist_dict=sampling_dist_dict)
         dimensions = list(map_.shape)
         input_dict = {
             "map": {
@@ -109,7 +110,7 @@ class InputFile:
                 "obstacles": [],
                 "obs_size": obs_size,
             },
-            "agents": [],        
+            "agents": [],
             "time_limit": time_limit,
             "max_iterations": max_iterations,
             "road_map_type": road_map_type,
@@ -121,6 +122,7 @@ class InputFile:
             "agent_radius": agent_radius,
             "resolution": resolution,
             "obs_size": obs_size,
+            "sampling_dist_dict": sampling_dist_dict,
         }
         total_cells = int(math.prod(dimensions))
         num_dims = len(dimensions)
@@ -254,8 +256,9 @@ def shuffle_agents_goals(inpt: Dict, agent_goal_index: List[int]) -> Dict:
 def create_map(param: Dict, generate_new_graph: bool = False,graph_file: Path =None,verbose: bool = True,args: dict = {}):
     bounds = param["map"]["bounds"]
     resolution = param["map"]["resolution"]
+    sampling_dist_dict = param.get("sampling_dist_dict", {})
     if graph_file and graph_file.exists() and not generate_new_graph:
-        map_ = GraphSampler(bounds=bounds, resolution=resolution, start=[], goal=[])
+        map_ = GraphSampler(bounds=bounds, resolution=resolution, start=[], goal=[], sampling_dist_dict=sampling_dist_dict)
         map_.load_graph_sampler(graph_file,args)
     else:
         obstacles_world = np.array(param["map"]["obstacles"])
@@ -268,7 +271,8 @@ def create_map(param: Dict, generate_new_graph: bool = False,graph_file: Path =N
                 sample_num=0,
                 min_edge_len=1e-10,
                 max_edge_len=(1+1e-10)*param['resolution'],
-                num_neighbors=4.0
+                num_neighbors=4.0,
+                sampling_dist_dict=sampling_dist_dict,
             )
         elif validate_roadmap_type(road_map_type):
             map_ = GraphSampler(
@@ -280,7 +284,8 @@ def create_map(param: Dict, generate_new_graph: bool = False,graph_file: Path =N
                 sample_num=param["sample_num"],
                 min_edge_len=param["min_edge_len"],
                 max_edge_len=param["max_edge_len"],
-                num_neighbors=param["num_neighbors"]
+                num_neighbors=param["num_neighbors"],
+                sampling_dist_dict=sampling_dist_dict,
             )
         else:
             assert False, f"Invalid road map name provided: {road_map_type}"
