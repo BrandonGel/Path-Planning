@@ -37,6 +37,8 @@ class CCBS(object):
         time_limit: float | None = None,
         max_iterations: int | None = None,
         verbose: bool = False,
+        get_first_conflict: bool = True,
+        find_num_conflicts: bool = True,
     ):
         """
         :param environment: IEnvironment instance
@@ -44,6 +46,14 @@ class CCBS(object):
                            high-level CBS search. If None, no time limit is
                            enforced. If exceeded, the search terminates early
                            and returns an empty solution.
+        :param get_first_conflict: If True, conflict detection returns as soon
+                           as the first conflict is found (standard CBS). If
+                           False, all conflicts are collected (used by ICCBS
+                           for cardinal-conflict prioritization).
+        :param find_num_conflicts: If True, the low-level SIPP search performs
+                           conflict-aware tie-breaking against the other
+                           agents' current paths, which tends to reduce the
+                           number of high-level expansions.
         """
         self.env = environment
         self.counter = count()
@@ -52,8 +62,73 @@ class CCBS(object):
         self.time_limit = time_limit if time_limit is not None and time_limit > 0 else float('inf')
         self.max_iterations = max_iterations if max_iterations is not None and max_iterations > 0 else float('inf')
         self.verbose = verbose
+        self.get_first_conflict = get_first_conflict
+        self.find_num_conflicts = find_num_conflicts
         self.total_time = 0
         self.total_iterations = 0
+        self._reset_stats()
+
+    def _reset_stats(self):
+        """Reset the per-search conflict/expansion statistics."""
+        self.total_conflicts = 0
+        self.nodes_expanded = 0
+        self.cardinal_count = 0
+        self.semi_cardinal_count = 0
+        self.non_cardinal_count = 0
+
+    def _conflict_stats(self):
+        """Return the conflict/expansion statistics as a dict for solution_info."""
+        return {
+            "total_conflicts": self.total_conflicts,
+            "high_level_nodes_expanded": self.nodes_expanded,
+            "cardinal_conflicts": self.cardinal_count,
+            "semi_cardinal_conflicts": self.semi_cardinal_count,
+            "non_cardinal_conflicts": self.non_cardinal_count,
+        }
+
+    def _record_conflict_class(self, score):
+        """Record a conflict's cardinality (0=cardinal, 1=semi, 2=non-cardinal)."""
+        if score == 0:
+            self.cardinal_count += 1
+        elif score == 1:
+            self.semi_cardinal_count += 1
+        elif score == 2:
+            self.non_cardinal_count += 1
+
+    def _finalize(self, solution, solution_info, st, iterations, success):
+        """Populate solution_info and timing/iteration counters, then return."""
+        self.total_time = min(self.time_limit, time.time() - st)
+        self.total_iterations = min(self.max_iterations, iterations)
+        solution_info["runtime"] = self.total_time
+        solution_info["total_iterations"] = self.total_iterations
+        solution_info["success"] = success
+        solution_info.update(self._conflict_stats())
+        return solution, solution_info
+
+    def validate_solution(self, plan=None):
+        """
+        Validate a CCBS plan (the dict returned by ``generate_plan``/``search``)
+        for time, velocity and collision anomalies.
+
+        Returns a dict with keys ``no_time_anomaly``, ``no_velocity_anomaly``,
+        ``collisions`` and ``conflict_free``.
+        """
+        from path_planning.utils.checker import check_solution_full
+        if not plan:
+            return {
+                "conflict_free": False,
+                "no_time_anomaly": False,
+                "no_velocity_anomaly": False,
+                "collisions": {},
+            }
+        result = check_solution_full(
+            plan,
+            self.env.radius,
+            is_using_constant_speed=False,
+            verbose=self.verbose,
+        )
+        result["conflict_free"] = (len(result["collisions"]) == 0)
+        return result
 
     def _get_state_key(self, node):
         """Generate a hashable state key for closed set checking."""
@@ -68,6 +143,7 @@ class CCBS(object):
         st = time.time()
         iterations = 1
         success = False
+        self._reset_stats()
         start = HighLevelNode()
         start.constraint_dict = {}
         solution = {}
@@ -75,16 +151,13 @@ class CCBS(object):
         for agent in self.env.agent_dict.keys():
             start.constraint_dict[agent] = deepcopy(Constraints())
 
-        start.solution, start.solution_action_cost, start.solution_cost = self.env.compute_solution()
+        start.solution, start.solution_action_cost, start.solution_cost = self.env.compute_solution(
+            find_num_conflicts=self.find_num_conflicts,
+        )
         if not start.solution:
             if self.verbose:
                 print("No initial solution found")
-            self.total_time = min(self.time_limit, time.time() - st) 
-            self.total_iterations = min(self.max_iterations, iterations)
-            solution_info["runtime"] = self.total_time
-            solution_info["total_iterations"] = self.total_iterations
-            solution_info["success"] = success
-            return {},solution_info
+            return self._finalize({}, solution_info, st, iterations, success)
 
         start.cost = sum(start.solution_cost.values())
 
@@ -92,14 +165,14 @@ class CCBS(object):
         heapq.heappush(self.open_list, (start.cost, next(self.counter), start))
         while self.open_list:
             iterations += 1
-            if self.time_limit is not None and (time.time() - st) > self.time_limit:
+            if (time.time() - st) > self.time_limit:
                 if self.verbose:
                     print(
                         f"Search terminated: time limit of {self.time_limit} seconds exceeded."
                     )
                 break
 
-            if self.max_iterations is not None and iterations >= self.max_iterations:
+            if iterations >= self.max_iterations:
                 if self.verbose:
                     print(
                         f"Search terminated: max iterations of {self.max_iterations} reached."
@@ -111,16 +184,18 @@ class CCBS(object):
             if state_key in self.closed_set:
                 continue
             self.closed_set.add(state_key)
+            self.nodes_expanded += 1
 
             self.env.constraint_dict = P.constraint_dict
 
-            conflict_list = self.env.get_conflicts(P.solution, P.solution_action_cost)
+            conflict_list = self.env.get_conflicts(P.solution, P.solution_action_cost, self.get_first_conflict)
             if not conflict_list:
                 if self.verbose:
                     print("solution found")
                 success = True
                 solution = self.generate_plan(P.solution, P.solution_action_cost)
                 break
+            self.total_conflicts += len(conflict_list)
 
             constraint_dict = self.env.create_constraints_from_conflict(conflict_list[0])
             for agent in constraint_dict.keys():
@@ -152,18 +227,14 @@ class CCBS(object):
                     base_solution=P.solution,
                     base_action_cost=P.solution_action_cost,
                     base_cost=P.solution_cost,
+                    find_num_conflicts=self.find_num_conflicts,
                 )
                 if not new_node.solution:
                     continue
                 new_node.cost = sum(new_node.solution_cost.values())
                 heapq.heappush(self.open_list, (new_node.cost, next(self.counter), new_node))
 
-        self.total_time = min(self.time_limit, time.time() - st) 
-        self.total_iterations = min(self.max_iterations, iterations)
-        solution_info["runtime"] = self.total_time
-        solution_info["total_iterations"] = self.total_iterations
-        solution_info["success"] = success
-        return solution,solution_info
+        return self._finalize(solution, solution_info, st, iterations, success)
 
     def generate_plan(self, solution, solution_action_cost):
         plan = {}

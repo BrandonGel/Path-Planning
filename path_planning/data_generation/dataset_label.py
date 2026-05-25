@@ -9,6 +9,7 @@ from typing import Tuple
 from path_planning.data_generation.dataset_util import *
 
 def get_start_goal_locations(agents):
+    """Stack starts/goals from YAML (world coordinates per coordinate contract)."""
     start_goal_locations = []
     for agent in agents:
         start_goal_locations.append(agent['start'])
@@ -26,6 +27,7 @@ def get_longest_path(schedule):
 def get_trajectory_map(schedule,map_,discrete: bool = True):    
     longest = get_longest_path(schedule)
     trajectory_map = np.zeros((len(schedule), longest,)+map_.shape,dtype=np.int32)
+    use_disc = getattr(map_, "use_discrete_space", True)
     for j, agent in enumerate(schedule.keys()):
         agent_path = schedule[agent]
         x = [point['x'] for point in agent_path[:]]
@@ -38,7 +40,12 @@ def get_trajectory_map(schedule,map_,discrete: bool = True):
             point = [(x[i],y[i]) for i in range(len(x))]
         
         for i, p in enumerate(point):
-            index = (j,i,) + map_.world_to_map(p,True)
+            if use_disc:
+                # Schedule waypoints are already grid/map indices (same as roadmap nodes).
+                grid_ix = tuple(int(c) for c in p)
+                index = (j, i) + grid_ix
+            else:
+                index = (j, i) + tuple(map_.world_to_map(p, True))
             trajectory_map[index] += 1
     
     return trajectory_map

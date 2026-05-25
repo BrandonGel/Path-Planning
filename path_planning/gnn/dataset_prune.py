@@ -10,6 +10,7 @@ from path_planning.multi_agent_planner.mapf_solver import solve_mapf
 from path_planning.common.environment.map.graph_sampler import GraphSampler
 from path_planning.common.environment.node import Node
 from path_planning.utils.util import set_global_seed
+from path_planning.gnn.train import normalize_threshold
 import math
 from tqdm import tqdm
 from multiprocessing import Pool, cpu_count
@@ -584,8 +585,9 @@ def process_gnn_task_batch(
     if prune_gnn:
         x_dict = get_threshold_x_dict(data.x_dict,out)  
         with torch.no_grad():
-            out = prune_gnn(x_dict, data.edge_index_dict,data.edge_attr_dict,data.batch_dict)
-        threshold_values = out.cpu().numpy()
+            threshold = prune_gnn(x_dict, data.edge_index_dict,data.edge_attr_dict,data.batch_dict)
+        # threshold = normalize_threshold(threshold, data.batch_dict, out, 'node')
+        threshold_values = threshold.cpu().numpy()
 
     unbatched_indices = []
     unbatched_max_ind = 0

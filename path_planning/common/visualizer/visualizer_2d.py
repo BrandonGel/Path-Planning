@@ -152,13 +152,14 @@ class Visualizer2D(BaseVisualizer2D):
             node_alpha: Alpha of the nodes.
             edge_alpha: Alpha of the edges.
         """
+        offset = map_.resolution/2.0
         # Plot all edges
         if map_frame:
             x_coords = [map_.map_to_world(node.current)[0] for node in nodes]
             y_coords = [map_.map_to_world(node.current)[1] for node in nodes]
         else:
-            x_coords = [node.current[0] for node in nodes]
-            y_coords = [node.current[1] for node in nodes]
+            x_coords = [node.current[0] + offset for node in nodes]
+            y_coords = [node.current[1] + offset for node in nodes]
         if show_edge:
             for i, edges in enumerate(road_map):
                 if len(edges) == 0:
@@ -186,7 +187,7 @@ class Visualizer2D(BaseVisualizer2D):
                     if map_frame:   
                         start = map_.map_to_world(start)
                     else:
-                        start = start
+                        start = (start[0] + offset, start[1] + offset)
                     if start is not None and len(start) >= 2:
                         self.ax.scatter(start[0], start[1], c='red', s=start_size, alpha=1, zorder=self.zorder['expand_tree_node'], label='Start' if start == map_.start[0] else '')
             else:
@@ -205,7 +206,7 @@ class Visualizer2D(BaseVisualizer2D):
                     if map_frame:   
                         goal = map_.map_to_world(goal)
                     else:
-                        goal = goal
+                        goal = (goal[0] + offset, goal[1] + offset)
                     if goal is not None and len(goal) >= 2:
                         self.ax.scatter(goal[0], goal[1], c='blue', s=goal_size, alpha=1, zorder=self.zorder['expand_tree_node'], label='Goal')
             else:

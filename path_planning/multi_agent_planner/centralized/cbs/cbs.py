@@ -39,7 +39,7 @@ class State(object):
     def __eq__(self, other):
         return self.time == other.time and self.location == other.location
     def __hash__(self):
-        return hash(str(self.time)+str(self.location))
+        return hash((self.time, self.location.point))
     def is_equal_except_time(self, state):
         return self.location == state.location
     def __str__(self):
@@ -70,7 +70,7 @@ class VertexConstraint(object):
     def __eq__(self, other):
         return self.time == other.time and self.location == other.location
     def __hash__(self):
-        return hash(str(self.time)+str(self.location))
+        return hash((self.time, self.location))
     def __str__(self):
         return '(' + str(self.time) + ', '+ str(self.location) + ')'
 
@@ -83,7 +83,7 @@ class EdgeConstraint(object):
         return self.time == other.time and self.location_1 == other.location_1 \
             and self.location_2 == other.location_2
     def __hash__(self):
-        return hash(str(self.time) + str(self.location_1) + str(self.location_2))
+        return hash((self.time, self.location_1, self.location_2))
     def __str__(self):
         return '(' + str(self.time) + ', '+ str(self.location_1) +', '+ str(self.location_2) + ')'
 
@@ -122,6 +122,72 @@ class Environment(object):
         self.use_constraint_sweep = use_constraint_sweep
         self._constraint_sweep_cache = {}  # (p1, p2, r) -> (nodes, edges, start_nodes)
         self._constraint_segment_cache = {}  # (p1a, p1b, p2a, p2b, v, r) -> bool
+        self._dijkstra_cache = {}  # (start_idx, goal_idx) -> (states, cost)
+        self._heuristic_cache = {}  # (location.point, agent_name) -> heuristic value
+
+    def _static_shortest_path_states(self, agent_name: str):
+        """Compute a static shortest path on the roadmap (no time expansion).
+
+        Safe to use only when there are no time-indexed constraints for this agent.
+        Returns (states, cost) in the same format as A*.
+        """
+        start_pt = tuple(float(x) for x in self.agent_dict[agent_name]["start"].location.point)
+        goal_pt = tuple(float(x) for x in self.agent_dict[agent_name]["goal"].location.point)
+        start_node = Node(start_pt, None, 0, 0)
+        goal_node = Node(goal_pt, None, 0, 0)
+        node_index_dict = getattr(self.graph_map, "node_index_dict", {})
+        if start_node not in node_index_dict or goal_node not in node_index_dict:
+            return False, float("inf")
+        s = int(node_index_dict[start_node])
+        g = int(node_index_dict[goal_node])
+        if s == g:
+            return [State(0, Location(start_pt))], 0.0
+
+        cache_key = (s, g)
+        if cache_key in self._dijkstra_cache:
+            return self._dijkstra_cache[cache_key]
+
+        road_map = getattr(self.graph_map, "road_map", None)
+        if road_map is None or len(road_map) == 0:
+            return False, float("inf")
+
+        # Dijkstra over node indices.
+        INF = float("inf")
+        dist = {s: 0.0}
+        prev = {}
+        heap = [(0.0, s)]
+        seen = set()
+        while heap:
+            d, u = heapq.heappop(heap)
+            if u in seen:
+                continue
+            seen.add(u)
+            if u == g:
+                break
+            u_node = self.graph_map.nodes[u]
+            for v in road_map[u]:
+                nd = d + float(self.graph_map.get_cost(u_node, self.graph_map.nodes[v]))
+                if nd < dist.get(v, INF):
+                    dist[v] = nd
+                    prev[v] = u
+                    heapq.heappush(heap, (nd, v))
+        if g not in dist:
+            return False, float("inf")
+
+        # Reconstruct path indices.
+        path_idx = [g]
+        cur = g
+        while cur != s:
+            cur = prev[cur]
+            path_idx.append(cur)
+        path_idx.reverse()
+        states = []
+        for t, idx in enumerate(path_idx):
+            pt = tuple(float(x) for x in self.graph_map.nodes[idx].current)
+            states.append(State(t, Location(pt)))
+        result = states, float(dist[g])
+        self._dijkstra_cache[cache_key] = result
+        return result
 
     def get_neighbors(self, state):
         neighbors = []
@@ -139,70 +205,92 @@ class Environment(object):
                 neighbors.append(n)
         return neighbors
 
-    def get_conflicts(self, solution,get_first_conflict: bool = True):
-        max_t = max([len(plan) for plan in solution.values()])
-        result = Conflict()
+    def get_conflicts(self, solution, get_first_conflict: bool = True):
+        max_t = max(len(plan) for plan in solution.values())
         conflicts = []
+        agent_pairs = list(combinations(solution.keys(), 2))
+
+        # For sweep-based conflict detection, the swept-edge set for an agent
+        # at time t depends only on that agent's motion, not on the other
+        # agent in the pair. Precompute once per (agent, t) so the pair loop
+        # is pure set-membership instead of N^2 cache lookups.
+        if self.radius > 0 and self.use_constraint_sweep:
+            agent_edges = {agent: [] for agent in solution}
+            sweeps = {agent: [] for agent in solution}
+            two_r = 2 * self.radius
+            for agent in solution:
+                for t in range(max_t):
+                    sa = self.get_state(agent, solution, t)
+                    sb = self.get_state(agent, solution, t + 1)
+                    pa = sa.location.point
+                    pb = sb.location.point
+                    agent_edges[agent].append((pa, pb))
+                    sweeps[agent].append(
+                        self._get_constraint_sweep_cached(pa, pb, self.velocity, two_r)
+                    )
+
         for t in range(max_t):
             if self.radius == 0:
-                for agent_1, agent_2 in combinations(solution.keys(), 2):
+                for agent_1, agent_2 in agent_pairs:
                     state_1 = self.get_state(agent_1, solution, t)
                     state_2 = self.get_state(agent_2, solution, t)
 
-                    # Vertex conflict check (default)
                     if state_1.is_equal_except_time(state_2):
-                        result.time = t
-                        result.type = Conflict.VERTEX
-                        result.location_1 = state_1.location
-                        result.agent_1 = agent_1
-                        result.agent_2 = agent_2
+                        c = Conflict()
+                        c.time = t
+                        c.type = Conflict.VERTEX
+                        c.location_1 = state_1.location
+                        c.agent_1 = agent_1
+                        c.agent_2 = agent_2
                         if get_first_conflict:
-                            return result
-                        conflicts.append(result)
+                            return c
+                        conflicts.append(c)
+                        continue
 
-            for agent_1, agent_2 in combinations(solution.keys(), 2):
-                state_1a = self.get_state(agent_1, solution, t)
-                state_1b = self.get_state(agent_1, solution, t+1)
-
-                state_2a = self.get_state(agent_2, solution, t)
-                state_2b = self.get_state(agent_2, solution, t+1)
-
-                if self.radius == 0:
-                    # Edge conflict check (default)
-                    if state_1a.is_equal_except_time(state_2b) and state_1b.is_equal_except_time(state_2a):
-                        result.time = t
-                        result.type = Conflict.EDGE
-                        result.agent_1 = agent_1
-                        result.agent_2 = agent_2
-                        result.location_1 = state_1a.location
-                        result.location_2 = state_1b.location
+                    state_1b = self.get_state(agent_1, solution, t + 1)
+                    state_2b = self.get_state(agent_2, solution, t + 1)
+                    if state_1.is_equal_except_time(state_2b) and state_1b.is_equal_except_time(state_2):
+                        c = Conflict()
+                        c.time = t
+                        c.type = Conflict.EDGE
+                        c.agent_1 = agent_1
+                        c.agent_2 = agent_2
+                        c.location_1 = state_1.location
+                        c.location_2 = state_1b.location
                         if get_first_conflict:
-                            return result
-                        conflicts.append(result)
-                    continue
+                            return c
+                        conflicts.append(c)
+            else:
+                for agent_1, agent_2 in agent_pairs:
+                    if self.use_constraint_sweep:
+                        edge_1 = agent_edges[agent_1][t]
+                        edge_2 = agent_edges[agent_2][t]
+                        edge_conflict = edge_1 in sweeps[agent_2][t] or edge_2 in sweeps[agent_1][t]
+                        loc_1_pt, loc_2_pt = edge_1
+                    else:
+                        state_1a = self.get_state(agent_1, solution, t)
+                        state_1b = self.get_state(agent_1, solution, t + 1)
+                        state_2a = self.get_state(agent_2, solution, t)
+                        state_2b = self.get_state(agent_2, solution, t + 1)
+                        edge_conflict = self._get_constraint_segment_cached(
+                            state_1a.location.point, state_1b.location.point,
+                            state_2a.location.point, state_2b.location.point,
+                            self.velocity, self.radius,
+                        )
+                        loc_1_pt = state_1a.location.point
+                        loc_2_pt = state_1b.location.point
 
-                # Edge conflict check (use constraint sweep)
-                if self.use_constraint_sweep :
-                    state1_edges_locations = self._get_constraint_sweep_cached(state_1a.location.point,state_1b.location.point,self.velocity,2*self.radius)
-                    state2_edges_locations = self._get_constraint_sweep_cached(state_2a.location.point,state_2b.location.point,self.velocity,2*self.radius)
-                    edge_1 = (state_1a.location.point,state_1b.location.point)
-                    edge_2 = (state_2a.location.point,state_2b.location.point)
-                    edge_conflict = edge_1 in state2_edges_locations or edge_2 in state1_edges_locations
-                else:
-                    # Edge conflict check (use distances based on radius and vertices)                    
-                    edge_conflict = self._get_constraint_segment_cached(
-                        state_1a.location.point,state_1b.location.point,state_2a.location.point,state_2b.location.point,self.velocity,self.radius
-                    )
-                if edge_conflict:
-                    result.time = t
-                    result.type = Conflict.EDGE
-                    result.agent_1 = agent_1
-                    result.agent_2 = agent_2
-                    result.location_1 = state_1a.location
-                    result.location_2 = state_1b.location
-                    conflicts.append(result)
-                    if get_first_conflict:
-                        return result
+                    if edge_conflict:
+                        c = Conflict()
+                        c.time = t
+                        c.type = Conflict.EDGE
+                        c.agent_1 = agent_1
+                        c.agent_2 = agent_2
+                        c.location_1 = Location(loc_1_pt)
+                        c.location_2 = Location(loc_2_pt)
+                        if get_first_conflict:
+                            return c
+                        conflicts.append(c)
         return conflicts
 
     def create_constraints_from_conflict(self, conflict):
@@ -248,14 +336,36 @@ class Environment(object):
         pass
 
     def admissible_heuristic(self, state, agent_name):
-        goal = self.agent_dict[agent_name]["goal"]
-
+        key = (state.location.point, agent_name)
+        cached = self._heuristic_cache.get(key)
+        if cached is not None:
+            return cached
+        goal_pt = self.agent_dict[agent_name]["goal"].location.point
+        loc_pt = state.location.point
         if self.heuristic_type == HEURISTIC_TYPE["manhattan"]:
-            return sum([fabs(state.location[i] - goal.location[i]) for i in range(len(state.location))])
+            result = sum(fabs(a - b) for a, b in zip(loc_pt, goal_pt))
         elif self.heuristic_type == HEURISTIC_TYPE["euclidean"]:
-            return sum([(state.location[i] - goal.location[i])**2 for i in range(len(state.location))])**0.5
+            result = sum((a - b) ** 2 for a, b in zip(loc_pt, goal_pt)) ** 0.5
         else:
             raise ValueError(f"Invalid heuristic type: {self.heuristic_type}")
+        self._heuristic_cache[key] = result
+        return result
+
+    def get_step_cost(self, state_1: State, state_2: State) -> float:
+        """Incremental cost between consecutive time-expanded states.
+
+        Matches roadmap edge weights via ``GraphSampler.get_cost`` for moves,
+        so low-level costs align with discrete Dijkstra in
+        ``_static_shortest_path_states``. Waiting in place consumes one timestep
+        with unit cost so idle steps are not free.
+        """
+        p1 = tuple(state_1.location.point)
+        p2 = tuple(state_2.location.point)
+        if p1 == p2:
+            return 1.0
+        node1 = Node(tuple[Any, ...](p1), None, 0, 0)
+        node2 = Node(tuple[Any, ...](p2), None, 0, 0)
+        return float(self.graph_map.get_cost(node1, node2))
 
     def is_at_goal(self, state, agent_name):
         goal_state = self.agent_dict[agent_name]["goal"]
@@ -288,7 +398,13 @@ class Environment(object):
         solution_cost = {}
         for agent in self.agent_dict.keys():
             self.constraints = self.constraint_dict.setdefault(agent, Constraints())
-            local_solution, local_cost = self.a_star.search(agent)
+            if (
+                len(self.constraints.vertex_constraints) == 0
+                and len(self.constraints.edge_constraints) == 0
+            ):
+                local_solution, local_cost = self._static_shortest_path_states(agent)
+            else:
+                local_solution, local_cost = self.a_star.search(agent)
             if not local_solution:
                 return False, float('inf')
             solution.update({agent:local_solution})
@@ -423,13 +539,21 @@ class CBS(object):
         return solution,solution_info
 
     def _get_state_key(self, node):
-        """Generate a hashable state key for closed set checking."""
-        # Create a frozen representation of the solution
-        solution_tuple = tuple(
-            (agent, tuple((s.time, s.location) for s in path))
+        """Generate a hashable state key for closed-set deduplication.
+
+        Keyed on the *solution* (every agent's full path), NOT the constraint
+        set. Constraints uniquely determine a solution, but the converse is
+        false: an "inactive" constraint (one the agent's optimal path already
+        satisfies) leaves the solution unchanged, so two CBS nodes reached via
+        different constraints can share an identical solution. Those are pure
+        redundancy — same solution -> same conflicts -> same children — and
+        must be deduped by solution. A constraint-based key fails to catch
+        them and the search tree blows up combinatorially at large radius.
+        """
+        return tuple(
+            (agent, tuple((s.time, s.location.point) for s in path))
             for agent, path in sorted(node.solution.items())
         )
-        return solution_tuple
    
     def generate_plan(self, solution):
         plan = {}

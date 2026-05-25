@@ -3,6 +3,11 @@ Ground Truth Dataset generation for MAPF training.
 Generates random MAPF instances and solves them using CBS.
 Modified from the original implementation to work with the new common environment.
 
+Coordinate contract for generated ``input.yaml``:
+    - ``map.obstacles``: world-coordinate obstacle centers.
+    - obstacle footprint side length is ``obs_size`` (world units).
+    - ``agents[].start`` / ``agents[].goal``: **world coordinates** (units of ``map.bounds``).
+
 author: Brandon Ho
 original author: Victor Retamal
 """
@@ -22,11 +27,15 @@ import shutil
 import copy
 import math
 from itertools import product
-from path_planning.utils.util import _to_native_yaml
+from path_planning.utils.util import (
+    _to_native_yaml,
+    agents_yaml_to_roadmap_frame,
+    obstacles_world_to_grid,
+)
 from path_planning.data_generation.dataset_util import *
 from path_planning.common.environment.map.graph_sampler import validate_roadmap_type
 
-KEYS = ["bounds", "resolution", "time_limit", "max_iterations", "road_map_type", "use_discrete_space", "sample_num", "num_neighbors", "min_edge_len", "max_edge_len", "agent_radius", "nb_obstacles", "nb_agents"]
+KEYS = ["bounds", "resolution", "time_limit", "max_iterations", "road_map_type", "use_discrete_space", "sample_num", "num_neighbors", "min_edge_len", "max_edge_len", "agent_radius", "nb_obstacles", "nb_agents", "obs_size"]
 class InputFile:   
     def __init__(self, input_file: Path, case_id: int = 0):
         self.input_file = input_file
@@ -61,7 +70,7 @@ class InputFile:
         return self.inpt
 
     def check_difference_between_input(self, config: Dict) -> bool:
-        keys = ["bounds", "resolution", "road_map_type", "use_discrete_space", "sample_num", "num_neighbors", "min_edge_len", "max_edge_len", "agent_radius", "nb_obstacles", "nb_agents"]
+        keys = ["bounds", "resolution", "road_map_type", "use_discrete_space", "sample_num", "num_neighbors", "min_edge_len", "max_edge_len", "agent_radius", "nb_obstacles", "nb_agents", "obs_size"]
         inpt = self.get_input_content()
         if not inpt:
             return True
@@ -89,7 +98,9 @@ class InputFile:
         agent_radius = kwargs.get("agent_radius", 0.0)
         nb_obstacles = kwargs.get("nb_obstacles", 0.1)
         nb_agents = kwargs.get("nb_agents", 4)
-        map_ = GraphSampler(bounds=bounds, resolution=resolution, start=[], goal=[])
+        obs_size = kwargs.get("obs_size", 0.5) # size of the obstacle in pixels
+        sampling_dist_dict = kwargs.get("sampling_dist_dict", {})
+        map_ = GraphSampler(bounds=bounds, resolution=resolution, start=[], goal=[], sampling_dist_dict=sampling_dist_dict)
         dimensions = list(map_.shape)
         input_dict = {
             "map": {
@@ -97,8 +108,9 @@ class InputFile:
                 "bounds": bounds,
                 "resolution": resolution,
                 "obstacles": [],
+                "obs_size": obs_size,
             },
-            "agents": [],        
+            "agents": [],
             "time_limit": time_limit,
             "max_iterations": max_iterations,
             "road_map_type": road_map_type,
@@ -109,15 +121,14 @@ class InputFile:
             "max_edge_len": max_edge_len,
             "agent_radius": agent_radius,
             "resolution": resolution,
+            "obs_size": obs_size,
+            "sampling_dist_dict": sampling_dist_dict,
         }
         total_cells = int(math.prod(dimensions))
         num_dims = len(dimensions)
-        num_cells_to_inflate = int(agent_radius/0.5)
-        # no_resolution_dimensions = [int(dim*resolution) for dim in dimensions]
-        # total_cells = int(math.prod(no_resolution_dimensions)) 
-        # resolution_cells = int(1/resolution)
-        # resolution_cells_shape = (resolution_cells,) * num_dims
-        # num_resolution_cells = resolution_cells**num_dims
+        num_cells_to_inflate = (
+            math.ceil(agent_radius / resolution) if resolution > 0 else 0
+        )
         # total_cells = int(math.prod(no_resolution_dimensions)) 
         if 0 < nb_obstacles < 1:
             nb_obstacles = int(total_cells * nb_obstacles)
@@ -151,25 +162,37 @@ class InputFile:
 
             return None
 
-        # Place obstacles
-        obstacles = []
+        # Place obstacles (sample/rasterize internally in grid, publish centers in world).
+        obstacles_grid = []
         # cell_indices = np.unravel_index(np.arange(num_resolution_cells),resolution_cells_shape )
         for _ in range(nb_obstacles):
             obs_pos = get_random_position(occupied_positions)
             if obs_pos is None:
-                assert False, f"Failed to place obstacle {_} (placed {len(obstacles)}/{nb_obstacles})"
-            
-            occupied_positions.add(obs_pos)
-            obstacles.append(obs_pos)
-            input_dict["map"]["obstacles"].append(obs_pos)
-            # for i in range(num_resolution_cells):
-            #     resolution_obs_pos = tuple(int(cell_indices[j][i] + obs_pos[j]//resolution) for j in range(num_dims))
-            #     obstacles.append(resolution_obs_pos)
-            #     input_dict["map"]["obstacles"].append(resolution_obs_pos)
+                assert False, f"Failed to place obstacle {_} (placed {len(obstacles_grid)}/{nb_obstacles})"
+            obs_world = map_.map_to_world(obs_pos)
+            obs_world_list = [float(x) for x in np.asarray(obs_world).reshape(-1)]
+            obs_pos_inflated_arr = obstacles_world_to_grid(map_, [obs_world_list], obs_size)
+            obs_pos_inflated = [tuple(int(v) for v in row.tolist()) for row in obs_pos_inflated_arr]
+            if not obs_pos_inflated:
+                center_cell = tuple(
+                    int(v)
+                    for v in np.asarray(
+                        map_.world_to_map(tuple(obs_world_list), discrete=True)
+                    ).reshape(-1)
+                )
+                obs_pos_inflated = [center_cell]
+            for pos in obs_pos_inflated:
+                if pos in occupied_positions:
+                    continue
+                occupied_positions.add(pos)
+                obstacles_grid.append(pos)
+            input_dict["map"]["obstacles"].append(
+                obs_world_list
+            )
         
         if agent_radius > 0 and num_cells_to_inflate > 0:
             offset_range = range(-num_cells_to_inflate, num_cells_to_inflate + 1)
-            for obs_pos in obstacles:
+            for obs_pos in obstacles_grid:
                 for offset in product(*(offset_range for _ in range(num_dims))):
                     inflated_obs_pos = tuple(obs_pos[j] + offset[j] for j in range(num_dims))
                     occupied_positions.add(inflated_obs_pos)
@@ -200,12 +223,17 @@ class InputFile:
                     inflated_obs_pos = tuple(goal_pos[j] + offset[j] for j in range(num_dims))
                     occupied_positions.add(inflated_obs_pos)
 
-            start_pos = tuple(int(start_pos[j]*resolution) for j in range(num_dims))
-            goal_pos = tuple(int(goal_pos[j]*resolution) for j in range(num_dims))
+            # Publish starts/goals in world coordinates for YAML; sampling used grid cells above.
+            start_grid = tuple(int(start_pos[j]) for j in range(num_dims))
+            goal_grid = tuple(int(goal_pos[j]) for j in range(num_dims))
+            start_w = map_.map_to_world(start_grid)
+            goal_w = map_.map_to_world(goal_grid)
+            start_world = [float(x) for x in np.asarray(start_w).reshape(-1)]
+            goal_world = [float(x) for x in np.asarray(goal_w).reshape(-1)]
             input_dict["agents"].append(
                 {
-                    "start": list(start_pos),
-                    "goal": list(goal_pos),
+                    "start": start_world,
+                    "goal": goal_world,
                     "name": f"agent{agent_id}",
                 }
             )
@@ -228,11 +256,13 @@ def shuffle_agents_goals(inpt: Dict, agent_goal_index: List[int]) -> Dict:
 def create_map(param: Dict, generate_new_graph: bool = False,graph_file: Path =None,verbose: bool = True,args: dict = {}):
     bounds = param["map"]["bounds"]
     resolution = param["map"]["resolution"]
+    sampling_dist_dict = param.get("sampling_dist_dict", {})
     if graph_file and graph_file.exists() and not generate_new_graph:
-        map_ = GraphSampler(bounds=bounds, resolution=resolution, start=[], goal=[])
+        map_ = GraphSampler(bounds=bounds, resolution=resolution, start=[], goal=[], sampling_dist_dict=sampling_dist_dict)
         map_.load_graph_sampler(graph_file,args)
     else:
-        obstacles = np.array(param["map"]["obstacles"])
+        obstacles_world = np.array(param["map"]["obstacles"])
+        obs_size = param.get("obs_size", param.get("map", {}).get("obs_size", 0.5))
         agents = param["agents"]
         road_map_type = param["road_map_type"]
         if road_map_type == 'grid':
@@ -241,7 +271,8 @@ def create_map(param: Dict, generate_new_graph: bool = False,graph_file: Path =N
                 sample_num=0,
                 min_edge_len=1e-10,
                 max_edge_len=(1+1e-10)*param['resolution'],
-                num_neighbors=4.0
+                num_neighbors=4.0,
+                sampling_dist_dict=sampling_dist_dict,
             )
         elif validate_roadmap_type(road_map_type):
             map_ = GraphSampler(
@@ -253,16 +284,19 @@ def create_map(param: Dict, generate_new_graph: bool = False,graph_file: Path =N
                 sample_num=param["sample_num"],
                 min_edge_len=param["min_edge_len"],
                 max_edge_len=param["max_edge_len"],
-                num_neighbors=param["num_neighbors"]
+                num_neighbors=param["num_neighbors"],
+                sampling_dist_dict=sampling_dist_dict,
             )
         else:
             assert False, f"Invalid road map name provided: {road_map_type}"
         
+        obstacles = obstacles_world_to_grid(map_, obstacles_world, obs_size)
         map_.set_obstacles(obstacles=obstacles)
         map_.set_inflation_radius(radius=param["agent_radius"]+np.sqrt(2)/2*param["resolution"])
 
-        start = [agent["start"] for agent in agents]
-        goal = [agent["goal"] for agent in agents]
+        agents_rt = agents_yaml_to_roadmap_frame(map_, agents)
+        start = [a["start"] for a in agents_rt]
+        goal = [a["goal"] for a in agents_rt]
         map_.set_start(start)
         map_.set_goal(goal)
 
