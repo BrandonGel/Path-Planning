@@ -152,14 +152,13 @@ class Visualizer2D(BaseVisualizer2D):
             node_alpha: Alpha of the nodes.
             edge_alpha: Alpha of the edges.
         """
-        offset = map_.resolution/2.0
-        # Plot all edges
-        if map_frame:
-            x_coords = [map_.map_to_world(node.current)[0] for node in nodes]
-            y_coords = [map_.map_to_world(node.current)[1] for node in nodes]
-        else:
-            x_coords = [node.current[0] + offset for node in nodes]
-            y_coords = [node.current[1] + offset for node in nodes]
+        # node.current is stored in world coordinates throughout the codebase
+        # (see GraphSampler.generateRandomNodes), so plot directly. plot_grid_map
+        # draws the underlying type_map with extent=bounds in world units, so all
+        # overlays must also be in world units. The map_frame argument is kept
+        # for signature compatibility but no longer alters the coordinates.
+        x_coords = [node.current[0] for node in nodes]
+        y_coords = [node.current[1] for node in nodes]
         if show_edge:
             for i, edges in enumerate(road_map):
                 if len(edges) == 0:
@@ -178,24 +177,16 @@ class Visualizer2D(BaseVisualizer2D):
         else:
             self.ax.scatter(x_coords, y_coords, c=node_color, edgecolors='black', s=node_size, alpha=node_alpha, zorder=self.zorder['road_map'], label='Sample nodes')
         
-        # Plot start nodes (handle both list and single value)
+        # Plot start nodes (handle both list and single value).
+        # map_.start / map_.goal are world coordinates (set_start/set_goal take world coords).
         start_size = start_size if start_size > 0 else node_size
         if hasattr(map_, 'start') and map_.start is not None:
             if isinstance(map_.start, list) and len(map_.start) > 0:
-                # Multiple start positions
                 for start in map_.start:
-                    if map_frame:   
-                        start = map_.map_to_world(start)
-                    else:
-                        start = (start[0] + offset, start[1] + offset)
                     if start is not None and len(start) >= 2:
                         self.ax.scatter(start[0], start[1], c='red', s=start_size, alpha=1, zorder=self.zorder['expand_tree_node'], label='Start' if start == map_.start[0] else '')
             else:
-                # Single start position (not a list)
-                if map_frame:   
-                    start = map_.map_to_world(map_.start)
-                else:
-                    start = map_.start
+                start = map_.start
                 if len(start) >= 2:
                     self.ax.scatter(start[0], start[1], c='red', s=start_size, alpha=1, zorder=self.zorder['expand_tree_node'], label='Start')
 
@@ -203,17 +194,10 @@ class Visualizer2D(BaseVisualizer2D):
         if hasattr(map_, 'goal') and map_.goal is not None:
             if isinstance(map_.goal, list) and len(map_.goal) > 0:
                 for goal in map_.goal:
-                    if map_frame:   
-                        goal = map_.map_to_world(goal)
-                    else:
-                        goal = (goal[0] + offset, goal[1] + offset)
                     if goal is not None and len(goal) >= 2:
                         self.ax.scatter(goal[0], goal[1], c='blue', s=goal_size, alpha=1, zorder=self.zorder['expand_tree_node'], label='Goal')
             else:
-                if map_frame:   
-                    goal = map_.map_to_world(map_.goal)
-                else:
-                    goal = map_.goal
+                goal = map_.goal
                 if len(goal) >= 2:
                     self.ax.scatter(goal[0], goal[1], c='blue', s=goal_size, alpha=1, zorder=self.zorder['expand_tree_node'], label='Goal')
 

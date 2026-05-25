@@ -247,7 +247,7 @@ class GraphSampler(Grid):
     def line_of_sight(self, p1: Tuple[float, ...], p2: Tuple[float, ...]) -> bool:
         """
         Check if the line of sight between two points is in collision.
-        
+
         Args:
             p1: Start point of the line.
             p2: End point of the line.
@@ -255,15 +255,20 @@ class GraphSampler(Grid):
         dim = self.dim
         if len(p1) != dim or len(p2) != dim:
             raise ValueError(f"Points must have dimension {dim}")
-        
-        # Convert to grid coordinates using map's point_float_to_int
-        p1_grid = np.array(self.world_to_map(p1,discrete=True), dtype=int)
-        p2_grid = np.array(self.world_to_map(p2,discrete=True), dtype=int)
+
+        # DDA runs in continuous grid-index space where each cell occupies the
+        # unit interval [k, k+1]. Transforming world coords up front keeps the
+        # existing integer-boundary traversal correct under non-unit resolution
+        # and non-zero bounds origin.
+        inv_res = 1.0 / float(self.resolution)
+        bounds_lo = np.asarray(self.bounds, dtype=float)[:, 0]
+        p1_arr = (np.array(p1, dtype=float) - bounds_lo) * inv_res
+        p2_arr = (np.array(p2, dtype=float) - bounds_lo) * inv_res
+
+        shape_arr = np.asarray(self.shape, dtype=int)
+        p1_grid = np.clip(np.floor(p1_arr).astype(int), 0, shape_arr - 1)
+        p2_grid = np.clip(np.floor(p2_arr).astype(int), 0, shape_arr - 1)
         current_tile = p1_grid.copy()
-        
-        # Convert to numpy arrays for DDA calculations (world coordinates)
-        p1_arr = np.array(p1, dtype=float)
-        p2_arr = np.array(p2, dtype=float)
         
         # Calculate deltas
         delta = p2_arr - p1_arr
@@ -350,14 +355,19 @@ class GraphSampler(Grid):
         # Check if end point has the correct dimension
         if  len(p1) != dim and len(p2) != dim:
             raise ValueError(f"End point must have dimension {dim}")
-        
-        # Convert to grid coordinates using map's point_float_to_int
-        p1_grid = np.array(self.world_to_map(p1,discrete=True), dtype=int)
-        p2_grid = np.array(self.world_to_map(p2,discrete=True), dtype=int)
-        
-        # Convert to numpy arrays for DDA calculations (world coordinates)
-        p1_arr = np.array(p1, dtype=float)
-        p2_arr = np.array(p2, dtype=float)
+
+        # DDA runs in continuous grid-index space where each cell occupies the
+        # unit interval [k, k+1]. Transforming world coords up front keeps the
+        # existing integer-boundary traversal correct under non-unit resolution
+        # and non-zero bounds origin.
+        inv_res = 1.0 / float(self.resolution)
+        bounds_lo = np.asarray(self.bounds, dtype=float)[:, 0]
+        p1_arr = (np.array(p1, dtype=float) - bounds_lo) * inv_res
+        p2_arr = (np.array(p2, dtype=float) - bounds_lo) * inv_res
+
+        shape_arr = np.asarray(self.shape, dtype=int)
+        p1_grid = np.clip(np.floor(p1_arr).astype(int), 0, shape_arr - 1)
+        p2_grid = np.clip(np.floor(p2_arr).astype(int), 0, shape_arr - 1)
         
         # Calculate deltas
         delta = p2_arr - p1_arr
@@ -1152,7 +1162,7 @@ class GraphSampler(Grid):
         self.obstacles = data["obstacles"]
         self.obs_size = data["obs_size"] if "obs_size" in data else 0.5
         self.inflation_radius = data["inflation_radius"]
-        self.set_obstacles(self.obstacles, self.obs_size)
+        self.set_obstacles(self.obstacles)
         self.set_inflation_radius(self.inflation_radius)
         self.track_with_link = data["track_with_link"]
         self.grid_points = data["grid_points"]

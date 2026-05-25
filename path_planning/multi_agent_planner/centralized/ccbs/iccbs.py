@@ -220,8 +220,12 @@ class ICCBS(CCBS):
             if a == agent:
                 # Deep copy and add new constraint for the target agent
                 nc = Constraints()
-                nc.wait_constraints = P.constraint_dict[a].wait_constraints.copy()
-                nc.move_constraints = P.constraint_dict[a].move_constraints.copy()
+                nc.wait_constraints = {
+                    k: v.copy() for k, v in P.constraint_dict[a].wait_constraints.items()
+                }
+                nc.move_constraints = {
+                    k: v.copy() for k, v in P.constraint_dict[a].move_constraints.items()
+                }
                 nc.add_constraint(conflict_constraints[a])
                 new_constraints_dict[a] = nc
             else:
