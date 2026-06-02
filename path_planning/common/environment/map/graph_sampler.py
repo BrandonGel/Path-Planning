@@ -21,7 +21,7 @@ def validate_roadmap_type(roadmap_type: str):
         return False
     return True
 class GraphSampler(Grid):
-    def __init__(self,*args,start,goal,sample_num=0,num_neighbors = 13.0, min_edge_len = 1e-10, max_edge_len = 30.0,goal_sample_rate=0.1,use_discrete_space=True,use_constraint_sweep=True,record_sweep=True,use_exact_collision_check=True,use_dijkstra=True,sampling_dist_dict = {},**kwargs):
+    def __init__(self,*args,start,goal,sample_num=0,num_neighbors = 13.0, min_edge_len = 1e-10, max_edge_len = 30.0,goal_sample_rate=0.1,use_discrete_space=True,use_constraint_sweep=True,record_sweep=True,use_exact_collision_check=True,use_dijkstra=True,sampling_dist_dict = {},sweep_backend="auto",**kwargs):
         super().__init__(*args, **kwargs)
 
         # Check if start and goal are lists, non-empty, and not None
@@ -60,7 +60,8 @@ class GraphSampler(Grid):
         self.use_constraint_sweep = use_constraint_sweep
         self.record_sweep = record_sweep
         self.use_exact_collision_check = use_exact_collision_check
-        self.constraint_sweep = CGAL_Sweep(record_sweep=record_sweep,use_exact_collision_check=use_exact_collision_check)
+        self.sweep_backend = sweep_backend
+        self.constraint_sweep = self._make_constraint_sweep()
         self.sample_kd_tree = None
         self.use_dijkstra = use_dijkstra
         self.sampling_dist_dict = sampling_dist_dict if sampling_dist_dict else {}
@@ -1036,6 +1037,42 @@ class GraphSampler(Grid):
         self.edges, self.edge_indices_dict,self.edge_weights  = self.calculate_edges(road_map,edge_weights)
         return road_map
 
+    def _make_constraint_sweep(self):
+        """Build the spatial-sweep backend.
+
+        ``sweep_backend``:
+        - ``"auto"`` (default): use the Shapely (GEOS) backend in 2D and the CGAL
+          backend in 3D+ (Shapely/GEOS is planar). Falls back to CGAL in 2D if
+          Shapely is not installed.
+        - ``"shapely"``: force the Shapely backend (2D only).
+        - ``"cgal"``: force the CGAL backend (2D or 3D).
+        Shapely is imported lazily so it is only required when actually selected."""
+        backend = getattr(self, "sweep_backend", "auto")
+        dim = getattr(self, "dim", None)
+        if dim is None:
+            dim = len(self.bounds) if getattr(self, "bounds", None) is not None else 2
+
+        if backend == "auto":
+            backend = "shapely" if dim == 2 else "cgal"
+            if backend == "shapely":
+                try:  # 2D auto falls back to CGAL when Shapely is unavailable.
+                    import shapely  # noqa: F401
+                except Exception:
+                    backend = "cgal"
+
+        if backend == "shapely":
+            from path_planning.utils.shapely_sweep import ShapelySweep
+            return ShapelySweep(
+                record_sweep=self.record_sweep,
+                use_exact_collision_check=self.use_exact_collision_check,
+            )
+        if backend != "cgal":
+            raise ValueError(f"Unknown sweep_backend {backend!r}; expected 'auto', 'cgal' or 'shapely'.")
+        return CGAL_Sweep(
+            record_sweep=self.record_sweep,
+            use_exact_collision_check=self.use_exact_collision_check,
+        )
+
     def set_constraint_sweep(self):
         self.constraint_sweep.set_graph([node.current for node in self.nodes],self.edges)
         # Precompute tuples for fast per-index coordinate access — avoids the
@@ -1168,6 +1205,7 @@ class GraphSampler(Grid):
             "use_constraint_sweep": self.use_constraint_sweep,
             "record_sweep": self.record_sweep,
             "use_exact_collision_check": self.use_exact_collision_check,
+            "sweep_backend": getattr(self, "sweep_backend", "cgal"),
             "sampling_dist_dict": self.sampling_dist_dict,
         }
 
@@ -1216,7 +1254,8 @@ class GraphSampler(Grid):
         self.use_constraint_sweep = data["use_constraint_sweep"] if not 'use_constraint_sweep' in args else args["use_constraint_sweep"]
         self.record_sweep = data["record_sweep"]
         self.use_exact_collision_check = data["use_exact_collision_check"]
-        self.constraint_sweep = CGAL_Sweep(record_sweep=self.record_sweep,use_exact_collision_check=self.use_exact_collision_check)
+        self.sweep_backend = args.get("sweep_backend", data.get("sweep_backend", "auto"))
+        self.constraint_sweep = self._make_constraint_sweep()
         if self.use_constraint_sweep:
             self.set_constraint_sweep()
 
@@ -1429,6 +1468,7 @@ class GraphSampler(Grid):
             "use_constraint_sweep": self.use_constraint_sweep,
             "record_sweep": self.record_sweep,
             "use_exact_collision_check": self.use_exact_collision_check,
+            "sweep_backend": getattr(self, "sweep_backend", "cgal"),
             "sampling_dist_dict": self.sampling_dist_dict,
         }
 
@@ -1447,6 +1487,7 @@ class GraphSampler(Grid):
             use_constraint_sweep=self.use_constraint_sweep,
             record_sweep=self.record_sweep,
             use_exact_collision_check=self.use_exact_collision_check,
+            sweep_backend=getattr(self, "sweep_backend", "cgal"),
             sampling_dist_dict=self.sampling_dist_dict,
         )
         pruned_sampler._load_from_dict(pruned_data)

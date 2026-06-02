@@ -217,7 +217,7 @@ def read_grid_from_yaml(filename: str):
         raise ValueError(f"Unsupported dimensions: {len(dimensions)}")
     return env
 
-def read_graph_sampler_from_yaml(filename: str,use_discrete_space: bool = True,graph_file: str = None, args: dict = {}, sampling_dist_dict: dict = None):
+def read_graph_sampler_from_yaml(filename: str,use_discrete_space: bool = True,graph_file: str = None, args: dict = {}, sampling_dist_dict: dict = None, sweep_backend: str = "auto"):
     """
     Read a YAML file and recreate a GraphSampler environment.
 
@@ -242,7 +242,7 @@ def read_graph_sampler_from_yaml(filename: str,use_discrete_space: bool = True,g
     obs_size = yaml_data.get("obs_size", yaml_data.get("map", {}).get("obs_size", 0.5))
     
     
-    env = GraphSampler(bounds=bounds, resolution=resolution,start=[],goal=[],use_discrete_space=use_discrete_space,sampling_dist_dict=sampling_dist_dict or {})
+    env = GraphSampler(bounds=bounds, resolution=resolution,start=[],goal=[],use_discrete_space=use_discrete_space,sampling_dist_dict=sampling_dist_dict or {},sweep_backend=sweep_backend)
     if graph_file is None:
         validate_obstacle_map_config(env, obstacles_world, obs_size)
         obstacles = obstacles_world_to_grid(env, obstacles_world, obs_size)

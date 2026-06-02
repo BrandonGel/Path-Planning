@@ -47,7 +47,8 @@ from path_planning.utils.util import (
 
 
 def _make_map_mapd(map_yaml: str, use_discrete_space: bool, agent_radius: float,
-                   register_task_endpoints: bool = False, roadmap_type: str | None = None):
+                   register_task_endpoints: bool = False, roadmap_type: str | None = None,
+                   sweep_backend: str = "auto"):
     """
     Build the roadmap for a life-long MAPD instance (e.g. ``2d_mapd.yaml``).
 
@@ -71,7 +72,7 @@ def _make_map_mapd(map_yaml: str, use_discrete_space: bool, agent_radius: float,
     if roadmap_type is None:
         roadmap_type = "grid" if use_discrete_space else "prm"
     print(f"roadmap_type: {roadmap_type}")
-    map_ = read_graph_sampler_from_yaml(map_yaml, use_discrete_space=use_discrete_space)
+    map_ = read_graph_sampler_from_yaml(map_yaml, use_discrete_space=use_discrete_space, sweep_backend=sweep_backend)
     mapd = read_mapd_from_yaml(map_yaml)
     # Inflate obstacles by the agent footprint. NOTE: the ESDF is quantized to grid
     # steps, so the nearest free cell to an obstacle sits at distance 1.0 — an

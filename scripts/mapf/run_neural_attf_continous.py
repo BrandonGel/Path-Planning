@@ -51,6 +51,7 @@ def _run_continuous(
     agent_radius: float = 0.5,
     velocity: float = 1.0,
     roadmap_type: str = "prm",
+    sweep_backend: str = "auto",
     out_dir_figs: str = "figs/neural_attf",
     out_dir_yaml: str = "path_planning/maps/2d/neural_attf",
     make_gif: bool = True,
@@ -70,7 +71,7 @@ def _run_continuous(
     # the sampled roadmap can reach them at their exact coordinates.
     map_, agents, mapd, nodes, road_map = _make_map_mapd(
         map_yaml, use_discrete_space=False, agent_radius=agent_radius,
-        register_task_endpoints=True, roadmap_type=roadmap_type,
+        register_task_endpoints=True, roadmap_type=roadmap_type, sweep_backend=sweep_backend,
     )
 
     # Scenario config from the YAML. ``task_freq`` is stored as a 1-element list.
@@ -135,9 +136,11 @@ def _run_continuous(
 
 
 def main():
-    # Roadmap type from the CLI: `python run_neural_attf_continous.py <roadmap_type>`
-    # (prm, rrg, cdt, voronoi, halton, midpoints, centroids, dt). Defaults to prm.
+    # CLI: `python run_neural_attf_continous.py [roadmap_type] [sweep_backend]`
+    # roadmap_type: prm (default), rrg, cdt, voronoi, halton, midpoints, centroids, dt
+    # sweep_backend: auto (default; shapely in 2D, cgal in 3D+), or force cgal/shapely
     roadmap_type = sys.argv[1] if len(sys.argv) > 1 else "halton"
+    sweep_backend = sys.argv[2] if len(sys.argv) > 2 else "auto"
     set_global_seed(42)
     _run_continuous(
         map_yaml="path_planning/maps/2d/2d_mapd.yaml",
@@ -146,6 +149,7 @@ def main():
         agent_radius=0.5,
         velocity=1.0,
         roadmap_type=roadmap_type,
+        sweep_backend=sweep_backend,
         make_gif=True,  # flip to True to also render the (slower) GIF
     )
 
