@@ -46,16 +46,31 @@ from path_planning.utils.util import (
 )
 
 
-def _make_map_mapd(map_yaml: str, use_discrete_space: bool, agent_radius: float):
+def _make_map_mapd(map_yaml: str, use_discrete_space: bool, agent_radius: float,
+                   register_task_endpoints: bool = False, roadmap_type: str | None = None):
     """
     Build the roadmap for a life-long MAPD instance (e.g. ``2d_mapd.yaml``).
 
     Agents carry only a ``start`` (no goal) and the parking/task endpoints come from
     the file rather than random sampling. Returns the raw MAPD payload alongside the
-    map so the caller can convert the predefined tasks. Discrete mode is recommended:
-    every free cell is a roadmap node, so the fixed task pickup/delivery endpoints
-    are guaranteed reachable.
+    map so the caller can convert the predefined tasks. In discrete mode every free
+    cell is a roadmap node, so the fixed task pickup/delivery endpoints are
+    guaranteed reachable. In continuous mode they are NOT sampled nodes, so set
+    ``register_task_endpoints=True`` to add the candidate task/parking points to the
+    graph (with their exact coords) before the roadmap is built.
+
+    ``roadmap_type`` selects the roadmap (``GraphSampler.generate_map``):
+    ``"grid"``, ``"prm"``, ``"rrg"``, ``"cdt"``, ``"voronoi"``, ``"midpoints"``,
+    ``"centroids"``, ``"dt"``, or ``"halton..."``. Defaults to ``"grid"`` in discrete
+    mode and ``"prm"`` in continuous mode. NOTE for MAPD: ``prm`` connects the
+    registered endpoints via KNN so they stay reachable; topology-defining types
+    (``cdt``/``voronoi``/``rrg``) rebuild the node set and may not route through
+    arbitrary registered endpoints — prefer ``prm``/``halton`` when endpoints are
+    fixed.
     """
+    if roadmap_type is None:
+        roadmap_type = "grid" if use_discrete_space else "prm"
+    print(f"roadmap_type: {roadmap_type}")
     map_ = read_graph_sampler_from_yaml(map_yaml, use_discrete_space=use_discrete_space)
     mapd = read_mapd_from_yaml(map_yaml)
     # Inflate obstacles by the agent footprint. NOTE: the ESDF is quantized to grid
@@ -68,14 +83,38 @@ def _make_map_mapd(map_yaml: str, use_discrete_space: bool, agent_radius: float)
     if use_discrete_space:
         map_.set_parameters(sample_num=0, num_neighbors=4.0, min_edge_len=0.0, max_edge_len=1.1)
     else:
-        map_.set_parameters(sample_num=1000, num_neighbors=13.0, min_edge_len=0.0, max_edge_len=5.1)
+        # Sparser PRM with shorter edges: the SIPP low-level planner rebuilds its
+        # per-node/edge interval graph each call, so fewer nodes/edges keeps it fast
+        # while staying dense enough for radius-aware connectivity.
+        map_.set_parameters(sample_num=400, num_neighbors=8.0, min_edge_len=0.0, max_edge_len=3.0)
 
     # World-frame starts so generateRandomNodes registers them as roadmap nodes.
     agents_rt = mapd_agents_to_roadmap_frame(map_, mapd["agents"])
     map_.set_start([a["start"] for a in agents_rt])
-    map_.set_goal([])
-    nodes = map_.generateRandomNodes(generate_grid_nodes=use_discrete_space)
-    road_map = map_.generate_roadmap(nodes)
+
+    if register_task_endpoints:
+        # Continuous roadmaps: candidate task/parking endpoints aren't sampled nodes,
+        # so register them (exact coords) via set_goal so generateRandomNodes adds
+        # them and generate_map connects them. Cleared after build for a clean figure.
+        endpoint_world = (
+            [p for pair in mapd["goal_locations"] for p in pair]
+            + [p for pair in mapd["start_locations"] for p in pair]
+            + list(mapd["non_task_endpoints"])
+        )
+        map_.set_goal(points_to_roadmap_frame(map_, endpoint_world))
+    else:
+        map_.set_goal([])
+
+    # Sample nodes for the requested roadmap, then connect them via the matching
+    # builder. generate_map dispatches per type; rrg/planar rebuild the node set, so
+    # read the authoritative nodes/road_map back from the map afterwards.
+    nodes = map_.generateRandomNodes(generate_grid_nodes=use_discrete_space, roadmap_type=roadmap_type)
+    map_.generate_map(roadmap_type, nodes)
+    nodes = map_.nodes
+    road_map = map_.road_map
+
+    if register_task_endpoints:
+        map_.set_goal([])  # nodes persist in node_index_dict; keep the figure clean
 
     return map_, agents_rt, mapd, nodes, road_map
 
@@ -99,7 +138,7 @@ def _run_mapd(
     print(f"\n=== Neural-ATTF (MAPD) | {os.path.basename(map_yaml)} | mode={mode} ===")
 
     rng = random.Random(seed)
-    map_, agents, mapd, nodes, road_map = _make_map_mapd(map_yaml, use_discrete_space, agent_radius)
+    map_, agents, mapd, nodes, road_map = _make_map_mapd(map_yaml, use_discrete_space, agent_radius,roadmap_type='halton')
 
     # Convert predefined endpoints/tasks from world coords to the roadmap frame,
     # keeping each task whole (multi-leg route under one task name).
@@ -154,6 +193,8 @@ def _solve_and_save(
     out_dir_figs: str,
     out_dir_yaml: str,
     make_gif: bool,
+    velocity: float = 0.0,
+    low_level: str = "grid",
     delay_probability: float = 0.0,
     extra_summary: dict | None = None,
 ):
@@ -161,9 +202,9 @@ def _solve_and_save(
     Shared tail for the Neural-ATTF runners: simulate the token-passing planner
     over the given task stream, write the YAML solution summary, and render the
     static PNG (+ optional GIF). Used by :func:`_run_mapd` (predefined MAPD tasks)
-    and the random-MAPD runner in ``run_neural_attf_random.py``. The optional
-    ``delay_probability`` is the per-step probability that an agent is held in place
-    by ``Simulation`` (e.g. derived from ``n_delays_per_agent``).
+    and the random/continuous runners. ``agent_radius``/``velocity`` give the planner
+    a radius-aware (CGAL swept) agent–agent footprint; ``delay_probability`` is the
+    per-step probability that an agent is held in place by ``Simulation``.
     """
     planner = NeuralATTF(
         graph_map=map_,
@@ -174,6 +215,9 @@ def _solve_and_save(
         grid_overlay=None,
         alpha=0.001,
         heuristic_type="manhattan" if use_discrete_space else "euclidean",
+        agent_radius=agent_radius,
+        velocity=velocity,
+        low_level=low_level,
     )
     sim = Simulation(tasks=[], agents=agents, delay_probability=delay_probability, rng=rng)
 

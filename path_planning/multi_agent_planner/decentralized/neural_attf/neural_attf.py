@@ -28,6 +28,7 @@ import numpy as np
 from path_planning.common.environment.map.graph_sampler import GraphSampler
 from path_planning.multi_agent_planner.decentralized.neural_attf.cbs import Environment
 from path_planning.multi_agent_planner.decentralized.neural_attf.grid_overlay import GridOverlay
+from path_planning.multi_agent_planner.centralized.sipp.sipp import SippPlanner
 
 try:
     import torch  # type: ignore
@@ -43,6 +44,32 @@ def _as_point(p) -> Tuple[float, ...]:
     return tuple(float(c) for c in p)
 
 
+def _point_schedule(p, t) -> dict:
+    """A timed-waypoint dict ``{x, y[, z], t}`` for SIPP dynamic obstacles."""
+    p = _as_point(p)
+    d = {"x": float(p[0]), "y": float(p[1]), "t": float(t)}
+    if len(p) == 3:
+        d["z"] = float(p[2])
+    return d
+
+
+class _Loc:
+    """Minimal stand-in exposing ``.point`` (matches cbs.Location's interface)."""
+    __slots__ = ("point",)
+
+    def __init__(self, point):
+        self.point = tuple(point)
+
+
+class _SegState:
+    """Minimal path state exposing ``.location.point`` so SIPP-derived paths plug
+    into the same join code as the grid Environment solution states."""
+    __slots__ = ("location",)
+
+    def __init__(self, point):
+        self.location = _Loc(point)
+
+
 class NeuralATTF:
     def __init__(
         self,
@@ -56,6 +83,9 @@ class NeuralATTF:
         num_goal_wait_steps: int = 0,
         heuristic_type: str = "euclidean",
         deadlock_radius: float = 2.0,
+        agent_radius: float = 0.0,
+        velocity: float = 0.0,
+        low_level: str = "grid",
         device: str = "cpu",
     ):
         self.graph_map = graph_map
@@ -68,7 +98,21 @@ class NeuralATTF:
         self.heuristic_type = heuristic_type
         self.a_star_max_iter = a_star_max_iter
         self.deadlock_radius = float(deadlock_radius)
+        self.agent_radius = float(agent_radius)
+        self.velocity = float(velocity)
+        self.low_level = low_level
         self.device = device
+
+        # Agent footprint is the set of graph nodes a radius-``agent_radius`` disk
+        # covers (computed via the map's CGAL swept-collision query), so it works on
+        # any roadmap — grid or continuous PRM. At radius 0 an agent is a point.
+        self._coverage_cache: dict = {}
+        self._node_kdtree = None       # nearest-node snap (built from graph_map.nodes)
+        self._node_kdtree_n = -1
+        if self.agent_radius > 0 or self.low_level == "sipp":
+            # SIPP / radius coverage both rely on the CGAL constraint sweep.
+            self.graph_map.use_constraint_sweep = True
+            self.graph_map.set_constraint_sweep()
 
         non_task_endpoints = [tuple(p) for p in non_task_endpoints]
         if len(agents) > len(non_task_endpoints):
@@ -205,35 +249,70 @@ class NeuralATTF:
 
     # ----------------------------------------------------- dynamic obstacles
 
+    def _covered_nodes(self, p1, p2) -> set:
+        """
+        Graph nodes a radius-``agent_radius`` disk covers while moving ``p1 -> p2``.
+
+        Uses the map's CGAL swept-collision query (the same machinery as CBS/SIPP),
+        which returns the exact set of roadmap vertices/edges the moving disk
+        overlaps — real ``node.current`` tuples, so they match A* state points on any
+        roadmap (grid or continuous PRM). At ``agent_radius == 0`` (or if the sweep is
+        unavailable) the footprint collapses to the single point ``p2``.
+        """
+        p1 = tuple(float(c) for c in p1)
+        p2 = tuple(float(c) for c in p2)
+        if self.agent_radius <= 0:
+            return {p2}
+        key = (p1, p2)
+        cached = self._coverage_cache.get(key)
+        if cached is not None:
+            return cached
+        covered = {p2}
+        try:
+            sweep = self.graph_map.get_constraint_sweep(
+                p1, p2, self.velocity, 2.0 * self.agent_radius, use_interval=True
+            )
+            if sweep is not None:
+                verts, edges = sweep
+                covered |= set(verts)
+                for a, b in edges:
+                    covered.add(tuple(a))
+                    covered.add(tuple(b))
+        except Exception:
+            # Fallback: nodes within the disk via the roadmap KD-tree.
+            kdt = getattr(self.graph_map, "sample_kd_tree", None)
+            if kdt is not None:
+                idxs = kdt.query_ball_point(np.asarray(p2, dtype=float), self.agent_radius)
+                for i in idxs:
+                    covered.add(tuple(self.graph_map.nodes[int(i)].current))
+        self._coverage_cache[key] = covered
+        return covered
+
     def get_moving_obstacles_agents(self, agents, time_start: int) -> dict:
         obstacles: dict = {}
         for name, path in agents.items():
             if len(path) > time_start and len(path) > 1:
                 for i in range(time_start, len(path)):
                     k = i - time_start
-                    pt = path[i]
-                    obstacles[(pt[0], pt[1], k)] = name
-                    if name in self.token["agents_size"]:
-                        for dx, dy in self.token["agents_size"][name]:
-                            obstacles[(pt[0] + dx, pt[1] + dy, k)] = name
+                    # Cover the swept motion arriving at this timestep (radius-aware,
+                    # graph-node footprint) rather than crude grid offsets.
+                    prev = path[i - 1] if i >= 1 else path[i]
+                    for c in self._covered_nodes(prev, path[i]):
+                        obstacles[(c[0], c[1], k)] = name
                     if i == len(path) - 1:
-                        obstacles[(pt[0], pt[1], k + 1)] = name
-                        if name in self.token["agents_size"]:
-                            for dx, dy in self.token["agents_size"][name]:
-                                obstacles[(pt[0] + dx, pt[1] + dy, k + 1)] = name
+                        for c in self._covered_nodes(path[i], path[i]):
+                            obstacles[(c[0], c[1], k + 1)] = name
         return obstacles
 
     def get_idle_obstacles_agents(self, agents_paths, delayed_agents, _time_start: int = 0) -> set:
         obstacles: set = set()
-        for name, path in agents_paths.items():
+        for _, path in agents_paths.items():
             last = path[-1]
             if len(path) == 1 or last in self.non_task_endpoints:
-                obstacles.add((last[0], last[1]))
-                if name in self.token["agents_size"]:
-                    for dx, dy in self.token["agents_size"][name]:
-                        obstacles.add((last[0] + dx, last[1] + dy))
+                obstacles |= self._covered_nodes(last, last)
         for agent_name in delayed_agents:
-            obstacles.add(tuple(self.token["agents"][agent_name][0]))
+            pos = self.token["agents"][agent_name][0]
+            obstacles |= self._covered_nodes(pos, pos)
         return obstacles
 
     # ------------------------------------------------------------- idle plan
@@ -311,6 +390,10 @@ class NeuralATTF:
     def plan(self, agent_name, start, goal, all_idle_agents, all_delayed_agents, cost_map, cost: int):
         start = tuple(start)
         goal = tuple(goal)
+        if self.low_level == "sipp":
+            # Continuous-time, interval-based, radius-aware low-level planning.
+            # cost_map / cost (grid time-offset) are not used by SIPP.
+            return self._plan_sipp(agent_name, start, goal)
         moving = self.get_moving_obstacles_agents(self.token["agents"], cost)
         idle = self.get_idle_obstacles_agents(all_idle_agents, all_delayed_agents, cost)
         agents = [{"name": agent_name, "start": start, "goal": goal}]
@@ -332,6 +415,93 @@ class NeuralATTF:
             return False
         solution, _ = env.compute_solution()
         return solution
+
+    # ----------------------------------------------------- SIPP (continuous t)
+
+    def _snap_to_node(self, pt):
+        """Return ``pt`` if it is already a graph node, else the nearest node coord
+        (SIPP states must be graph nodes; resampled mid-edge positions may not be).
+
+        Uses a KD-tree built from the authoritative ``graph_map.nodes`` — the map's
+        own ``sample_kd_tree`` can be stale for roadmap types (cdt/voronoi/rrg) that
+        rebuild the node set, so its indices may not align with ``nodes``."""
+        from path_planning.common.environment.node import Node
+
+        pt = tuple(pt)
+        if Node(pt) in self.graph_map.node_index_dict:
+            return pt
+        nodes = self.graph_map.nodes
+        if not nodes:
+            return pt
+        if self._node_kdtree is None or self._node_kdtree_n != len(nodes):
+            from scipy.spatial import KDTree
+
+            self._node_kdtree = KDTree([tuple(n.current) for n in nodes])
+            self._node_kdtree_n = len(nodes)
+        _, idx = self._node_kdtree.query(np.asarray(pt, dtype=float), k=1)
+        return tuple(nodes[int(idx)].current)
+
+    def _other_agent_schedules(self, agent_name) -> dict:
+        """Other agents' committed paths as SIPP dynamic obstacles: name -> timed
+        schedule ``[{x, y, t}]`` with t = unit-step index (0 = now)."""
+        sched = {}
+        for name, path in self.token["agents"].items():
+            if name == agent_name or not path:
+                continue
+            sched[name] = [
+                _point_schedule(p, k) for k, p in enumerate(path)
+            ]
+        return sched
+
+    def _plan_sipp(self, agent_name, start, goal):
+        start = self._snap_to_node(start)
+        goal = self._snap_to_node(goal)
+        heur = self.heuristic_type if self.heuristic_type in {"manhattan", "euclidean"} else "euclidean"
+        budget = max(int(self.a_star_max_iter), 10 * len(self.graph_map.nodes))
+        planner = SippPlanner(
+            self.graph_map,
+            dynamic_obstacles=self._other_agent_schedules(agent_name),
+            agents=[{"name": agent_name, "start": start, "goal": goal}],
+            radius=self.agent_radius,
+            velocity=self.velocity,
+            use_constraint_sweep=True,
+            heuristic_type=heur,
+            sipp_max_iterations=budget,
+        )
+        solution, _info = planner.compute_plan()
+        schedule = solution.get(agent_name) if solution else None
+        if not schedule:
+            return False
+        positions = self._resample_unit(schedule, goal)
+        return {agent_name: [_SegState(p) for p in positions]}
+
+    @staticmethod
+    def _resample_unit(schedule, goal):
+        """Sample a continuous-time SIPP schedule ``[{t,x,y}]`` at unit time steps
+        (t = 0,1,2,...) into a position list the unit-step Simulation consumes;
+        waits become repeated positions, long edges are subdivided, and the path
+        ends exactly on ``goal``."""
+        pts = sorted(((float(s["t"]), _as_point(s)) for s in schedule), key=lambda x: x[0])
+        if not pts:
+            return [tuple(goal)]
+        t_last = pts[-1][0]
+        out = []
+        j = 0
+        tt = pts[0][0]
+        n_ticks = int(math.ceil(t_last - pts[0][0])) + 1
+        for step in range(n_ticks):
+            tt = pts[0][0] + step
+            while j + 1 < len(pts) and pts[j + 1][0] <= tt:
+                j += 1
+            if j + 1 < len(pts):
+                (t0, p0), (t1, p1) = pts[j], pts[j + 1]
+                frac = 0.0 if t1 <= t0 else (tt - t0) / (t1 - t0)
+                out.append(tuple(a + frac * (b - a) for a, b in zip(p0, p1)))
+            else:
+                out.append(tuple(pts[-1][1]))
+        if not out or out[-1] != tuple(goal):
+            out.append(tuple(goal))
+        return out
 
     # ---------------------------------------------------- safe-idle dispatch
 

@@ -190,12 +190,11 @@ class SippGraph(object):
                         t2 = t+t_end 
                         self.sipp_graph[vertex_pos].split_interval(t1, t2)
                     for edge_pos, edge_interval in overlapping_edges.items():
-                        t_start,t_end,p1,p2 = edge_interval
-                        self.sipp_graph[edge_pos].add_unsafe_interval(t+t_start, t+t_end, p1, p2, dyn_name)
-                        # t_start,t_end = edge_interval
-                        # t1 = max(0,t+t_start)
-                        # t2 = max(0,t+t_end)
-                        # self.sipp_graph[edge_pos].split_interval(t1, t2)
+                        # edge_interval is a 2-tuple (t_start, t_end) from
+                        # get_constraint_sweep(get_time_interval=True); mirror the
+                        # (correct) edge handling in update_intervals.
+                        t_start, t_end = edge_interval
+                        self.sipp_graph[edge_pos].add_unsafe_interval(t + t_start, t + t_end)
                 else:
                     t1 = t
                     t2 = t1 + 1 if not last_t else float('inf')
