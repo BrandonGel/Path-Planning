@@ -81,6 +81,23 @@ class Visualizer2D(BaseVisualizer2D):
     def close(self):
         plt.close(self.fig)
         
+    def _grid_map_extent(self, grid_map: Grid) -> list:
+        """
+        imshow ``extent`` for a grid map. In discrete mode the extent is shifted by
+        -resolution/2 so each cell centers on its node coordinate
+        ``bounds0 + resolution*index`` (see plot_grid_map); continuous roadmaps
+        carry true world coords, so no offset is applied.
+        """
+        off = (
+            float(getattr(grid_map, "resolution", 1.0)) / 2.0
+            if getattr(grid_map, "use_discrete_space", False)
+            else 0.0
+        )
+        return [
+            grid_map.bounds[0][0] - off, grid_map.bounds[0][1] - off,
+            grid_map.bounds[1][0] - off, grid_map.bounds[1][1] - off,
+        ]
+
     def plot_grid_map(self, grid_map: Grid, equal: bool = False,
                         show_esdf: bool = False, alpha_esdf: float = 0.5,masked_map = None) -> None:
         '''
@@ -99,13 +116,22 @@ class Visualizer2D(BaseVisualizer2D):
         self.dim = grid_map.dim
         type_data = grid_map.type_map.data.copy()
 
+        # In discrete mode, grid nodes (and every overlay drawn from them: paths,
+        # start/goal, endpoints) live at the cell *corner* coordinate
+        # ``bounds0 + resolution*index`` (e.g. 23.0), while imshow with
+        # extent=bounds centers cell ``i`` at ``i + 0.5*resolution``. That leaves
+        # obstacles half a cell off from the markers/paths that belong to them, so
+        # shift the extent by -resolution/2 to center each cell on its node coord.
+        # Continuous roadmaps carry true world coords, so no offset is applied.
+        extent = self._grid_map_extent(grid_map)
+
         self.ax.imshow(
-            np.transpose(type_data), 
-            cmap=self.cmap, 
-            norm=self.norm, 
-            origin='lower', 
-            interpolation='nearest', 
-            extent=[*grid_map.bounds[0], *grid_map.bounds[1]],
+            np.transpose(type_data),
+            cmap=self.cmap,
+            norm=self.norm,
+            origin='lower',
+            interpolation='nearest',
+            extent=extent,
             zorder=self.zorder['grid_map'],
             )
 
@@ -115,7 +141,7 @@ class Visualizer2D(BaseVisualizer2D):
                 cmap="jet",
                 origin="lower",
                 interpolation="nearest",
-                extent=[*grid_map.bounds[0], *grid_map.bounds[1]],
+                extent=extent,
                 alpha=alpha_esdf,
                 zorder=self.zorder['esdf'],
             )
@@ -157,8 +183,8 @@ class Visualizer2D(BaseVisualizer2D):
         # draws the underlying type_map with extent=bounds in world units, so all
         # overlays must also be in world units. The map_frame argument is kept
         # for signature compatibility but no longer alters the coordinates.
-        x_coords = [node.current[0] for node in nodes]
-        y_coords = [node.current[1] for node in nodes]
+        x_coords = np.array([node.current[0] for node in nodes])
+        y_coords = np.array([node.current[1] for node in nodes])
         if show_edge:
             for i, edges in enumerate(road_map):
                 if len(edges) == 0:
@@ -169,37 +195,90 @@ class Visualizer2D(BaseVisualizer2D):
                         x2, y2 = x_coords[edge_idx], y_coords[edge_idx]
                         self.ax.plot([x1, x2], [y1, y2], edge_color, linewidth=linewidth, alpha=edge_alpha, zorder=self.zorder['road_map'])
 
-        # Plot all nodes
-        if node_value is not None:
-            vmin = min(0,np.min(node_value))
-            vmax = max(1,np.max(node_value))
-            self.ax.scatter(x_coords, y_coords, c=node_value, edgecolors='black', s=node_size, alpha=node_alpha, zorder=self.zorder['road_map'], label='Sample nodes', cmap=cmap, vmin=vmin, vmax=vmax)
-        else:
-            self.ax.scatter(x_coords, y_coords, c=node_color, edgecolors='black', s=node_size, alpha=node_alpha, zorder=self.zorder['road_map'], label='Sample nodes')
-        
-        # Plot start nodes (handle both list and single value).
-        # map_.start / map_.goal are world coordinates (set_start/set_goal take world coords).
-        start_size = start_size if start_size > 0 else node_size
-        if hasattr(map_, 'start') and map_.start is not None:
-            if isinstance(map_.start, list) and len(map_.start) > 0:
-                for start in map_.start:
-                    if start is not None and len(start) >= 2:
-                        self.ax.scatter(start[0], start[1], c='red', s=start_size, alpha=1, zorder=self.zorder['expand_tree_node'], label='Start' if start == map_.start[0] else '')
-            else:
-                start = map_.start
-                if len(start) >= 2:
-                    self.ax.scatter(start[0], start[1], c='red', s=start_size, alpha=1, zorder=self.zorder['expand_tree_node'], label='Start')
+        # Collect special endpoints (start/goal/task endpoints). Waypoints that
+        # coincide with one of these are NOT drawn as generic sample nodes; the
+        # special marker/color below stands in for them instead. All coordinates
+        # are world coords (same frame as node.current).
+        start_size = start_size if start_size > 0 else 3*node_size
+        goal_size = goal_size if goal_size > 0 else 3*node_size
+        special_specs = []  # (points, color, marker, size, label)
 
-        goal_size = goal_size if goal_size > 0 else node_size
-        if hasattr(map_, 'goal') and map_.goal is not None:
-            if isinstance(map_.goal, list) and len(map_.goal) > 0:
-                for goal in map_.goal:
-                    if goal is not None and len(goal) >= 2:
-                        self.ax.scatter(goal[0], goal[1], c='blue', s=goal_size, alpha=1, zorder=self.zorder['expand_tree_node'], label='Goal')
-            else:
-                goal = map_.goal
-                if len(goal) >= 2:
-                    self.ax.scatter(goal[0], goal[1], c='blue', s=goal_size, alpha=1, zorder=self.zorder['expand_tree_node'], label='Goal')
+        def _as_point_list(value):
+            if value is None:
+                return []
+            if isinstance(value, list) and (len(value) == 0 or isinstance(value[0], (list, tuple, np.ndarray))):
+                return [v for v in value if v is not None and len(v) >= 2]
+            return [value] if len(value) >= 2 else []
+
+
+        # Task endpoints (visualization-only metadata set via GraphSampler.set_endpoints).
+        for attr, color, marker, label in (
+            ('pickups', 'green', '^', 'Pickup'),
+            ('deliveries', 'blue', 'o', 'Delivery'),
+            ('parking', 'gray', 's', 'Parking'),
+        ):
+            special_specs.append((_as_point_list(getattr(map_, attr, None)), color, marker, goal_size, label))
+        special_specs.append((_as_point_list(getattr(map_, 'start', None)), 'red', 'o', start_size, 'Start'))
+        special_specs.append((_as_point_list(getattr(map_, 'goal', None)), 'blue', 'o', goal_size, 'Goal'))
+        
+        # Mask out waypoints that coincide with any special endpoint.
+        is_special = np.zeros(len(nodes), dtype=bool)
+        for pts, _color, _marker, _size, _label in special_specs:
+            for pt in pts:
+                is_special |= np.isclose(x_coords, pt[0]) & np.isclose(y_coords, pt[1])
+
+        keep = ~is_special
+        # Plot the remaining (generic) sample nodes.
+        if node_value is not None:
+            node_value = np.asarray(node_value)
+            vmin = min(0, np.min(node_value))
+            vmax = max(1, np.max(node_value))
+            self.ax.scatter(x_coords[keep], y_coords[keep], c=node_value[keep], edgecolors='black', s=node_size, alpha=node_alpha, zorder=self.zorder['road_map'], label='Sample nodes', cmap=cmap, vmin=vmin, vmax=vmax)
+        else:
+            self.ax.scatter(x_coords[keep], y_coords[keep], c=node_color, edgecolors='black', s=node_size, alpha=node_alpha, zorder=self.zorder['road_map'], label='Sample nodes')
+
+        # Plot the special endpoints with their respective marker and color.
+        for pts, color, marker, size, label in special_specs:
+            for k, pt in enumerate(pts):
+                self.ax.scatter(pt[0], pt[1], c=color, marker=marker, s=size,
+                                alpha=1, zorder=self.zorder['expand_tree_node'],
+                                label=label if k == 0 else '')
+
+        self.add_legend()
+
+    def add_legend(self, loc: str = 'center left', bbox_to_anchor: tuple = (1.01, 0.5),
+                   title: str = None, reserve: float = 0.18) -> None:
+        """
+        Add a legend on the right side of the plot, outside the axes.
+
+        Collects the labeled artists already drawn on the axes (e.g. Start, Goal,
+        Pickup, Delivery, Parking, Sample nodes, Trajectory) and de-duplicates
+        repeated labels so each entry appears once.
+
+        Args:
+            loc: Legend anchor location (relative to bbox_to_anchor).
+            bbox_to_anchor: Legend position in axes coordinates; >1 places it
+                outside the axes to the right.
+            title: Optional legend title.
+            reserve: Fraction of the figure width to reserve on the right for the
+                legend. Because the figure is saved without bbox_inches='tight'
+                (see animate/savefig), the axes must be shrunk so the outside
+                legend stays within the figure bounds and is not clipped. Set to
+                0 to skip reserving space.
+        """
+        handles, labels = self.ax.get_legend_handles_labels()
+        seen = {}
+        for h, l in zip(handles, labels):
+            if l and l not in seen:
+                seen[l] = h
+        if seen:
+            if reserve:
+                # Shrink the axes so the legend (drawn outside, to the right)
+                # remains inside the figure and is not cut off when saved.
+                self.fig.subplots_adjust(right=1 - reserve)
+            self.ax.legend(list(seen.values()), list(seen.keys()),
+                           loc=loc, bbox_to_anchor=bbox_to_anchor,
+                           borderaxespad=0., framealpha=0.9, title=title)
 
     def animate(self,file_name,map, schedule, road_map=None, skip_frames=1, intermediate_frames=3,speed=1,map_frame=True,radius=0.0):
 
@@ -210,7 +289,8 @@ class Visualizer2D(BaseVisualizer2D):
             for agent_name, agent in combined_schedule.items():
                 for state in agent:
                     state["x"],state["y"] = map.map_to_world((state["x"],state["y"]))
-        self.fig.subplots_adjust(left=0,right=1,bottom=0,top=1, wspace=None, hspace=None)
+        # Reserve space on the right for the legend.
+        self.fig.subplots_adjust(left=0,right=0.82,bottom=0,top=1, wspace=None, hspace=None)
         self.set_fig_size(self.figsize[0], self.figsize[1], map.shape[0]/map.shape[1])
 
         # Draw static map and paths
@@ -244,12 +324,14 @@ class Visualizer2D(BaseVisualizer2D):
 
         colors = ['tab:green']
         agent_num = 0
-        for agent_name, agent in combined_schedule.items():
+        for idx, (agent_name, agent) in enumerate(combined_schedule.items()):
             pos = np.array([[state['x'],state['y']] for state in agent])
-            self.ax.plot(pos[:,0], pos[:,1], color=colors[agent_num], zorder=self.zorder['traj'],linewidth=3)
+            self.ax.plot(pos[:,0], pos[:,1], color=colors[agent_num], zorder=self.zorder['traj'],linewidth=3,
+                         label='Trajectory' if idx == 0 else '')
             agent_num += 1
             agent_num %= len(colors)
 
+        self.add_legend()
         self.ax.set_axis_off()
 
         def init_func():
@@ -345,9 +427,9 @@ class Visualizer2D(BaseVisualizer2D):
         im = self.ax.imshow(
             np.transpose(density_map_plot), 
             cmap=cmap_density, 
-            origin='lower', 
-            interpolation=interpolation, 
-            extent=[*self.grid_map.bounds[0], *self.grid_map.bounds[1]],
+            origin='lower',
+            interpolation=interpolation,
+            extent=self._grid_map_extent(self.grid_map),
             vmin=0,
             vmax=max(np.max(density_map),1),
             zorder=self.zorder['density_map'],  # Use esdf zorder to appear above grid_map but below paths
@@ -369,7 +451,7 @@ class Visualizer2D(BaseVisualizer2D):
                 norm=self.norm,
                 origin='lower',
                 interpolation='nearest',
-                extent=[*self.grid_map.bounds[0], *self.grid_map.bounds[1]],
+                extent=self._grid_map_extent(self.grid_map),
                 zorder=self.zorder['density_map'] + 0.1,
                 alpha=1.0,
             )

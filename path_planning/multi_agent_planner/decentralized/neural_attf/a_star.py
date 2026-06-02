@@ -1,14 +1,12 @@
 """
-
 AStar search
-
 author: Ashwin Bose (@atb033)
-
+author: Giacomo Lodigiani (@Lodz97)
 """
 import heapq
 from itertools import count
 
-class AStar():
+class AStar:
     def __init__(self, env, max_iterations= -1):
         self.agent_dict = env.agent_dict
         self.admissible_heuristic = env.admissible_heuristic
@@ -16,17 +14,18 @@ class AStar():
         self.get_neighbors = env.get_neighbors
         self.get_step_cost = env.get_step_cost
         self.max_iterations = max_iterations if max_iterations > 0 or max_iterations is None else float("inf")
+        self.cost_map = env.cost_map
 
     def reconstruct_path(self, came_from, current):
         total_path = [current]
-        while current in came_from:
+        while current in came_from.keys():
             current = came_from[current]
             total_path.append(current)
         return total_path[::-1]
 
     def search(self, agent_name):
         """
-        low level search 
+        low level search
         """
         initial_state = self.agent_dict[agent_name]["start"]
 
@@ -71,17 +70,29 @@ class AStar():
                 
                 tentative_g_score = g_score[current] + self.get_step_cost(current, neighbor)
 
-                if neighbor not in open_set or tentative_g_score < g_score.get(neighbor, float("inf")):
-                    came_from[neighbor] = current
-                    g_score[neighbor] = tentative_g_score
-                    f_score_neighbor = g_score[neighbor] + self.admissible_heuristic(neighbor, agent_name)
+                if neighbor not in open_set:
+                    open_set |= {neighbor}
+                elif tentative_g_score >= g_score.setdefault(neighbor, float("inf")):
+                    continue
 
-                    # Add to open set if not already there
-                    if neighbor not in open_set:
-                        open_set.add(neighbor)
-                    heapq.heappush(open_heap, (f_score_neighbor,next(counter), neighbor))
+                came_from[neighbor] = current
+
+                g_score[neighbor] = tentative_g_score
+                h_score = self.admissible_heuristic(neighbor, agent_name)
+
+                if self.cost_map is None:
+                    guidance_cost = 0
+                elif neighbor.is_equal_except_time(current):
+                    guidance_cost = 1
+                elif callable(self.cost_map):
+                    guidance_cost = float(self.cost_map(neighbor.location.point))
+                else:
+                    pt = neighbor.location.point
+                    guidance_cost = float(self.cost_map[int(round(pt[0]))][int(round(pt[1]))])
+
+                f_score_neighbor = g_score[neighbor] + h_score + guidance_cost
+                heapq.heappush(open_heap, (f_score_neighbor,next(counter), neighbor))
         if iterations >= self.max_iterations:
             print('Low level A* - Maximum iteration reached')
        
         return False, float("inf")
-
