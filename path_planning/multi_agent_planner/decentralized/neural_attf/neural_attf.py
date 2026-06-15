@@ -18,7 +18,6 @@ itself stays 2D-image-based).
 from __future__ import annotations
 
 import math
-import random
 import time
 from collections import defaultdict, deque
 from typing import Iterable, List, Optional, Sequence, Tuple
@@ -87,6 +86,9 @@ class NeuralATTF:
         velocity: float = 0.0,
         low_level: str = "grid",
         device: str = "cpu",
+        sipp_time_limit: float | None = None,
+        timestep_duration: float = 1.0,
+        park_retry_cooldown: int = 3,
     ):
         self.graph_map = graph_map
         self.agents = agents
@@ -102,6 +104,12 @@ class NeuralATTF:
         self.velocity = float(velocity)
         self.low_level = low_level
         self.device = device
+        # Wall-clock cap (s) per SIPP low-level call; None = unbounded (stops only
+        # at the iteration cap). Real seconds each simulation step represents:
+        # one step covers ~= timestep_duration * velocity world units.
+        self.sipp_time_limit = sipp_time_limit
+        self.timestep_duration = float(timestep_duration)
+        self.park_retry_cooldown = int(park_retry_cooldown)
 
         # Agent footprint is the set of graph nodes a radius-``agent_radius`` disk
         # covers (computed via the map's CGAL swept-collision query), so it works on
@@ -143,6 +151,15 @@ class NeuralATTF:
         self.token["occupied_non_task_endpoints"] = set()
         self.token["delayed_agents"] = []
         self.token["delayed_agents_to_reach_task_start"] = []
+        # task name -> time first assigned / owning agent at assignment.
+        self.token["assigned_tasks_times"] = {}
+        self.token["assigned_tasks_agent"] = {}
+        # SIPP low-level effort, sourced from solution_info["low_level_iterations"].
+        self.token["sipp_iterations"] = 0
+        self.token["sipp_calls"] = 0
+        self.token["sipp_iterations_max_seen"] = 0
+        # agent name -> earliest step its parking dispatch may run again (back-off).
+        self.token["park_retry_after"] = {}
         for a in self.agents:
             start = tuple(a["start"])
             self.token["agents"][a["name"]] = [start]
@@ -382,6 +399,30 @@ class NeuralATTF:
     def get_n_replans(self):
         return self.token["n_replans"]
 
+    def get_assigned_tasks_times(self):
+        """task name -> time first assigned."""
+        return self.token["assigned_tasks_times"]
+
+    def get_assigned_tasks_agent(self):
+        """task name -> owning agent at assignment."""
+        return self.token["assigned_tasks_agent"]
+
+    def get_start_tasks_times(self):
+        """task name -> time the task entered the system."""
+        return self.token["start_tasks_times"]
+
+    def get_sipp_iterations(self):
+        """Total SIPP low-level expansions across the run."""
+        return self.token["sipp_iterations"]
+
+    def get_sipp_calls(self):
+        """Number of SIPP low-level calls."""
+        return self.token["sipp_calls"]
+
+    def get_sipp_iterations_max_seen(self):
+        """Worst single SIPP low-level call (expansions)."""
+        return self.token["sipp_iterations_max_seen"]
+
     def get_token(self):
         return self.token
 
@@ -443,13 +484,15 @@ class NeuralATTF:
 
     def _other_agent_schedules(self, agent_name) -> dict:
         """Other agents' committed paths as SIPP dynamic obstacles: name -> timed
-        schedule ``[{x, y, t}]`` with t = unit-step index (0 = now)."""
+        schedule ``[{x, y, t}]``. SIPP plans in seconds, so step index ``k`` is
+        stamped at SIPP time ``k * timestep_duration`` to align other agents'
+        committed paths with SIPP's continuous clock."""
         sched = {}
         for name, path in self.token["agents"].items():
             if name == agent_name or not path:
                 continue
             sched[name] = [
-                _point_schedule(p, k) for k, p in enumerate(path)
+                _point_schedule(p, k * self.timestep_duration) for k, p in enumerate(path)
             ]
         return sched
 
@@ -466,21 +509,32 @@ class NeuralATTF:
             velocity=self.velocity,
             use_constraint_sweep=True,
             heuristic_type=heur,
+            time_limit=self.sipp_time_limit,
             sipp_max_iterations=budget,
         )
-        solution, _info = planner.compute_plan()
+        solution, info = planner.compute_plan()
+        self._record_sipp_metrics(info)
         schedule = solution.get(agent_name) if solution else None
         if not schedule:
             return False
-        positions = self._resample_unit(schedule, goal)
+        positions = self._resample_unit(schedule, goal, dt=self.timestep_duration)
         return {agent_name: [_SegState(p) for p in positions]}
 
+    def _record_sipp_metrics(self, info: dict) -> None:
+        """Fold one SIPP low-level call's effort into the run-wide counters."""
+        iters = int(info.get("low_level_iterations", 0)) if info else 0
+        self.token["sipp_iterations"] += iters
+        self.token["sipp_calls"] += 1
+        if iters > self.token["sipp_iterations_max_seen"]:
+            self.token["sipp_iterations_max_seen"] = iters
+
     @staticmethod
-    def _resample_unit(schedule, goal):
-        """Sample a continuous-time SIPP schedule ``[{t,x,y}]`` at unit time steps
-        (t = 0,1,2,...) into a position list the unit-step Simulation consumes;
-        waits become repeated positions, long edges are subdivided, and the path
-        ends exactly on ``goal``."""
+    def _resample_unit(schedule, goal, dt: float = 1.0):
+        """Sample a continuous-time SIPP schedule ``[{t,x,y}]`` at ``dt``-second
+        steps (t = 0, dt, 2*dt, ...) into a position list the stepped Simulation
+        consumes; waits become repeated positions, long edges are subdivided, and
+        the path ends exactly on ``goal``."""
+        dt = float(dt) if dt and dt > 0 else 1.0
         pts = sorted(((float(s["t"]), _as_point(s)) for s in schedule), key=lambda x: x[0])
         if not pts:
             return [tuple(goal)]
@@ -488,9 +542,9 @@ class NeuralATTF:
         out = []
         j = 0
         tt = pts[0][0]
-        n_ticks = int(math.ceil(t_last - pts[0][0])) + 1
+        n_ticks = int(math.ceil((t_last - pts[0][0]) / dt)) + 1
         for step in range(n_ticks):
-            tt = pts[0][0] + step
+            tt = pts[0][0] + step * dt
             while j + 1 < len(pts) and pts[j + 1][0] <= tt:
                 j += 1
             if j + 1 < len(pts):
@@ -508,14 +562,20 @@ class NeuralATTF:
     def go_to_closest_non_task_endpoint(
         self, agent_name, agent_pos, all_idle_agents, all_delayed_agents, _cost_map=None
     ):
+        """Route a stuck/idle agent to its nearest free parking endpoint.
+
+        Returns ``True`` when the agent is already parked or a path was committed,
+        ``False`` when no endpoint path exists (the agent is stuck) so the caller
+        can apply a parking-dispatch back-off.
+        """
         if tuple(self.token["agents"][agent_name][-1]) in self.non_task_endpoints:
-            return
+            return True
         target = self.get_closest_non_task_endpoint(agent_pos)
         path = self.plan(agent_name, agent_pos, target, all_idle_agents, all_delayed_agents, None, 0)
         if not path:
             print(f"Solution to non-task endpoint not found for {agent_name}; trying deadlock recovery.")
             self.deadlock_recovery(agent_name, agent_pos, all_idle_agents, all_delayed_agents, self.deadlock_radius)
-            return
+            return False
         self.update_ends(agent_pos, agent_name)
         self.token["occupied_non_task_endpoints"].add(tuple(target))
         self.token["agents_to_tasks"][agent_name] = {
@@ -525,53 +585,99 @@ class NeuralATTF:
             "predicted_cost": 0,
         }
         self.token["agents"][agent_name] = [tuple(state.location.point) for state in path[agent_name]]
+        return True
 
     # ------------------------------------------------------ deadlock recovery
 
-    def _random_close_node_point(self, agent_pos, r: float):
-        """Pick a random reachable graph node within Euclidean radius ``r`` of ``agent_pos``.
+    def _interference_footprint(self, agent_name) -> set:
+        """Graph-node coords ``agent_name`` must not rest on.
 
-        Excludes nodes that would land on a path end, an occupied parking spot,
-        a currently assigned task goal, or an obstacle.
+        The union of: every *other* agent's moving + idle footprint (radius-aware),
+        all path ends, occupied parking spots, **every waypoint of pending/assigned
+        tasks**, and assigned task start/goal cells. The task-waypoint inclusion is
+        what breaks the repeated-deadlock loop — a stuck agent will no longer
+        evacuate onto a cell some task still needs.
+        """
+        footprint: set = set()
+        for name, path in self.token["agents"].items():
+            if name == agent_name or not path:
+                continue
+            for i in range(len(path)):
+                prev = path[i - 1] if i >= 1 else path[i]
+                footprint |= self._covered_nodes(prev, path[i])
+            # Resting (idle) footprint at the committed path end.
+            footprint |= self._covered_nodes(path[-1], path[-1])
+        footprint |= {tuple(p) for p in self.token["path_ends"]}
+        footprint |= {tuple(p) for p in self.token["occupied_non_task_endpoints"]}
+        for task in self.token["tasks"].values():
+            for wp in task:
+                footprint |= self._covered_nodes(wp, wp)
+        footprint |= {tuple(sg) for sg in self.get_agents_to_tasks_starts_goals()}
+        return footprint
+
+    def _close_non_interfering_nodes(self, agent_pos, agent_name, r: float):
+        """Reachable graph nodes within radius ``r`` of ``agent_pos`` whose resting
+        footprint is clear of :meth:`_interference_footprint`, sorted nearest-first.
+
+        Local-only — an empty list means the agent should stay put. A
+        ``scipy.spatial.KDTree`` ball query (clearance ``2 * agent_radius``) replaces
+        the old per-candidate CGAL sweep, which dominated runtime over the ~1500
+        nodes inspected per call.
         """
         nodes = self.graph_map.nodes
         if not nodes:
-            return None
+            return []
         pt = np.asarray(agent_pos, dtype=float)
-        forbidden = (
-            self.token["path_ends"]
-            | self.token["occupied_non_task_endpoints"]
-            | self.get_agents_to_tasks_goals()
-        )
+        # Reachable nodes within r (reuse the authoritative-node KD-tree).
+        if self._node_kdtree is None or self._node_kdtree_n != len(nodes):
+            from scipy.spatial import KDTree
+
+            self._node_kdtree = KDTree([tuple(n.current) for n in nodes])
+            self._node_kdtree_n = len(nodes)
+        near_idxs = self._node_kdtree.query_ball_point(pt, r)
+
+        footprint = self._interference_footprint(agent_name)
+        clearance = 2.0 * self.agent_radius if self.agent_radius > 0 else 1e-9
+        fp_tree = None
+        if footprint:
+            from scipy.spatial import KDTree
+
+            fp_tree = KDTree([tuple(p) for p in footprint])
+
         candidates = []
-        for node in nodes:
-            cand = tuple(float(c) for c in node.current)
-            if cand in forbidden:
+        for i in near_idxs:
+            cand = tuple(float(c) for c in nodes[int(i)].current)
+            d = float(np.linalg.norm(np.asarray(cand) - pt))
+            if d <= 1e-9:
                 continue
             if self.graph_map.in_collision_point(cand):
                 continue
-            d = float(np.linalg.norm(np.asarray(cand) - pt))
-            if 1e-9 < d <= r:
-                candidates.append(cand)
-        if not candidates:
-            return None
-        return random.choice(candidates)
+            if fp_tree is not None and fp_tree.query_ball_point(np.asarray(cand, dtype=float), clearance):
+                continue
+            candidates.append((d, cand))
+        candidates.sort(key=lambda x: x[0])
+        return [c for _, c in candidates]
 
     def deadlock_recovery(self, agent_name, agent_pos, all_idle_agents, all_delayed_agents, r: float):
         self.token["deadlock_count_per_agent"][agent_name] += 1
         if self.token["deadlock_count_per_agent"][agent_name] < 2:
             return
         self.token["deadlock_count_per_agent"][agent_name] = 0
-        target = self._random_close_node_point(agent_pos, r)
-        if target is None:
-            print(f"Deadlock recovery: no free nearby node for {agent_name}.")
+        candidates = self._close_non_interfering_nodes(agent_pos, agent_name, r)
+        if not candidates:
+            print(f"Deadlock recovery: no non-interfering nearby node for {agent_name}; staying put.")
             return
-        path = self.plan(agent_name, agent_pos, target, all_idle_agents, all_delayed_agents, None, 0)
-        if not path:
-            print(f"Deadlock recovery: no path for {agent_name} -> {target}.")
+        # Try candidates nearest-first; commit the first whose trajectory also
+        # plans collision-free (SIPP/A* treat other agents' paths as dynamic
+        # obstacles, so a successful plan == no interference).
+        for target in candidates:
+            path = self.plan(agent_name, agent_pos, target, all_idle_agents, all_delayed_agents, None, 0)
+            if not path:
+                continue
+            self.update_ends(agent_pos, agent_name)
+            self.token["agents"][agent_name] = [tuple(state.location.point) for state in path[agent_name]]
             return
-        self.update_ends(agent_pos, agent_name)
-        self.token["agents"][agent_name] = [tuple(state.location.point) for state in path[agent_name]]
+        print(f"Deadlock recovery: no collision-free escape for {agent_name}.")
 
     # ----------------------------------------------- neural cost-map (option)
 
@@ -708,6 +814,11 @@ class NeuralATTF:
                     joined += pts[:-1] if i < len(segments) - 1 else pts
                 last_pos = joined[-1]
                 self.assigned_tasks.add(closest_task_name)
+                # Assignment-time bookkeeping (first-assignment time is sticky; the
+                # owning agent reflects the latest assignment).
+                if closest_task_name not in self.token["assigned_tasks_times"]:
+                    self.token["assigned_tasks_times"][closest_task_name] = t
+                self.token["assigned_tasks_agent"][closest_task_name] = agent_name
                 if agent_name not in self.token["agents_to_tasks"]:
                     self.token["tasks"].pop(closest_task_name, None)
                     task = available_tasks.pop(closest_task_name, closest_task)
@@ -740,6 +851,15 @@ class NeuralATTF:
                         goal = tuple(self.token["agents_to_tasks"][agent_name]["goal"])
                         self.token["occupied_non_task_endpoints"].discard(goal)
             else:
-                self.go_to_closest_non_task_endpoint(
+                # Parking back-off: a stuck agent's parking dispatch is skipped for
+                # ``park_retry_cooldown`` steps after a failure, instead of re-running
+                # SIPP toward an unreachable endpoint every step. A new task
+                # assignment still routes through the task branch above, so the agent
+                # is never starved.
+                if t < self.token["park_retry_after"].get(agent_name, 0):
+                    continue
+                parked = self.go_to_closest_non_task_endpoint(
                     agent_name, agent_pos, all_idle_agents, all_delayed_agents
                 )
+                if not parked:
+                    self.token["park_retry_after"][agent_name] = t + self.park_retry_cooldown

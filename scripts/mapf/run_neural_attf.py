@@ -296,11 +296,16 @@ def main():
     # Life-long MAPD instance: agents, parking endpoints and multi-leg tasks are
     # all read from the YAML. Discrete mode so every free cell is a roadmap node
     # and the fixed task endpoints are reachable.
+    # NOTE: agent_radius must stay small relative to the warehouse's width-1
+    # corridors. The footprint clearance is 2*agent_radius, so a radius >= 0.5
+    # makes two agents on adjacent cells (1.0 apart) mutually blocking and
+    # deadlocks the corridors. 0.293 -> inflation 1.0 (one cell), still passable.
     _run_mapd(
         map_yaml="path_planning/maps/2d/2d_mapd.yaml",
         use_discrete_space=True,
         horizon=2000,
         seed=42,
+        agent_radius=0.293,
         make_gif=False,
     )
 

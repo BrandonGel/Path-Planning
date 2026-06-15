@@ -186,6 +186,7 @@ class SippPlanner(SippGraph):
         best_solution_cost = float('inf')
         best_success = False
         iterations = 0
+        total_low_level_iterations = 0
         self.max_iterations = len(self.agents)
         for _ in range(self.max_iterations):
             self.shuffle_agents()
@@ -270,6 +271,10 @@ class SippPlanner(SippGraph):
                             heapq.heappush(open_heap, (f_score, counter, successor))
                             counter += 1
 
+                # Accumulate low-level (A*/SIPP) expansions across every high-level
+                # iteration and agent so callers can report total search effort.
+                total_low_level_iterations += low_level_iterations
+
                 if not goal_reached or goal_state is None:
                     success = False
                     break
@@ -290,6 +295,7 @@ class SippPlanner(SippGraph):
         solution =best_solution if best_success else {}
         solution_info["runtime"] = self.total_time
         solution_info["total_iterations"] = self.total_iterations
+        solution_info["low_level_iterations"] = total_low_level_iterations
         solution_info["success"] = best_success
         return solution,solution_info
             
