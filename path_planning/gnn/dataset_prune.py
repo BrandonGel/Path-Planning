@@ -99,7 +99,10 @@ def get_prune_function(prune_mechanism: dict = None):
         def get_prune_value(out:np.ndarray,threshold_value:np.ndarray = 0) -> np.ndarray:
             assert isinstance(out, np.ndarray), "out must be a numpy array"
             threshold = float('inf')
-            out = np.exp(threshold_scale*(out-threshold_value))
+            # Node keep-value as a probability in [0,1] (sigmoid), matching how the model is
+            # trained (get_probability = sigmoid(alpha*(logit - threshold))). So `value` /
+            # the mean/median threshold are probability cutoffs in [0,1] (e.g. 0.5).
+            out = 1.0 / (1.0 + np.exp(-threshold_scale * (out - threshold_value)))
             if mode_func is not None:
                 threshold = mode_func(out)
                 if std_scale is not None:
@@ -108,9 +111,10 @@ def get_prune_function(prune_mechanism: dict = None):
                 threshold = min(threshold, value)
             if threshold == float('inf'):
                 return np.zeros_like(out)
-            out[out > threshold] = 1
-            out[out <= threshold] = 0
-            return out 
+            # Order-independent mask. (Mutating `out` in place — set >thr to 1 then <=thr to 0 —
+            # was buggy for threshold >= 1: the just-set 1.0 entries satisfy 1.0 <= threshold and
+            # got reset to 0, so any value >= 1 pruned everything.)
+            return (out > threshold).astype(np.float64)
         return get_prune_value
     return None
 
@@ -206,6 +210,8 @@ def load_gnn_model(
     run_id: Optional[str] = None,
     sample_data: Optional[HeteroData] = None,
     model_name_suffix: str = "",
+    device: Optional[str] = None,
+    compile_model: Optional[bool] = None,
     ):
     """
     Load GNN model from either a wandb run folder or explicit checkpoint + config paths.
@@ -216,6 +222,10 @@ def load_gnn_model(
         config_path: Path to config.yaml (used when run_folder is None).
         run_id: Optional run ID for gnn_folder_name; inferred from run_folder name if not provided.
         sample_data: HeteroData from normalize_data(map_) to get metadata and node feature dim.
+        device: Override the inference device (e.g. "cpu" for deterministic inference). Default:
+            cuda if available else cpu.
+        compile_model: Override torch.compile (None -> use the config's device.compile). Set False
+            for deterministic, warmup-free inference.
 
     Returns:
         Tuple of (model, config, device, gnn_folder_name).
@@ -235,8 +245,11 @@ def load_gnn_model(
     if sample_data is None:
         raise ValueError("sample_data (HeteroData) is required to build model metadata and in_channels")
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
+    if device is not None:
+        device = torch.device(device)
+    else:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
     if 'threshold' in model_name_suffix:
         node_in_channels = sample_data["node"].x.shape[1] + 1
         model_config = dict(train_config.get("threshold", {}).get("model", {}))
@@ -255,7 +268,8 @@ def load_gnn_model(
         aggr=model_config.get("to_hetero_aggr", "sum"),
     ).to(device)
     device_config = train_config.get("device", {})
-    if device_config.get("compile", False):
+    do_compile = device_config.get("compile", False) if compile_model is None else bool(compile_model)
+    if do_compile:
         model = torch.compile(model, dynamic=device_config.get("compile_dynamic", False))
 
     state_dict = torch.load(checkpoint_path, map_location=device)
@@ -338,8 +352,17 @@ def normalize_data(map_: GraphSampler):
     start_goal_weights_arr = np.array(start_goal_weights_list, dtype=np.float32)
 
     dims = len(map_.bounds)
-    bounds = np.max(map_.bounds)
-    ndata[:,:dims] = ndata[:,:dims] / bounds
+    # Origin-aware, aspect-preserving position normalization: shift by the per-axis min
+    # (map origin) then divide by the largest axis extent (a single uniform scale). For
+    # origin-0 maps this is identical to coords/max(bounds); for maps with a non-zero
+    # origin (e.g. the plant map, origin [-220,-142]) it keeps coords in [0,1] instead of
+    # feeding the GNN out-of-distribution negative coordinates.
+    b = np.asarray(map_.bounds, dtype=float)
+    lo = b[:, 0]
+    scale = float(np.max(b[:, 1] - b[:, 0]))
+    if scale <= 0:
+        scale = 1.0
+    ndata[:, :dims] = (ndata[:, :dims] - lo) / scale
     # Convert to PyG expected shapes: edge_index (2, E), edge_attr (E, F)
     node_to_node_edges_arr = node_to_node_edges_arr.T
     node_to_node_weights_arr = node_to_node_weights_arr.reshape(len(node_to_node_weights_arr), -1)
@@ -524,6 +547,74 @@ def prune_map(map_: GraphSampler, prune_value: np.ndarray, k_hop: int = 0) -> Gr
     # Create and save pruned graph sampler
     pruned_map = map_.create_pruned_copy(kept_indices)
     return pruned_map, kept_indices
+
+def remove_disconnected_islands(map_: GraphSampler, verbose: bool = False):
+    """Drop every connected component of ``map_.road_map`` that contains no start/goal node.
+
+    Pruning (e.g. ``prune_map``) thresholds nodes independently and never checks connectivity, so an
+    aggressive cut can leave small components / isolated nodes ("islands") detached from the main
+    network. Islands with no start and no goal node are unreachable dead weight; this removes them
+    while keeping every component that holds at least one start/goal anchor.
+
+    Returns ``(pruned_map, kept_indices)``. Falls back to keeping the single largest component (with
+    a warning) when the graph has no start/goal anchors at all. No-op (returns ``map_`` unchanged)
+    when every node already lies in an anchored component.
+    """
+    n = len(map_.nodes)
+    if n == 0:
+        return map_, np.array([], dtype=int)
+
+    # Undirected adjacency (road_map is symmetric, but mirror defensively).
+    adj = [set() for _ in range(n)]
+    for i, nbrs in enumerate(map_.road_map):
+        for j in nbrs:
+            if 0 <= j < n:
+                adj[i].add(j)
+                adj[j].add(i)
+
+    # Connected components via iterative BFS/stack.
+    comp_id = [-1] * n
+    components = []
+    for s in range(n):
+        if comp_id[s] != -1:
+            continue
+        cid = len(components)
+        stack = [s]
+        comp_id[s] = cid
+        members = []
+        while stack:
+            x = stack.pop()
+            members.append(x)
+            for w in adj[x]:
+                if comp_id[w] == -1:
+                    comp_id[w] = cid
+                    stack.append(w)
+        components.append(members)
+
+    anchors = set(map_.start_nodes_index.values()) | set(map_.goal_nodes_index.values())
+
+    if anchors:
+        keep_cids = {comp_id[a] for a in anchors if 0 <= a < n}
+    else:
+        # No start/goal anchors: keep the single largest component.
+        largest = max(range(len(components)), key=lambda c: len(components[c]))
+        keep_cids = {largest}
+        print("  WARNING: remove_disconnected_islands found no start/goal anchors; "
+              "keeping the largest component only.")
+
+    kept_indices = sorted(i for i in range(n) if comp_id[i] in keep_cids)
+
+    if verbose:
+        dropped = [len(c) for ci, c in enumerate(components) if ci not in keep_cids]
+        print(f"  islands: {len(components)} components; keeping {len(keep_cids)} "
+              f"(anchored), dropping {len(dropped)} (sizes {sorted(dropped, reverse=True)[:10]}"
+              f"{'...' if len(dropped) > 10 else ''}); nodes {n} -> {len(kept_indices)}")
+
+    if len(kept_indices) == n:
+        return map_, np.arange(n, dtype=int)
+
+    pruned_map = map_.create_pruned_copy(np.asarray(kept_indices, dtype=int))
+    return pruned_map, np.asarray(kept_indices, dtype=int)
 
 def process_single_case_gnn_task(
         task: Tuple[Path, str],
