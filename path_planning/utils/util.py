@@ -7,7 +7,6 @@ from path_planning.common.environment.map.graph_sampler import GraphSampler
 import numpy as np
 import yaml
 import os
-import torch
 import argparse
 from pathlib import Path
 from typing import List, Optional, Sequence
@@ -459,9 +458,19 @@ def write_to_yaml(obj, filename: str):
 def set_global_seed(seed: int = 42):
     random.seed(seed)
     np.random.seed(seed)
+    # Imported here rather than at module scope: torch is only needed by the GNN paths, and
+    # this module is on the import chain of every sampler/planner. A module-level import
+    # makes torch a hard requirement of the whole package, which breaks deployments that
+    # install it on demand (and costs ~1.3 GB for users who never enable the GNN). Seeding
+    # torch is meaningless when torch is absent, so skipping it is the correct no-op.
+    try:
+        import torch
+    except ImportError:
+        return
     torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
