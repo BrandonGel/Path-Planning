@@ -280,7 +280,9 @@ class Visualizer2D(BaseVisualizer2D):
                            loc=loc, bbox_to_anchor=bbox_to_anchor,
                            borderaxespad=0., framealpha=0.9, title=title)
 
-    def animate(self,file_name,map, schedule, road_map=None, skip_frames=1, intermediate_frames=3,speed=1,map_frame=True,radius=0.0):
+    def animate(self,file_name,map, schedule, road_map=None, skip_frames=1, intermediate_frames=3,speed=1,map_frame=True,radius=0.0,
+                show_paths=True, show_legend=True, rack_pts=None, roadmap_specials=True,
+                background_img=None, background_extent=None):
 
         combined_schedule = {}
         combined_schedule.update(copy.deepcopy(schedule["schedule"]))
@@ -289,16 +291,51 @@ class Visualizer2D(BaseVisualizer2D):
             for agent_name, agent in combined_schedule.items():
                 for state in agent:
                     state["x"],state["y"] = map.map_to_world((state["x"],state["y"]))
-        # Reserve space on the right for the legend.
-        self.fig.subplots_adjust(left=0,right=0.82,bottom=0,top=1, wspace=None, hspace=None)
+        # Reserve space on the right for the legend only when a legend is drawn;
+        # otherwise let the axes fill the whole figure (no white margin).
+        _right = 0.82 if show_legend else 1.0
+        self.fig.subplots_adjust(left=0,right=_right,bottom=0,top=1, wspace=None, hspace=None)
         self.set_fig_size(self.figsize[0], self.figsize[1], map.shape[0]/map.shape[1])
+
+        # Size the agent markers (Circle, in data units) to visually match the rack
+        # scatter markers (s=RACK_S points^2). Convert the marker's point-diameter to
+        # data units using the axes' data-width / pixel-width.
+        RACK_S = 28.0
+        _data_w = float(map.bounds[0][1] - map.bounds[0][0])
+        _ax_w_pts = self.figsize[0] * _right * 72.0
+        _marker_dia_pts = np.sqrt(RACK_S)
+        agent_radius_vis = (_marker_dia_pts / 2.0) * (_data_w / _ax_w_pts)
 
         # Draw static map and paths
         Colors = ['orange', 'blue', 'green']
         self.ax.clear()
         self.plot_grid_map(map)
+        # Optionally draw a detailed background image (e.g. the photographic occupancy
+        # map) over the plain obstacle grid. It is already oriented/rotated by the caller
+        # and stretched to the env world ``background_extent`` so it aligns with the
+        # roadmap; drawn just above the grid_map but below the roadmap/agents.
+        if background_img is not None and background_extent is not None:
+            self.ax.imshow(background_img, origin='upper', extent=background_extent,
+                           interpolation='nearest', zorder=self.zorder['grid_map'] + 2)
         if road_map is not None and map.nodes != []:
-            self.plot_road_map(map,map.nodes,road_map,map_frame=map_frame)
+            if roadmap_specials:
+                self.plot_road_map(map,map.nodes,road_map,map_frame=map_frame)
+            else:
+                # Roadmap nodes + edges only (no start/goal/parking markers, no legend).
+                _coords = np.array([n.current for n in map.nodes], dtype=float)
+                for _i, _nbrs in enumerate(road_map):
+                    for _j in _nbrs:
+                        if _j > _i and _j < len(_coords):
+                            self.ax.plot([_coords[_i,0],_coords[_j,0]],[_coords[_i,1],_coords[_j,1]],
+                                         color="#e377c2", linewidth=0.5, alpha=0.3,
+                                         zorder=self.zorder['road_map'])
+                self.ax.scatter(_coords[:,0], _coords[:,1], c="#8c564b", s=6,
+                                zorder=self.zorder['road_map'])
+        if rack_pts is not None and len(rack_pts):
+            _rp = np.asarray(rack_pts, dtype=float)
+            self.ax.scatter(_rp[:,0], _rp[:,1], c="blue", marker="s", s=RACK_S,
+                            edgecolors="white", linewidths=0.5,
+                            zorder=self.zorder['expand_tree_node'])
         patches = []
         artists = []
         agents = dict()
@@ -311,27 +348,30 @@ class Visualizer2D(BaseVisualizer2D):
         for name in schedule["schedule"]:
             start = schedule["schedule"][name][0]
             x,y = start["x"], start["y"]
-            agents[name] = Circle((x, y), max(radius, np.sqrt(2)/4), facecolor=Colors[0], edgecolor='black',zorder=self.zorder['robot_circle'])
+            agents[name] = Circle((x, y), agent_radius_vis, facecolor=Colors[0], edgecolor='black',zorder=self.zorder['robot_circle'])
             agents[name].original_face_color = Colors[0]
             patches.append(agents[name])
 
             T = max(T, schedule["schedule"][name][-1]["t"])//skip_frames
-            text_name = re.findall(r'\d+', name)[-1]
-            agent_names[name] = self.ax.text(x, y, text_name ,zorder=self.zorder['robot_text'])
+            # Number text removed (overlapped the agent marker); keep an empty artist so
+            # the blit machinery (init_func/animate_func) stays unchanged.
+            agent_names[name] = self.ax.text(x, y, "" ,zorder=self.zorder['robot_text'])
             agent_names[name].set_horizontalalignment('center')
             agent_names[name].set_verticalalignment('center')
             artists.append(agent_names[name])
 
         colors = ['tab:green']
         agent_num = 0
-        for idx, (agent_name, agent) in enumerate(combined_schedule.items()):
-            pos = np.array([[state['x'],state['y']] for state in agent])
-            self.ax.plot(pos[:,0], pos[:,1], color=colors[agent_num], zorder=self.zorder['traj'],linewidth=3,
-                         label='Trajectory' if idx == 0 else '')
-            agent_num += 1
-            agent_num %= len(colors)
+        if show_paths:
+            for idx, (agent_name, agent) in enumerate(combined_schedule.items()):
+                pos = np.array([[state['x'],state['y']] for state in agent])
+                self.ax.plot(pos[:,0], pos[:,1], color=colors[agent_num], zorder=self.zorder['traj'],linewidth=3,
+                             label='Trajectory' if idx == 0 else '')
+                agent_num += 1
+                agent_num %= len(colors)
 
-        self.add_legend()
+        if show_legend:
+            self.add_legend()
         self.ax.set_axis_off()
 
         def init_func():
