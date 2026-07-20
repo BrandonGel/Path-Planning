@@ -21,6 +21,7 @@ Per timestep:
 
 from __future__ import annotations
 
+import math
 import random
 import time
 from collections import defaultdict
@@ -40,11 +41,20 @@ class Simulation:
         agents: List[dict],
         delay_probability: float = 0.0,
         rng: random.Random | None = None,
+        velocity: float = 0.0,
+        timestep_duration: float = 1.0,
     ):
         self.tasks = list(tasks)
         self.agents = agents
         self.delay_probability = float(delay_probability)
         self.rng = rng or random.Random()
+
+        # Constant-velocity motion: each tick an agent travels at most this much arc
+        # length (world units) along its committed fine-waypoint polyline, passing
+        # through multiple waypoints. 0 -> fall back to one waypoint per tick.
+        self.velocity = float(velocity)
+        self.timestep_duration = float(timestep_duration)
+        self.arc_budget = self.velocity * self.timestep_duration
 
         self.time = 0
         self.delayed_agents: set = set()
@@ -95,21 +105,26 @@ class Simulation:
 
         token = algorithm.get_token()
         agents_pos_now: Dict[str, tuple] = {}
-        agent_pos_next: Dict[str, tuple] = {}
+        agent_plan: Dict[str, tuple] = {}      # name -> (n_consumed, traversed waypoints)
+        agent_pos_next: Dict[str, tuple] = {}  # name -> end-of-tick position
 
         for agent in agents_to_move:
             name = agent["name"]
             cur = position[name]
             agents_pos_now[name] = cur
             planned = token["agents"][name]
-            if len(planned) <= 1:
-                agent_pos_next[name] = cur
-            elif self.rng.random() < self.delay_probability:
+            if len(planned) <= 1 or self.rng.random() < self.delay_probability:
+                agent_plan[name] = (0, [])
                 agent_pos_next[name] = cur
             else:
-                agent_pos_next[name] = tuple(planned[1])
+                # Advance up to one tick's worth of arc length (multiple fine waypoints).
+                n, traversed = self._advance_plan(planned, self.arc_budget)
+                agent_plan[name] = (n, traversed)
+                agent_pos_next[name] = traversed[-1] if traversed else cur
 
-        # Resolve vertex / edge collisions by holding the colliding agents.
+        # Resolve vertex / edge collisions by holding the colliding agents. Compares
+        # end-of-tick positions; a held agent gets zero motion this tick. (SIPP already
+        # plans collision-free against other committed paths; this is a backstop.)
         collision = True
         delayed = set()
         while collision:
@@ -119,6 +134,8 @@ class Simulation:
                 for j in range(i + 1, len(agents_to_move)):
                     a = agents_to_move[i]["name"]
                     b = agents_to_move[j]["name"]
+                    if a in delayed or b in delayed:
+                        continue
                     if agent_pos_next[a] == agent_pos_next[b]:
                         collision = True
                         collision_set.add(a)
@@ -133,11 +150,51 @@ class Simulation:
             for name in collision_set:
                 delayed.add(name)
                 agent_pos_next[name] = agents_pos_now[name]
+                agent_plan[name] = (0, [])
 
         for agent in agents_to_move:
             name = agent["name"]
+            n, traversed = agent_plan[name]
             if name in delayed:
                 self.delayed_agents.add(name)
-            elif len(token["agents"][name]) > 1:
-                token["agents"][name] = token["agents"][name][1:]
-            self.actual_paths[name].append(_point_to_dict(self.time, agent_pos_next[name]))
+            if n > 0:
+                token["agents"][name] = token["agents"][name][n:]
+            if traversed:
+                # Record every fine waypoint traversed this tick with fractional
+                # sub-stamps over (t-1, t], so the plotted polyline hugs the roadmap
+                # while the last point lands exactly on the integer tick.
+                m_total = len(traversed)
+                for m, wp in enumerate(traversed, start=1):
+                    self.actual_paths[name].append(
+                        _point_to_dict((self.time - 1) + m / m_total, wp)
+                    )
+            else:
+                self.actual_paths[name].append(_point_to_dict(self.time, agent_pos_next[name]))
+
+    def _advance_plan(self, planned, budget):
+        """Walk the committed waypoint list ``planned`` (``planned[0]`` == current pos)
+        from the head, accumulating Euclidean arc length until the next waypoint would
+        exceed ``budget``. Returns ``(n_consumed, traversed)``: the number of head
+        entries to pop and the waypoints actually visited this tick (excluding the
+        current position). A wait (zero-length step) consumes exactly one entry and
+        stops, preserving holds. ``budget <= 0`` falls back to one waypoint per tick.
+        """
+        traversed: List[tuple] = []
+        used = 0.0
+        i = 0
+        while i + 1 < len(planned):
+            seg = math.dist(planned[i], planned[i + 1])
+            if seg == 0.0:
+                # Wait at the vertex: advance exactly one entry, then stop.
+                if not traversed:
+                    i += 1
+                    traversed.append(tuple(planned[i]))
+                break
+            if budget > 0.0 and used + seg > budget and traversed:
+                break  # next waypoint would overrun the arc-length budget
+            used += seg
+            i += 1
+            traversed.append(tuple(planned[i]))
+            if budget <= 0.0 or used >= budget:
+                break
+        return i, traversed
