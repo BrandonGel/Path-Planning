@@ -1211,7 +1211,10 @@ class GraphSampler(Grid):
             "use_discrete_space": self.use_discrete_space,
             "grid_points": self.grid_points,
             "nodes": self.nodes,
-            "obstacles": self.obstacles,
+            # ndarray, not list-of-tuples: pickling 4.5M tuples costs ~10s / ~200MB, the array
+            # milliseconds / ~70MB. set_obstacles() accepts either on load.
+            "obstacles": np.asarray(self.obstacles, dtype=np.int64) if len(self.obstacles)
+                         else [],
             "obs_size": self.obs_size,
             "inflation_radius": self.inflation_radius,
             "track_with_link": self.track_with_link,
