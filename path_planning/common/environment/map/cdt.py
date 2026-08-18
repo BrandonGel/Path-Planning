@@ -113,6 +113,69 @@ def get_circumcenter(p1:np.ndarray, p2:np.ndarray, p3:np.ndarray):
     return np.array([x, y]).T
 
 
+def _merge_collinear_axis_segments(coord_segs):
+    """Merge maximal runs of collinear axis-aligned unit segments into single segments.
+
+    ``get_boundary`` emits one constraint segment per obstacle *cell face*, so a straight
+    wall of N cells becomes N unit segments and N+1 vertices. Feeding that to the CDT
+    produces a roadmap with one node per boundary cell (tens of thousands), which makes the
+    triangulation's dense cost matrix explode. This collapses each straight run to one
+    segment by contracting degree-2 "pass-through" vertices whose two neighbours are
+    collinear. Corner / junction vertices (degree != 2, or a direction change) are
+    preserved, so the obstacle geometry is unchanged.
+
+    ``coord_segs`` is a list of ``(p1, p2)`` coordinate-tuple pairs. Returns the merged
+    list of ``(p1, p2)`` pairs.
+    """
+    from collections import defaultdict
+
+    adj = defaultdict(set)
+    for p1, p2 in coord_segs:
+        if p1 == p2:
+            continue
+        adj[p1].add(p2)
+        adj[p2].add(p1)
+
+    def collinear(a, b, c):
+        return abs((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])) <= 1e-7
+
+    def removable(v):
+        nb = adj[v]
+        if len(nb) != 2:
+            return False
+        a, c = tuple(nb)
+        return collinear(a, v, c)
+
+    def ek(a, b):
+        return (a, b) if a <= b else (b, a)
+
+    visited: set = set()
+    out = []
+    anchors = [v for v in adj if not removable(v)]
+    for a in anchors:
+        for nb in list(adj[a]):
+            if ek(a, nb) in visited:
+                continue
+            prev, cur = a, nb
+            visited.add(ek(prev, cur))
+            while removable(cur):
+                nxt = next(w for w in adj[cur] if w != prev)
+                if ek(cur, nxt) in visited:
+                    break
+                visited.add(ek(cur, nxt))
+                prev, cur = cur, nxt
+            if a != cur:
+                out.append((a, cur))
+    # Any edges not reached from an anchor belong to a fully-collinear loop (no corners);
+    # keep them as-is (does not occur for closed rectilinear boundaries, but be safe).
+    for p1, p2 in coord_segs:
+        if p1 == p2 or ek(p1, p2) in visited:
+            continue
+        visited.add(ek(p1, p2))
+        out.append((p1, p2))
+    return out
+
+
 def get_boundary(map_,mask:np.ndarray):
     dim = getattr(map_, "dim", 2)
     if dim != 2 or mask.ndim != 2:
@@ -259,6 +322,32 @@ def get_boundary(map_,mask:np.ndarray):
 
     bnd_segs = np.array(list(seg_set), dtype=int)
 
+    # --- 8) Merge collinear runs: collapse each straight wall (many unit cell-faces)
+    # into a single constraint segment, so the CDT roadmap has one vertex per corner /
+    # junction instead of one per boundary cell (~tens of thousands -> hundreds).
+    def _rk(p):
+        return (round(float(p[0]), 8), round(float(p[1]), 8))
+
+    coord_segs = [(_rk(bnd_pts[u]), _rk(bnd_pts[v])) for u, v in bnd_segs.tolist()]
+    merged = _merge_collinear_axis_segments(coord_segs)
+
+    pt_index: dict = {}
+    new_pts: list = []
+    new_segs: list = []
+    seen_seg: set = set()
+    for p1, p2 in merged:
+        for p in (p1, p2):
+            if p not in pt_index:
+                pt_index[p] = len(new_pts)
+                new_pts.append([float(p[0]), float(p[1])])
+        a, bb = pt_index[p1], pt_index[p2]
+        key = (a, bb) if a < bb else (bb, a)
+        if a != bb and key not in seen_seg:
+            seen_seg.add(key)
+            new_segs.append([a, bb])
+    bnd_pts = np.array(new_pts, dtype=float)
+    bnd_segs = np.array(new_segs, dtype=int)
+
     return bnd_pts,bnd_segs,holes
 
 def get_all_points(interior_points:np.ndarray,bnd_pts:np.ndarray):
@@ -287,6 +376,64 @@ def get_all_points(interior_points:np.ndarray,bnd_pts:np.ndarray):
         seen.add(k)
         uniq.append([float(p[0]), float(p[1])])
     return np.asarray(uniq, dtype=float)
+
+
+def get_all_points_and_segments(
+    interior_points: np.ndarray,
+    bnd_pts: np.ndarray,
+    bnd_segs: np.ndarray,
+    nd: int = 8,
+):
+    """Deduplicate boundary + interior vertices (boundary first) AND remap the boundary
+    constraint segments to the deduplicated indices.
+
+    ``get_boundary`` can emit duplicate boundary coordinates. Deduplicating the vertex
+    array alone (as :func:`get_all_points` does) silently shifts vertex indices, so
+    ``bnd_segs`` — defined against the *original* ``bnd_pts`` order — ends up referencing
+    the wrong vertices. The resulting PSLG has crossing/overlapping constraints, which
+    makes ``triangle`` abort with "Topological inconsistency after splitting a segment".
+    Remapping the segments through the same dedup keeps the PSLG consistent. Degenerate
+    (now zero-length) and duplicate segments are dropped.
+
+    Returns ``(all_points, segments)`` ready for the constrained triangulation.
+    """
+    bnd_pts = np.asarray(bnd_pts, dtype=float)
+    interior_points = np.asarray(interior_points, dtype=float)
+    if bnd_pts.ndim != 2 or bnd_pts.shape[1] < 2:
+        raise ValueError("bnd_pts must have shape (M,2) or (M,D>=2)")
+
+    key_to_new: dict = {}
+    uniq: list[list[float]] = []
+    old_bnd_to_new = np.empty(len(bnd_pts), dtype=int)
+    for i in range(len(bnd_pts)):
+        k = _pt_key(bnd_pts[i], nd=nd)
+        j = key_to_new.get(k)
+        if j is None:
+            j = len(uniq)
+            key_to_new[k] = j
+            uniq.append([float(bnd_pts[i, 0]), float(bnd_pts[i, 1])])
+        old_bnd_to_new[i] = j
+    if interior_points.size:
+        for p in interior_points:
+            k = _pt_key(p, nd=nd)
+            if k not in key_to_new:
+                key_to_new[k] = len(uniq)
+                uniq.append([float(p[0]), float(p[1])])
+
+    all_points = np.asarray(uniq, dtype=float)
+    seen_seg: set = set()
+    remapped: list[list[int]] = []
+    for u, v in np.asarray(bnd_segs, dtype=int):
+        a, b = int(old_bnd_to_new[u]), int(old_bnd_to_new[v])
+        if a == b:
+            continue  # collapsed to a single vertex by dedup -> degenerate
+        key = (a, b) if a < b else (b, a)
+        if key in seen_seg:
+            continue
+        seen_seg.add(key)
+        remapped.append([a, b])
+    return all_points, np.asarray(remapped, dtype=int)
+
 
 def get_constrained_delaunay_triangulation(bnd_pts:np.ndarray,bnd_segs:np.ndarray,holes:list):
     A_cdt = dict(vertices=bnd_pts, segments=bnd_segs,holes=holes)
@@ -570,8 +717,12 @@ def get_planar_graph(map_,mask:np.ndarray, use_option:str = 'cdt'):
     start_goal_indices = map_.start_nodes_index | map_.goal_nodes_index
     
     bnd_pts,bnd_segs,holes = get_boundary(map_,mask)
-    all_points = get_all_points(interior_points, bnd_pts)
-    cdt = get_constrained_delaunay_triangulation(all_points,bnd_segs,holes)
+    # Deduplicate vertices AND remap the constraint segments together: get_boundary can
+    # emit duplicate coordinates, and deduping vertices without remapping segments leaves
+    # the segments pointing at the wrong vertices (triangulation then aborts with a
+    # topological inconsistency). See get_all_points_and_segments.
+    all_points, tri_segs = get_all_points_and_segments(interior_points, bnd_pts, bnd_segs)
+    cdt = get_constrained_delaunay_triangulation(all_points,tri_segs,holes)
     if use_option == 'cdt':
         points,neighbors = connect_cdt(cdt)
     elif use_option == 'midpoints':

@@ -841,9 +841,24 @@ class GraphSampler(Grid):
         self.cost_matrix = cdist(np.array([node.current for node in nodes]), np.array([node.current for node in nodes]), metric='euclidean')
         self.nodes = nodes
 
-        for ii,edge_id in enumerate(planar_map):
+        # Filter the CDT edges the same way PRM / 'dt' do: drop any that are in collision
+        # or outside [min_edge_length, max_edge_length]. The constrained triangulation can
+        # still emit edges that hug or cross obstacle geometry (boundary nodes lie on the
+        # obstacle outline, and boundary simplification produces long constraint segments),
+        # so an explicit line-of-sight + length check keeps the roadmap valid.
+        filtered_map = [[] for _ in range(len(planar_map))]
+        edge_weights = [[] for _ in range(len(planar_map))]
+        for ii, edge_id in enumerate(planar_map):
+            s_pos = nodes[ii].current
             for neighbor_id in edge_id:
-                edge_weights[ii].append(self.get_cost(nodes[ii],nodes[neighbor_id]))
+                w = self.get_cost(nodes[ii], nodes[neighbor_id])
+                if w < self.min_edge_length or w > self.max_edge_length:
+                    continue
+                if self.in_collision(s_pos, nodes[neighbor_id].current):
+                    continue
+                filtered_map[ii].append(neighbor_id)
+                edge_weights[ii].append(w)
+        planar_map = filtered_map
 
         self.road_map = planar_map
         self.road_map_edge_weights = edge_weights
@@ -1196,7 +1211,10 @@ class GraphSampler(Grid):
             "use_discrete_space": self.use_discrete_space,
             "grid_points": self.grid_points,
             "nodes": self.nodes,
-            "obstacles": self.obstacles,
+            # ndarray, not list-of-tuples: pickling 4.5M tuples costs ~10s / ~200MB, the array
+            # milliseconds / ~70MB. set_obstacles() accepts either on load.
+            "obstacles": np.asarray(self.obstacles, dtype=np.int64) if len(self.obstacles)
+                         else [],
             "obs_size": self.obs_size,
             "inflation_radius": self.inflation_radius,
             "track_with_link": self.track_with_link,
