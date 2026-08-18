@@ -15,7 +15,7 @@ from path_planning.global_planner.sample_search.rrg import RRG
 import faiss
 import pickle
 
-ROADMAP_TYPES = set(["grid","prm","cdt","rrg","midpoints","centroids","voronoi"])
+ROADMAP_TYPES = set(["grid","prm","cdt","rrg","midpoints","centroids","voronoi","halton"])
 def validate_roadmap_type(roadmap_type: str):
     if roadmap_type not in ROADMAP_TYPES:
         return False

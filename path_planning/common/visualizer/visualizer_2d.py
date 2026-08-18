@@ -244,7 +244,6 @@ class Visualizer2D(BaseVisualizer2D):
                                 alpha=1, zorder=self.zorder['expand_tree_node'],
                                 label=label if k == 0 else '')
 
-        self.add_legend()
 
     def add_legend(self, loc: str = 'center left', bbox_to_anchor: tuple = (1.01, 0.5),
                    title: str = None, reserve: float = 0.18) -> None:

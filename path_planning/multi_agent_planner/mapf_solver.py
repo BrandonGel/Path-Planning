@@ -13,6 +13,40 @@ import time
 from path_planning.utils.checker import check_collision
 from path_planning.utils.util import agents_yaml_to_roadmap_frame
 
+
+def _snap_agents_to_nodes(map_, agents_rt):
+    """Snap each agent's start/goal to the nearest roadmap node.
+
+    Topology-rebuilding roadmaps (cdt/rrg) and some prm builds do not include the
+    requested start/goal as nodes, so a point that isn't a node would make SIPP
+    KeyError on ``sipp_graph[start]`` and make CBS/ICBS fail instantly (no neighbors
+    from an off-node state). The nearest node is typically <1 cell away. Points that
+    are already nodes are left untouched (grid/halton), so this is a no-op there.
+    """
+    from path_planning.common.environment.node import Node
+
+    nodes = getattr(map_, "nodes", None)
+    if not nodes:
+        return agents_rt
+    nidx = getattr(map_, "node_index_dict", {})
+    pts = [tuple(float(c) for c in n.current) for n in nodes]
+    kdt = None
+    out = []
+    for a in agents_rt:
+        s = tuple(float(x) for x in a["start"])
+        g = tuple(float(x) for x in a["goal"])
+        if Node(s) not in nidx:
+            from scipy.spatial import KDTree
+            kdt = kdt or KDTree(pts)
+            s = pts[int(kdt.query(np.asarray(s))[1])]
+        if Node(g) not in nidx:
+            from scipy.spatial import KDTree
+            kdt = kdt or KDTree(pts)
+            g = pts[int(kdt.query(np.asarray(g))[1])]
+        out.append({**a, "start": s, "goal": g})
+    return out
+
+
 def solve_mapf(map_, agents,mapf_solver_config:dict) -> Tuple[dict, float]:
     mapf_solver_name = mapf_solver_config['mapf_solver_name'].lower()
     agent_radius = mapf_solver_config['agent_radius']
@@ -20,12 +54,18 @@ def solve_mapf(map_, agents,mapf_solver_config:dict) -> Tuple[dict, float]:
     time_limit = mapf_solver_config['time_limit']
     max_iterations = mapf_solver_config['max_iterations']
     heuristic_type = mapf_solver_config['heuristic_type']
-    # YAML stores world starts/goals. For GraphSampler-based solvers, we keep agents in
-    # the same world frame as map nodes (even in discrete mode where nodes lie on a grid).
-    if getattr(map_, "use_discrete_space", False):
-        agents_rt = agents
-    else:
-        agents_rt = agents_yaml_to_roadmap_frame(map_, agents)
+    # YAML stores world starts/goals. Convert them into the roadmap's native node
+    # frame so the start/goal coincide with actual nodes: discrete/grid maps key
+    # nodes by integer cell indices, continuous maps by world coords.
+    # agents_yaml_to_roadmap_frame already dispatches on use_discrete_space, so call
+    # it unconditionally. (Previously discrete mode passed world ".5" cell-center
+    # coords through unchanged; those don't match the integer-index grid nodes, so
+    # SIPP KeyErrored on sipp_graph[start] and CBS/ICBS silently failed instantly.)
+    agents_rt = agents_yaml_to_roadmap_frame(map_, agents)
+    # cdt/rrg/prm roadmaps may not include the exact start/goal as nodes; snap to the
+    # nearest node so every solver (esp. SIPP, which indexes nodes by coordinate) has
+    # an on-node start/goal. No-op for grid/halton where they already are nodes.
+    agents_rt = _snap_agents_to_nodes(map_, agents_rt)
     # Low-level A* (inside CBS/ICBS) may need a larger budget than the high-level CBS iteration cap,
     # especially once constraints are introduced (time-expanded state space).
     try:
