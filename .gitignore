@@ -215,3 +215,8 @@ benchmark/all
 logs/
 wandb/
 benchmark/
+results/
+.git/objects/d0/a758a6502688b2436d25c0fc2fa6d4271d664d
+.git/objects/63/dc4ebfe748850fe48a0e53eaab3a98d4d6f851
+logs/gat_compile/wandb/run-20260326_073816-qgowdbz1/run-qgowdbz1.wandb
+figs/sipp/sipp_2d_radius0.0_velocity1.0_continuous.gif

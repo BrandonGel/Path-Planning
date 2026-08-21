@@ -80,5 +80,8 @@ class AStar():
                     if neighbor not in open_set:
                         open_set.add(neighbor)
                     heapq.heappush(open_heap, (f_score_neighbor,next(counter), neighbor))
+        if iterations >= self.max_iterations:
+            print('Low level A* - Maximum iteration reached')
+       
         return False, float("inf")
 

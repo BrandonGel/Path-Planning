@@ -7,10 +7,9 @@ from path_planning.common.environment.map.graph_sampler import GraphSampler
 import numpy as np
 import yaml
 import os
-import torch
 import argparse
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Sequence
 import math
 import random
 from multiprocessing import cpu_count
@@ -217,7 +216,7 @@ def read_grid_from_yaml(filename: str):
         raise ValueError(f"Unsupported dimensions: {len(dimensions)}")
     return env
 
-def read_graph_sampler_from_yaml(filename: str,use_discrete_space: bool = True,graph_file: str = None, args: dict = {}, sampling_dist_dict: dict = None):
+def read_graph_sampler_from_yaml(filename: str,use_discrete_space: bool = True,graph_file: str = None, args: dict = {}, sampling_dist_dict: dict = None, sweep_backend: str = "auto"):
     """
     Read a YAML file and recreate a GraphSampler environment.
 
@@ -242,7 +241,7 @@ def read_graph_sampler_from_yaml(filename: str,use_discrete_space: bool = True,g
     obs_size = yaml_data.get("obs_size", yaml_data.get("map", {}).get("obs_size", 0.5))
     
     
-    env = GraphSampler(bounds=bounds, resolution=resolution,start=[],goal=[],use_discrete_space=use_discrete_space,sampling_dist_dict=sampling_dist_dict or {})
+    env = GraphSampler(bounds=bounds, resolution=resolution,start=[],goal=[],use_discrete_space=use_discrete_space,sampling_dist_dict=sampling_dist_dict or {},sweep_backend=sweep_backend)
     if graph_file is None:
         validate_obstacle_map_config(env, obstacles_world, obs_size)
         obstacles = obstacles_world_to_grid(env, obstacles_world, obs_size)
@@ -351,6 +350,93 @@ def agents_yaml_to_roadmap_frame(map_: GraphSampler, agents: List[dict]) -> List
         out.append({"name": name, "start": s_t, "goal": g_t})
     return out
 
+
+def points_to_roadmap_frame(map_: GraphSampler, points: Sequence[Sequence[float]]) -> List[tuple]:
+    """
+    Convert a list of world-coordinate points into the roadmap-native frame, using
+    the same convention as :func:`agents_yaml_to_roadmap_frame`:
+
+    - discrete (``map_.use_discrete_space`` True): world -> grid indices via
+      ``world_to_map(..., discrete=True)`` (these match the integer coords of grid
+      nodes created by ``GraphSampler.generateRandomNodes``);
+    - continuous: world coordinates passed through unchanged.
+
+    Args:
+        map_: Constructed ``GraphSampler`` (bounds/resolution set).
+        points: Iterable of length-D world-coordinate points.
+
+    Returns:
+        List of coordinate tuples in roadmap-native frame.
+    """
+    discrete = getattr(map_, "use_discrete_space", True)
+    out: List[tuple] = []
+    for p in points:
+        if discrete:
+            m = map_.world_to_map(_coord_to_tuple(p, as_int=False), discrete=True)
+            out.append(_coord_to_tuple(m, as_int=True))
+        else:
+            out.append(_coord_to_tuple(p, as_int=False))
+    return out
+
+
+def read_mapd_from_yaml(filename: str) -> dict:
+    """
+    Read a life-long MAPD instance (e.g. ``2d_mapd.yaml``).
+
+    The MAPD format differs from the simple agents/map format: agents carry only a
+    ``start`` (no fixed ``goal``), tasks are pre-defined with multi-leg
+    ``waypoints``, and ``map.non_task_endpoints`` lists parking points. The
+    ``map.start_locations`` / ``map.goal_locations`` fields are grouped as pairs
+    (each entry is ``[[x, y], [x, y]]``) and, together with ``n_tasks`` /
+    ``task_freq`` / ``n_delays_per_agent``, drive random task generation (see
+    ``gen_mapd_tasks``). All coordinates are world-frame; convert them with
+    :func:`points_to_roadmap_frame` / :func:`mapd_agents_to_roadmap_frame` before
+    handing to a planner.
+
+    Args:
+        filename: Path to the MAPD YAML file.
+
+    Returns:
+        Dict with raw (world-coordinate) ``agents``, ``tasks``,
+        ``non_task_endpoints``, ``start_locations``, ``goal_locations`` and the
+        scalar config fields ``n_tasks``, ``task_freq``, ``n_delays_per_agent``.
+    """
+    with open(filename, 'r') as yaml_file:
+        yaml_data = yaml.load(yaml_file, Loader=yaml.FullLoader)
+    map_block = yaml_data.get('map', {})
+    return {
+        'agents': yaml_data.get('agents', []),
+        'tasks': yaml_data.get('tasks', []),
+        'non_task_endpoints': map_block.get('non_task_endpoints', []),
+        'start_locations': map_block.get('start_locations', []),
+        'goal_locations': map_block.get('goal_locations', []),
+        'n_tasks': yaml_data.get('n_tasks', 0),
+        'task_freq': yaml_data.get('task_freq', None),
+        'n_delays_per_agent': yaml_data.get('n_delays_per_agent', 0),
+    }
+
+
+def mapd_agents_to_roadmap_frame(map_: GraphSampler, agents: List[dict]) -> List[dict]:
+    """
+    Convert MAPD agents (``name`` + ``start`` only, no ``goal``) into the
+    roadmap-native frame. NeuralATTF only consumes agent ``name``/``start``, so no
+    goal is required here (cf. :func:`agents_yaml_to_roadmap_frame`).
+
+    Args:
+        map_: Constructed ``GraphSampler`` for the instance.
+        agents: Agent dicts as returned under the ``agents`` key of
+            :func:`read_mapd_from_yaml`.
+
+    Returns:
+        New list of ``{name, start}`` dicts with ``start`` in roadmap-native frame.
+    """
+    starts = points_to_roadmap_frame(map_, [a["start"] for a in agents])
+    return [
+        {"name": a.get("name", f"agent{i}"), "start": s}
+        for i, (a, s) in enumerate(zip(agents, starts))
+    ]
+
+
 def to_builtin(obj):
     if isinstance(obj, dict):
         return {k: to_builtin(v) for k, v in obj.items()}
@@ -372,9 +458,19 @@ def write_to_yaml(obj, filename: str):
 def set_global_seed(seed: int = 42):
     random.seed(seed)
     np.random.seed(seed)
+    # Imported here rather than at module scope: torch is only needed by the GNN paths, and
+    # this module is on the import chain of every sampler/planner. A module-level import
+    # makes torch a hard requirement of the whole package, which breaks deployments that
+    # install it on demand (and costs ~1.3 GB for users who never enable the GNN). Seeding
+    # torch is meaningless when torch is absent, so skipping it is the correct no-op.
+    try:
+        import torch
+    except ImportError:
+        return
     torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 

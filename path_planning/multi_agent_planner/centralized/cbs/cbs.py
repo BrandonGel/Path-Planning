@@ -371,10 +371,10 @@ class Environment(object):
         goal_state = self.agent_dict[agent_name]["goal"]
         return state.is_equal_except_time(goal_state)
 
-    def make_agent_dict(self):
+    def make_agent_dict(self,t=0):
         for agent in self.agents:
-            start_state = State(0, Location(agent['start']))
-            goal_state = State(0, Location(agent['goal']))
+            start_state = State(t, Location(agent['start']))
+            goal_state = State(t, Location(agent['goal']))
             
             self.agent_dict.update({agent['name']:{'start':start_state, 'goal':goal_state}})
 

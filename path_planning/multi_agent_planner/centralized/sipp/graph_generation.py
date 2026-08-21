@@ -120,9 +120,15 @@ class SippEdge(object):
         return False
 
 class SippGraph(object):
-    def __init__(self, graph_map: GraphSampler,dynamic_obstacles:dict = {},radius:float = 0.0,velocity:float = 0.0,use_constraint_sweep:bool = True, heuristic_type: str = 'manhattan',time_limit: float | None = None, max_iterations: int | None = None,verbose: bool = False):
-        self.graph_map = graph_map 
+    def __init__(self, graph_map: GraphSampler,dynamic_obstacles:dict = {},radius:float = 0.0,velocity:float = 0.0,use_constraint_sweep:bool = True, heuristic_type: str = 'manhattan',time_limit: float | None = None, max_iterations: int | None = None,verbose: bool = False, obstacle_horizon: float | None = None):
+        self.graph_map = graph_map
         self.dyn_obstacles = {}
+        # How long a dynamic obstacle's FINAL (resting) position blocks its node. Unbounded
+        # (float('inf')) reproduces the original "rest forever" behaviour; a finite value lets
+        # the planner route through a spot another agent currently rests on for arrivals beyond
+        # the horizon (those conflicts are then resolved by re-routing / the sim backstop),
+        # which breaks the corridor deadlock where resting agents wall off a goal forever.
+        self.obstacle_horizon = float(obstacle_horizon) if obstacle_horizon and obstacle_horizon > 0 else float('inf')
         self.sipp_graph = {}
         if radius > 0:
             # Radius-based SIPP always relies on constraint sweep queries.
@@ -173,7 +179,7 @@ class SippGraph(object):
                 if self.radius > 0:
                     if last_t:
                         overlapping_vertices,overlapping_edges = self._get_constraint_sweep_cached(position, position,self.velocity, 2*self.radius)
-                        next_t = float('inf')
+                        next_t = t + self.obstacle_horizon  # inf -> blocks forever (default)
                         for vertex_pos, vertex_interval in overlapping_vertices.items():
                             self.sipp_graph[vertex_pos].split_interval(t, next_t)
                         # for edge_pos, edge_interval in overlapping_edges.items():
@@ -190,15 +196,14 @@ class SippGraph(object):
                         t2 = t+t_end 
                         self.sipp_graph[vertex_pos].split_interval(t1, t2)
                     for edge_pos, edge_interval in overlapping_edges.items():
-                        t_start,t_end,p1,p2 = edge_interval
-                        self.sipp_graph[edge_pos].add_unsafe_interval(t+t_start, t+t_end, p1, p2, dyn_name)
-                        # t_start,t_end = edge_interval
-                        # t1 = max(0,t+t_start)
-                        # t2 = max(0,t+t_end)
-                        # self.sipp_graph[edge_pos].split_interval(t1, t2)
+                        # edge_interval is a 2-tuple (t_start, t_end) from
+                        # get_constraint_sweep(get_time_interval=True); mirror the
+                        # (correct) edge handling in update_intervals.
+                        t_start, t_end = edge_interval
+                        self.sipp_graph[edge_pos].add_unsafe_interval(t + t_start, t + t_end)
                 else:
                     t1 = t
-                    t2 = t1 + 1 if not last_t else float('inf')
+                    t2 = t1 + 1 if not last_t else (t1 + self.obstacle_horizon)
                     self.sipp_graph[position].split_interval(t1, t2,1)
 
         # Update the intervals of the SIPP graph based on the agent's plan (treated as dynamic obstacles)

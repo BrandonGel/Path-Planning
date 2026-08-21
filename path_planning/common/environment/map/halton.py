@@ -43,7 +43,10 @@ def halton_sampling(
     if halton_sampler is None:
         halton_sampler = qmc.Halton(d=dim, scramble=False)
     if rng is None:
-        rng = np.random.default_rng()
+        # Use the legacy global RNG so the rejection sampling honors np.random.seed()
+        # (set_global_seed) — otherwise an independent default_rng() makes the roadmap
+        # (and everything downstream, incl. the GNN prune) differ run-to-run.
+        rng = np.random
 
     n_draw = int(max(1, n_samples * max(1, oversample)))
     raw = halton_sampler.random(n_draw)

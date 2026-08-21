@@ -3,6 +3,7 @@ import heapq
 import numpy as np
 from path_planning.common.environment.map.halton import halton_sampling
 from scipy.spatial import KDTree, Delaunay
+from scipy.ndimage import map_coordinates
 from path_planning.common.environment.node import Node
 from python_motion_planning.common.env.map.grid import Grid, GridTypeMap
 from scipy.spatial.distance import cdist
@@ -14,13 +15,13 @@ from path_planning.global_planner.sample_search.rrg import RRG
 import faiss
 import pickle
 
-ROADMAP_TYPES = set(["grid","prm","cdt","rrg","midpoints","centroids","voronoi"])
+ROADMAP_TYPES = set(["grid","prm","cdt","rrg","midpoints","centroids","voronoi","halton"])
 def validate_roadmap_type(roadmap_type: str):
     if roadmap_type not in ROADMAP_TYPES:
         return False
     return True
 class GraphSampler(Grid):
-    def __init__(self,*args,start,goal,sample_num=0,num_neighbors = 13.0, min_edge_len = 1e-10, max_edge_len = 30.0,goal_sample_rate=0.1,use_discrete_space=True,use_constraint_sweep=True,record_sweep=True,use_exact_collision_check=True,use_dijkstra=True,sampling_dist_dict = {},**kwargs):
+    def __init__(self,*args,start,goal,sample_num=0,num_neighbors = 13.0, min_edge_len = 1e-10, max_edge_len = 30.0,goal_sample_rate=0.1,use_discrete_space=True,use_constraint_sweep=True,record_sweep=True,use_exact_collision_check=True,use_dijkstra=True,sampling_dist_dict = {},sweep_backend="auto",**kwargs):
         super().__init__(*args, **kwargs)
 
         # Check if start and goal are lists, non-empty, and not None
@@ -59,10 +60,16 @@ class GraphSampler(Grid):
         self.use_constraint_sweep = use_constraint_sweep
         self.record_sweep = record_sweep
         self.use_exact_collision_check = use_exact_collision_check
-        self.constraint_sweep = CGAL_Sweep(record_sweep=record_sweep,use_exact_collision_check=use_exact_collision_check)
+        self.sweep_backend = sweep_backend
+        self.constraint_sweep = self._make_constraint_sweep()
         self.sample_kd_tree = None
         self.use_dijkstra = use_dijkstra
         self.sampling_dist_dict = sampling_dist_dict if sampling_dist_dict else {}
+        # Task endpoints, world coords. Visualization-only metadata (no roadmap
+        # side effects), populated via set_endpoints() for e.g. MAPD demos.
+        self.pickups = []
+        self.deliveries = []
+        self.parking = []
 
     def __str__(self) -> str:
         return "Graph Sampler"
@@ -89,6 +96,17 @@ class GraphSampler(Grid):
         for g in goal_pixel:
             self.type_map[tuple(g)] = TYPES.GOAL
     
+    def set_endpoints(self, pickups=None, deliveries=None, parking=None):
+        """Store task endpoints (world coords) for visualization only.
+
+        Unlike set_start/set_goal, these do NOT inject nodes into the roadmap
+        or touch type_map; they are purely cosmetic metadata that Visualizer2D
+        draws on top of the roadmap (pickups, deliveries, parking spots).
+        """
+        self.pickups = list(pickups) if pickups is not None else []
+        self.deliveries = list(deliveries) if deliveries is not None else []
+        self.parking = list(parking) if parking is not None else []
+
     def get_start_nodes(self) -> List[Node]:
         return [self.nodes[i] for i in self.start_nodes_index.values()]
     
@@ -476,12 +494,19 @@ class GraphSampler(Grid):
         World-unit distance from a world-coordinate point (or batch of points) to
         the nearest OBSTACLE-or-INFLATION cell.
 
-        Uses the precomputed Euclidean Signed Distance Field stored on the Grid
-        base class. `_esdf` is computed with sampling=self.resolution, so values
-        are already in world units (no extra scaling required). Inflation cells
-        are exactly the free cells with 0 < esdf <= inflation_radius, so
-        subtracting `inflation_radius` and clipping to >= 0 collapses both
-        obstacles and inflation to distance zero.
+        Uses the precomputed Euclidean Signed Distance Field (`_esdf`).
+        `_esdf` is built with `sampling=self.resolution`, so values are already
+        in world units. Inflation cells are exactly the free cells with
+        0 < esdf <= inflation_radius, so subtracting `inflation_radius` and
+        clipping to >= 0 collapses both obstacles and inflation to distance 0.
+
+        The ESDF is sampled with **linear interpolation** (bilinear in 2D,
+        trilinear in 3D) at the point's continuous grid coordinate. This avoids
+        the up-to-`sqrt(dim) * resolution/2` quantization error of evaluating
+        at the containing cell center, and makes the rejection probability
+        used by the Halton sampler vary smoothly with position.
+
+        Out-of-bounds points are reported as distance 0.
 
         Args:
             p: a single world point as a tuple/1-D array of length `dim`,
@@ -499,15 +524,19 @@ class GraphSampler(Grid):
 
         bounds_lo = np.asarray(self.bounds, dtype=float)[:, 0]
         inv_res = 1.0 / float(self.resolution)
+        # Continuous grid coords; cell centers are at integer indices.
         grid_f = (pts - bounds_lo) * inv_res - 0.5
-        grid_i = np.rint(grid_f + 1e-10).astype(int)
 
         shape = np.asarray(self.shape, dtype=int)
-        in_bounds = np.all((grid_i >= 0) & (grid_i < shape), axis=1)
-        grid_clip = np.clip(grid_i, 0, shape - 1)
+        in_bounds = np.all(
+            (grid_f >= -0.5) & (grid_f <= shape.astype(float) - 0.5), axis=1
+        )
 
-        idx = tuple(grid_clip[:, d] for d in range(self.dim))
-        raw = self._esdf[idx].astype(float) - float(self.inflation_radius)
+        # map_coordinates wants (D, N); order=1 = linear, cval=0 -> outside is wall.
+        esdf_at_pts = map_coordinates(
+            self._esdf, grid_f.T, order=1, mode="nearest"
+        ).astype(float)
+        raw = esdf_at_pts - float(self.inflation_radius)
         dists = np.where(in_bounds, np.clip(raw, 0.0, None), 0.0)
 
         return float(dists[0]) if single else dists
@@ -536,8 +565,9 @@ class GraphSampler(Grid):
                 break
             if is_halton:
                 halton_cfg = self.sampling_dist_dict.get('halton', {})
+                needed = self.sample_num - num_nodes
                 points, halton_sampler = halton_sampling(
-                    self.sample_num,
+                    needed,
                     self.min_wall_distance,
                     bounds,
                     d_min=halton_cfg.get('d_min', 0.3),
@@ -554,7 +584,8 @@ class GraphSampler(Grid):
             accepted_this_round = 0
             for ii in range(n_points):
                 if self.use_discrete_space:
-                    current = tuple(self.map_to_world(self.world_to_map(points[ii]),discrete=True)) # Convert to discrete space but not into int
+                    # Snap to cell center in world coords.
+                    current = tuple(self.map_to_world(self.world_to_map(points[ii], discrete=True)))
                 else:
                     current = tuple(points[ii])
                 node = Node(current,None,0,0)
@@ -576,12 +607,13 @@ class GraphSampler(Grid):
             if num_nodes < self.sample_num:
                 if is_halton:
                     # Bump oversample so we draw enough Halton points next time.
-                    needed = self.sample_num - num_nodes
+                    # We now request `needed` per round, so n_draw = needed * oversample;
+                    # to accept `needed_next` we need oversample ~= 1/rate.
                     rate = accepted_this_round / max(1, n_points)
                     if rate <= 0:
                         oversample = min(64, max(2, oversample * 2))
                     else:
-                        oversample = min(64, max(2, int(np.ceil(needed / (self.sample_num * rate)))))
+                        oversample = min(64, max(2, int(np.ceil(1.0 / rate))))
                 elif num_weighted_samples > 0:
                     samp_from_prob_map_ratio = len(rejected_weighted_samples) / self.sample_num
                     samp_from_prob_map_ratio = max(0.0, min(1.0, samp_from_prob_map_ratio))
@@ -809,9 +841,24 @@ class GraphSampler(Grid):
         self.cost_matrix = cdist(np.array([node.current for node in nodes]), np.array([node.current for node in nodes]), metric='euclidean')
         self.nodes = nodes
 
-        for ii,edge_id in enumerate(planar_map):
+        # Filter the CDT edges the same way PRM / 'dt' do: drop any that are in collision
+        # or outside [min_edge_length, max_edge_length]. The constrained triangulation can
+        # still emit edges that hug or cross obstacle geometry (boundary nodes lie on the
+        # obstacle outline, and boundary simplification produces long constraint segments),
+        # so an explicit line-of-sight + length check keeps the roadmap valid.
+        filtered_map = [[] for _ in range(len(planar_map))]
+        edge_weights = [[] for _ in range(len(planar_map))]
+        for ii, edge_id in enumerate(planar_map):
+            s_pos = nodes[ii].current
             for neighbor_id in edge_id:
-                edge_weights[ii].append(self.get_cost(nodes[ii],nodes[neighbor_id]))
+                w = self.get_cost(nodes[ii], nodes[neighbor_id])
+                if w < self.min_edge_length or w > self.max_edge_length:
+                    continue
+                if self.in_collision(s_pos, nodes[neighbor_id].current):
+                    continue
+                filtered_map[ii].append(neighbor_id)
+                edge_weights[ii].append(w)
+        planar_map = filtered_map
 
         self.road_map = planar_map
         self.road_map_edge_weights = edge_weights
@@ -1005,6 +1052,42 @@ class GraphSampler(Grid):
         self.edges, self.edge_indices_dict,self.edge_weights  = self.calculate_edges(road_map,edge_weights)
         return road_map
 
+    def _make_constraint_sweep(self):
+        """Build the spatial-sweep backend.
+
+        ``sweep_backend``:
+        - ``"auto"`` (default): use the Shapely (GEOS) backend in 2D and the CGAL
+          backend in 3D+ (Shapely/GEOS is planar). Falls back to CGAL in 2D if
+          Shapely is not installed.
+        - ``"shapely"``: force the Shapely backend (2D only).
+        - ``"cgal"``: force the CGAL backend (2D or 3D).
+        Shapely is imported lazily so it is only required when actually selected."""
+        backend = getattr(self, "sweep_backend", "auto")
+        dim = getattr(self, "dim", None)
+        if dim is None:
+            dim = len(self.bounds) if getattr(self, "bounds", None) is not None else 2
+
+        if backend == "auto":
+            backend = "shapely" if dim == 2 else "cgal"
+            if backend == "shapely":
+                try:  # 2D auto falls back to CGAL when Shapely is unavailable.
+                    import shapely  # noqa: F401
+                except Exception:
+                    backend = "cgal"
+
+        if backend == "shapely":
+            from path_planning.utils.shapely_sweep import ShapelySweep
+            return ShapelySweep(
+                record_sweep=self.record_sweep,
+                use_exact_collision_check=self.use_exact_collision_check,
+            )
+        if backend != "cgal":
+            raise ValueError(f"Unknown sweep_backend {backend!r}; expected 'auto', 'cgal' or 'shapely'.")
+        return CGAL_Sweep(
+            record_sweep=self.record_sweep,
+            use_exact_collision_check=self.use_exact_collision_check,
+        )
+
     def set_constraint_sweep(self):
         self.constraint_sweep.set_graph([node.current for node in self.nodes],self.edges)
         # Precompute tuples for fast per-index coordinate access — avoids the
@@ -1128,7 +1211,10 @@ class GraphSampler(Grid):
             "use_discrete_space": self.use_discrete_space,
             "grid_points": self.grid_points,
             "nodes": self.nodes,
-            "obstacles": self.obstacles,
+            # ndarray, not list-of-tuples: pickling 4.5M tuples costs ~10s / ~200MB, the array
+            # milliseconds / ~70MB. set_obstacles() accepts either on load.
+            "obstacles": np.asarray(self.obstacles, dtype=np.int64) if len(self.obstacles)
+                         else [],
             "obs_size": self.obs_size,
             "inflation_radius": self.inflation_radius,
             "track_with_link": self.track_with_link,
@@ -1137,6 +1223,7 @@ class GraphSampler(Grid):
             "use_constraint_sweep": self.use_constraint_sweep,
             "record_sweep": self.record_sweep,
             "use_exact_collision_check": self.use_exact_collision_check,
+            "sweep_backend": getattr(self, "sweep_backend", "cgal"),
             "sampling_dist_dict": self.sampling_dist_dict,
         }
 
@@ -1185,7 +1272,8 @@ class GraphSampler(Grid):
         self.use_constraint_sweep = data["use_constraint_sweep"] if not 'use_constraint_sweep' in args else args["use_constraint_sweep"]
         self.record_sweep = data["record_sweep"]
         self.use_exact_collision_check = data["use_exact_collision_check"]
-        self.constraint_sweep = CGAL_Sweep(record_sweep=self.record_sweep,use_exact_collision_check=self.use_exact_collision_check)
+        self.sweep_backend = args.get("sweep_backend", data.get("sweep_backend", "auto"))
+        self.constraint_sweep = self._make_constraint_sweep()
         if self.use_constraint_sweep:
             self.set_constraint_sweep()
 
@@ -1398,6 +1486,7 @@ class GraphSampler(Grid):
             "use_constraint_sweep": self.use_constraint_sweep,
             "record_sweep": self.record_sweep,
             "use_exact_collision_check": self.use_exact_collision_check,
+            "sweep_backend": getattr(self, "sweep_backend", "cgal"),
             "sampling_dist_dict": self.sampling_dist_dict,
         }
 
@@ -1416,6 +1505,7 @@ class GraphSampler(Grid):
             use_constraint_sweep=self.use_constraint_sweep,
             record_sweep=self.record_sweep,
             use_exact_collision_check=self.use_exact_collision_check,
+            sweep_backend=getattr(self, "sweep_backend", "cgal"),
             sampling_dist_dict=self.sampling_dist_dict,
         )
         pruned_sampler._load_from_dict(pruned_data)

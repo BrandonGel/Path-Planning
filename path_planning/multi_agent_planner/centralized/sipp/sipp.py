@@ -21,8 +21,8 @@ from path_planning.multi_agent_planner.data_type import HEURISTIC_TYPE
 from path_planning.multi_agent_planner.centralized.sipp.graph_generation import SippNode
 
 class SippPlanner(SippGraph):
-    def __init__(self, graph_map: GraphSampler,dynamic_obstacles:dict = {},agents:list = [],radius:float = 0.0,velocity:float = 0.0,use_constraint_sweep:bool = True, heuristic_type: str = 'manhattan',time_limit: float | None = None, max_iterations: int | None = None,verbose: bool = False,sipp_max_iterations: int = 10000):
-        SippGraph.__init__(self,graph_map,dynamic_obstacles,radius,velocity,use_constraint_sweep,heuristic_type,time_limit,max_iterations,verbose)
+    def __init__(self, graph_map: GraphSampler,dynamic_obstacles:dict = {},agents:list = [],radius:float = 0.0,velocity:float = 0.0,use_constraint_sweep:bool = True, heuristic_type: str = 'manhattan',time_limit: float | None = None, max_iterations: int | None = None,verbose: bool = False,sipp_max_iterations: int = 10000, obstacle_horizon: float | None = None):
+        SippGraph.__init__(self,graph_map,dynamic_obstacles,radius,velocity,use_constraint_sweep,heuristic_type,time_limit,max_iterations,verbose,obstacle_horizon)
         self.agents = agents
         self.agent_names = [agent["name"] for agent in agents]
         self.plan = {}
@@ -88,18 +88,6 @@ class SippPlanner(SippGraph):
         if not self.sipp_graph[neighbour].is_in_safe_interval(arrive_t):
             return None
         return arrive_t
-
-    def check_goal_safe_forever(self, successor,depart_t):
-        goal_pos = successor.position
-        goal_t = successor.time
-        goal_vertex_safe_forever = self.sipp_graph[goal_pos].is_in_safe_interval(goal_t,float('inf'))
-        neighbour_list = self.get_valid_neighbours(goal_pos)
-        edge_safe_forever = True
-        for neighbour_pos in neighbour_list:
-            edge_safe_forever &= not self.sipp_graph[(neighbour_pos,goal_pos)].is_in_unsafe_interval(depart_t, float('inf'))
-            if not edge_safe_forever:
-                break
-        return goal_vertex_safe_forever and edge_safe_forever
 
     def get_successors(self, state):
         successors = []
@@ -186,6 +174,7 @@ class SippPlanner(SippGraph):
         best_solution_cost = float('inf')
         best_success = False
         iterations = 0
+        total_low_level_iterations = 0
         self.max_iterations = len(self.agents)
         for _ in range(self.max_iterations):
             self.shuffle_agents()
@@ -255,9 +244,12 @@ class SippPlanner(SippGraph):
                             action_cost[succ_key] = time_taken
                             
                             if successor.position == goal:
-                                goal_safe_forever = self.check_goal_safe_forever(successor,current.time)
-                                if not goal_safe_forever:
-                                    continue
+                                # Goal accepted as soon as it is spatially reached within its
+                                # current safe interval. The former check_goal_safe_forever gate
+                                # (goal must stay collision-free for all future time) was removed:
+                                # idle/finished agents that later block a mover are instead
+                                # re-routed by NeuralATTF, and residual conflicts are caught by the
+                                # simulation collision backstop.
                                 if self.verbose:
                                     print("Plan successfully calculated!!")
                                 goal_reached = True
@@ -269,6 +261,10 @@ class SippPlanner(SippGraph):
                             f_score = g_score[succ_key] + self.get_heuristic(successor.position, goal)
                             heapq.heappush(open_heap, (f_score, counter, successor))
                             counter += 1
+
+                # Accumulate low-level (A*/SIPP) expansions across every high-level
+                # iteration and agent so callers can report total search effort.
+                total_low_level_iterations += low_level_iterations
 
                 if not goal_reached or goal_state is None:
                     success = False
@@ -290,6 +286,7 @@ class SippPlanner(SippGraph):
         solution =best_solution if best_success else {}
         solution_info["runtime"] = self.total_time
         solution_info["total_iterations"] = self.total_iterations
+        solution_info["low_level_iterations"] = total_low_level_iterations
         solution_info["success"] = best_success
         return solution,solution_info
             
