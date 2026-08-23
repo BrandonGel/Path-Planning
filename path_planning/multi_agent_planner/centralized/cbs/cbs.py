@@ -48,6 +48,7 @@ class State(object):
 class Conflict(object):
     VERTEX = 1
     EDGE = 2
+    SWEEP = 3
     def __init__(self):
         self.time = -1
         self.type = -1
@@ -57,10 +58,11 @@ class Conflict(object):
 
         self.location_1 = Location()
         self.location_2 = Location()
-
+        self.location_1_f = set()
+        self.location_2_f = set()
     def __str__(self):
         return '(' + str(self.time) + ', ' + self.agent_1 + ', ' + self.agent_2 + \
-             ', '+ str(self.location_1) + ', ' + str(self.location_2) + ')'
+             ', '+ str(self.location_1) + ', ' + str(self.location_2)  + ')'
 
 class VertexConstraint(object):
     def __init__(self, time, location):
@@ -265,32 +267,61 @@ class Environment(object):
                     if self.use_constraint_sweep:
                         edge_1 = agent_edges[agent_1][t]
                         edge_2 = agent_edges[agent_2][t]
-                        edge_conflict = edge_1 in sweeps[agent_2][t] or edge_2 in sweeps[agent_1][t]
-                        loc_1_pt, loc_2_pt = edge_1
+                        sweep_conflict = edge_1 in sweeps[agent_2][t] or edge_2 in sweeps[agent_1][t]
+                        loc_1_pt, loc_1_pt_f = edge_1
+                        loc_2_pt, loc_2_pt_f = edge_2
+                        if sweep_conflict:
+                            c = Conflict()
+                            c.time = t
+                            c.type = Conflict.SWEEP
+                            c.agent_1 = agent_1
+                            c.agent_2 = agent_2
+                            c.location_1 = Location(loc_1_pt)
+                            for e in sweeps[agent_2][t]:
+                                if e[0] == loc_1_pt:
+                                    c.location_1_f.add(Location(e[1]))
+                            if edge_1 in sweeps[agent_2][t]:
+                                c.location_1_f.add(Location(edge_1[1]))
+
+                            c.location_2 = Location(loc_2_pt)
+                            for e in sweeps[agent_1][t]:
+                                if e[0] == loc_2_pt:
+                                    c.location_2_f.add(Location(e[1]))
+                            if edge_2 in sweeps[agent_1][t]:
+                                c.location_2_f.add(Location(edge_2[1]))
+                            if get_first_conflict:
+                                return c
+                            conflicts.append(c)
                     else:
                         state_1a = self.get_state(agent_1, solution, t)
                         state_1b = self.get_state(agent_1, solution, t + 1)
                         state_2a = self.get_state(agent_2, solution, t)
                         state_2b = self.get_state(agent_2, solution, t + 1)
-                        edge_conflict = self._get_constraint_segment_cached(
-                            state_1a.location.point, state_1b.location.point,
-                            state_2a.location.point, state_2b.location.point,
+                        edge_1 = (state_1a.location.point, state_1b.location.point)
+                        edge_2 = (state_2a.location.point, state_2b.location.point)
+                        sweep_conflict = self._get_constraint_segment_cached(
+                            edge_1[0], edge_1[1],
+                            edge_2[0], edge_2[1],
                             self.velocity, self.radius,
                         )
-                        loc_1_pt = state_1a.location.point
-                        loc_2_pt = state_1b.location.point
-
-                    if edge_conflict:
-                        c = Conflict()
-                        c.time = t
-                        c.type = Conflict.EDGE
-                        c.agent_1 = agent_1
-                        c.agent_2 = agent_2
-                        c.location_1 = Location(loc_1_pt)
-                        c.location_2 = Location(loc_2_pt)
-                        if get_first_conflict:
-                            return c
-                        conflicts.append(c)
+                        if sweep_conflict:
+                            c = Conflict()
+                            c.time = t
+                            c.type = Conflict.SWEEP
+                            c.agent_1 = agent_1
+                            c.agent_2 = agent_2
+                            # Mirror use_constraint_sweep: start vertex + forbidden
+                            # destinations (here only the taken edge, since we have
+                            # no swept-edge fan without the roadmap sweep).
+                            loc_1_pt, loc_1_next = edge_1
+                            loc_2_pt, loc_2_next = edge_2
+                            c.location_1 = Location(loc_1_pt)
+                            c.location_1_f.add(Location(loc_1_next))
+                            c.location_2 = Location(loc_2_pt)
+                            c.location_2_f.add(Location(loc_2_next))
+                            if get_first_conflict:
+                                return c
+                            conflicts.append(c)
         return conflicts
 
     def create_constraints_from_conflict(self, conflict):
@@ -312,6 +343,17 @@ class Environment(object):
             constraint1.edge_constraints |= {e_constraint1}
             constraint2.edge_constraints |= {e_constraint2}
 
+            constraint_dict[conflict.agent_1] = constraint1
+            constraint_dict[conflict.agent_2] = constraint2
+        elif conflict.type == Conflict.SWEEP:
+            constraint1 = Constraints()
+            constraint2 = Constraints()
+            for loc in conflict.location_1_f:
+                e_constraint1 = EdgeConstraint(conflict.time, conflict.location_1, loc)
+                constraint1.edge_constraints |= {e_constraint1}
+            for loc in conflict.location_2_f:
+                e_constraint2 = EdgeConstraint(conflict.time, conflict.location_2, loc)
+                constraint2.edge_constraints |= {e_constraint2}
             constraint_dict[conflict.agent_1] = constraint1
             constraint_dict[conflict.agent_2] = constraint2
 

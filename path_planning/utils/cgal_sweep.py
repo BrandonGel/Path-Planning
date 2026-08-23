@@ -64,7 +64,11 @@ class CGAL_Sweep:
         self.vertex_kdtree = KDTree(self.vertex_positions)
 
         # Precompute edge bounding boxes for filtering.
-        for edge in edges:
+        # Real edges plus a self-loop (i, i) per vertex so wait actions (u==v)
+        # appear in edge-overlap results the same way CBS encodes waits.
+        n_verts = len(vertices)
+        all_edges = list(edges) + [(i, i) for i in range(n_verts)]
+        for edge in all_edges:
             src, tgt = edge
             a_pt = self.Point_type(*vertices[src])
             b_pt = self.Point_type(*vertices[tgt])
@@ -80,8 +84,8 @@ class CGAL_Sweep:
             self.edge_aabbs.append((bbox_min, bbox_max, edge_idx))
 
         # Vectorized lookup arrays: avoid per-query list comprehensions over edge_indices.
-        self.edge_src_array = np.array([e[0] for e in edges], dtype=np.int64)
-        self.edge_tgt_array = np.array([e[1] for e in edges], dtype=np.int64)
+        self.edge_src_array = np.array([e[0] for e in all_edges], dtype=np.int64)
+        self.edge_tgt_array = np.array([e[1] for e in all_edges], dtype=np.int64)
         # Stack endpoint positions for vectorized distance/interval math.
         self.edge_src_positions = self.vertex_positions[self.edge_src_array]
         self.edge_tgt_positions = self.vertex_positions[self.edge_tgt_array]

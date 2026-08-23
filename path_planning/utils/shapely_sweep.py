@@ -62,19 +62,28 @@ class ShapelySweep:
         # Vertex STRtree (point geometries) for vertex-overlap queries.
         self.vertex_tree = STRtree([Point(p) for p in self.vertex_positions])
 
-        self.edge_src_array = np.array([e[0] for e in edges], dtype=np.int64)
-        self.edge_tgt_array = np.array([e[1] for e in edges], dtype=np.int64)
+        # Real edges plus a self-loop (i, i) per vertex so wait actions (u==v)
+        # appear in edge-overlap results the same way CBS encodes waits.
+        n_verts = self.vertex_positions.shape[0]
+        src_list = [int(e[0]) for e in edges] + list(range(n_verts))
+        tgt_list = [int(e[1]) for e in edges] + list(range(n_verts))
+        self.edge_src_array = np.asarray(src_list, dtype=np.int64)
+        self.edge_tgt_array = np.asarray(tgt_list, dtype=np.int64)
         self.edge_src_positions = self.vertex_positions[self.edge_src_array]
         self.edge_tgt_positions = self.vertex_positions[self.edge_tgt_array]
-        for edge_idx, (src, tgt) in enumerate(edges):
-            self.edge_indices[edge_idx] = (int(src), int(tgt))
-        # Edge STRtree (linestring geometries) for edge-overlap queries.
-        self.edge_tree = STRtree(
-            [
-                LineString([self.vertex_positions[s], self.vertex_positions[t]])
-                for s, t in zip(self.edge_src_array, self.edge_tgt_array)
-            ]
-        )
+        for edge_idx, (src, tgt) in enumerate(zip(src_list, tgt_list)):
+            self.edge_indices[edge_idx] = (src, tgt)
+        # Edge STRtree: LineString for proper edges; Point for self-loops
+        # (degenerate LineString(p,p) is invalid in GEOS).
+        edge_geoms = []
+        for s, t in zip(src_list, tgt_list):
+            if s == t:
+                edge_geoms.append(Point(self.vertex_positions[s]))
+            else:
+                edge_geoms.append(
+                    LineString([self.vertex_positions[s], self.vertex_positions[t]])
+                )
+        self.edge_tree = STRtree(edge_geoms)
 
     # ------------------------------------------------------------ spatial helpers
 
