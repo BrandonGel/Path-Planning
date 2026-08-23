@@ -485,11 +485,19 @@ class CGAL_Sweep:
             vel_vec = np.zeros_like(u_to_v)
             tdur = 0.0
 
+        # Dense per-vertex interval tables used for vectorized endpoint gather
+        # when get_time_interval=True (None / unused otherwise).
+        vtx_t_lo = None
+        vtx_t_hi = None
         if vertex_hits:
             if get_time_interval:
                 vert_idx = np.asarray(vertex_hits, dtype=np.int64)
                 r0 = u_arr - self.vertex_positions[vert_idx]
                 t1, t2 = self.get_interval_from_quadratic_equation(r0, vel_vec, r, tdur)
+                vtx_t_lo = np.full(self.vertex_positions.shape[0], np.inf)
+                vtx_t_hi = np.full(self.vertex_positions.shape[0], -np.inf)
+                vtx_t_lo[vert_idx] = t1
+                vtx_t_hi[vert_idx] = t2
                 overlapping_vertices = {
                     int(idx): (float(t1[i]), float(t2[i])) for i, idx in enumerate(vert_idx.tolist())
                 }
@@ -519,37 +527,25 @@ class CGAL_Sweep:
             a_to_b = b_pos - a_pos
             K = a_pos.shape[0]
 
-            all_starts = np.full(K, np.inf)
-            all_ends = np.full(K, -np.inf)
+            # Endpoint spheres: vectorized gather of overlapping-vertex intervals.
+            # Non-hit vertices stay at ±inf and do not contribute.
+            if vtx_t_lo is not None:
+                all_starts = np.minimum(vtx_t_lo[src_indices], vtx_t_lo[tgt_indices])
+                all_ends = np.maximum(vtx_t_hi[src_indices], vtx_t_hi[tgt_indices])
+            else:
+                all_starts = np.full(K, np.inf)
+                all_ends = np.full(K, -np.inf)
 
-            # Endpoint spheres (vertex a, vertex b).
-            for endpoint in (a_pos, b_pos):
-                rel_pos = u_arr - endpoint
-                A = float(vel_vec @ vel_vec)
-                B = 2.0 * (rel_pos @ vel_vec)
-                C = np.sum(rel_pos * rel_pos, axis=1) - r * r
-                disc = B * B - 4.0 * A * C
-                mask = disc >= 0
-                sqrt_disc = np.sqrt(np.maximum(0.0, disc))
-                denom = 2.0 * A + 1e-12
-                t1 = (-B - sqrt_disc) / denom
-                t2 = (-B + sqrt_disc) / denom
-                earlier = mask & (t1 < all_starts)
-                all_starts[earlier] = t1[earlier]
-                later = mask & (t2 > all_ends)
-                all_ends[later] = t2[later]
-
-            # Cylinder side: contact happens when perpendicular distance to
-            # line(ab) is <= r AND the projection of the agent onto line(ab)
-            # is within the segment [0, 1]. Compute each as a time interval
-            # and take their intersection. This handles the parallel-motion
-            # edge case (A_c ~ 0) where the quadratic-root approach would
-            # otherwise miss the interior contact interval.
+            # Finite cylinder contact: first-hit / leave times are the intersection of
+            # (1) times when perpendicular distance to line(ab) ≤ r, and
+            # (2) times when the projection of the agent onto ab lies in [0, 1].
+            # Handles the parallel-motion edge case (A_c ~ 0) where a pure
+            # quadratic-root approach would otherwise miss interior contact.
             seg_len_sq = np.sum(a_to_b * a_to_b, axis=1) + 1e-12
-            vdot = (a_to_b @ vel_vec) / seg_len_sq                # (K,) rate of projection change
+            vdot = (a_to_b @ vel_vec) / seg_len_sq
             v_perp = vel_vec[None, :] - vdot[:, None] * a_to_b
-            rel_pos_u = u_arr - a_pos                              # (K, d)
-            pdot = np.sum(rel_pos_u * a_to_b, axis=1) / seg_len_sq  # (K,) initial projection
+            rel_pos_u = u_arr - a_pos
+            pdot = np.sum(rel_pos_u * a_to_b, axis=1) / seg_len_sq
             pos_perp = rel_pos_u - pdot[:, None] * a_to_b
 
             A_c = np.sum(v_perp * v_perp, axis=1)
@@ -557,40 +553,36 @@ class CGAL_Sweep:
             C_c = np.sum(pos_perp * pos_perp, axis=1) - r * r
 
             LARGE = 1e18
-
-            # (1) Interval where perpendicular distance to line(ab) is <= r.
             moving_perp = A_c > 1e-12
             disc_c = B_c * B_c - 4.0 * A_c * C_c
             has_perp_roots = moving_perp & (disc_c >= 0.0)
             sqrt_disc_c = np.sqrt(np.maximum(0.0, disc_c))
             safe_A = np.where(moving_perp, A_c, 1.0)
-            t_perp_lo = np.where(has_perp_roots, (-B_c - sqrt_disc_c) / (2.0 * safe_A), LARGE)
-            t_perp_hi = np.where(has_perp_roots, (-B_c + sqrt_disc_c) / (2.0 * safe_A), -LARGE)
-            # Stationary perpendicular component (parallel motion) that's already inside r:
+            # Enter / exit the infinite cylinder (perp distance = r).
+            t_perp_enter = np.where(has_perp_roots, (-B_c - sqrt_disc_c) / (2.0 * safe_A), LARGE)
+            t_perp_exit = np.where(has_perp_roots, (-B_c + sqrt_disc_c) / (2.0 * safe_A), -LARGE)
+            # Parallel motion already inside radius: stay inside for all time.
             stationary_inside = (~moving_perp) & (C_c <= 0.0)
-            t_perp_lo = np.where(stationary_inside, -LARGE, t_perp_lo)
-            t_perp_hi = np.where(stationary_inside, LARGE, t_perp_hi)
+            t_perp_enter = np.where(stationary_inside, -LARGE, t_perp_enter)
+            t_perp_exit = np.where(stationary_inside, LARGE, t_perp_exit)
 
-            # (2) Interval where the projection s(t) = pdot + t*vdot lies in [0, 1].
+            # Enter / exit the finite segment via projection s(t) = pdot + t*vdot ∈ [0, 1].
             moving_proj = np.abs(vdot) > 1e-12
             safe_vdot = np.where(moving_proj, vdot, 1.0)
-            t_proj_a = -pdot / safe_vdot
-            t_proj_b = (1.0 - pdot) / safe_vdot
-            t_proj_lo_m = np.minimum(t_proj_a, t_proj_b)
-            t_proj_hi_m = np.maximum(t_proj_a, t_proj_b)
+            t_at_a = -pdot / safe_vdot
+            t_at_b = (1.0 - pdot) / safe_vdot
+            t_proj_enter = np.minimum(t_at_a, t_at_b)
+            t_proj_exit = np.maximum(t_at_a, t_at_b)
             proj_const_in = (~moving_proj) & (pdot >= 0.0) & (pdot <= 1.0)
-            t_proj_lo = np.where(moving_proj, t_proj_lo_m, np.where(proj_const_in, -LARGE, LARGE))
-            t_proj_hi = np.where(moving_proj, t_proj_hi_m, np.where(proj_const_in, LARGE, -LARGE))
+            t_proj_enter = np.where(moving_proj, t_proj_enter, np.where(proj_const_in, -LARGE, LARGE))
+            t_proj_exit = np.where(moving_proj, t_proj_exit, np.where(proj_const_in, LARGE, -LARGE))
 
-            # Intersection of the two intervals = cylinder contact interval.
-            t_cyl_lo = np.maximum(t_perp_lo, t_proj_lo)
-            t_cyl_hi = np.minimum(t_perp_hi, t_proj_hi)
-            has_cyl = t_cyl_lo < t_cyl_hi
-
-            earlier_cyl = has_cyl & (t_cyl_lo < all_starts)
-            all_starts[earlier_cyl] = t_cyl_lo[earlier_cyl]
-            later_cyl = has_cyl & (t_cyl_hi > all_ends)
-            all_ends[later_cyl] = t_cyl_hi[later_cyl]
+            # First hit / leave the finite cylinder = intersection of the two intervals.
+            t_first_hit = np.maximum(t_perp_enter, t_proj_enter)
+            t_leave = np.minimum(t_perp_exit, t_proj_exit)
+            has_cyl = t_first_hit < t_leave
+            all_starts = np.where(has_cyl, np.minimum(all_starts, t_first_hit), all_starts)
+            all_ends = np.where(has_cyl, np.maximum(all_ends, t_leave), all_ends)
 
             tau_start = np.clip(all_starts, 0.0, tdur)
             tau_end = np.clip(all_ends, 0.0, tdur)
