@@ -2,6 +2,7 @@ from path_planning.common.environment.map.graph_sampler import GraphSampler
 from path_planning.common.environment.node import Node
 from typing import Any, List, Tuple
 import bisect
+import math
 import numpy as np
 
 class State(object):
@@ -200,15 +201,23 @@ class SippEdge(UnsafeIntervalList):
 
 
 class SippGraph(object):
-    def __init__(self, graph_map: GraphSampler,dynamic_obstacles:dict = {},radius:float = 0.0,velocity:float = 0.0,use_constraint_sweep:bool = True, heuristic_type: str = 'manhattan',time_limit: float | None = None, max_iterations: int | None = None,verbose: bool = False, obstacle_horizon: float | None = None):
+    def __init__(self, graph_map: GraphSampler,dynamic_obstacles:dict = {},radius:float = 0.0,velocity:float = 0.0,use_constraint_sweep:bool = True, heuristic_type: str = 'manhattan',time_limit: float | None = None, max_iterations: int | None = None,verbose: bool = False, obstacle_horizon: float | dict | None = None):
         self.graph_map = graph_map
         self.dyn_obstacles = {}
-        # How long a dynamic obstacle's FINAL (resting) position blocks its node. Unbounded
-        # (float('inf')) reproduces the original "rest forever" behaviour; a finite value lets
-        # the planner route through a spot another agent currently rests on for arrivals beyond
-        # the horizon (those conflicts are then resolved by re-routing / the sim backstop),
-        # which breaks the corridor deadlock where resting agents wall off a goal forever.
-        self.obstacle_horizon = float(obstacle_horizon) if obstacle_horizon and obstacle_horizon > 0 else float('inf')
+        # How long a dynamic obstacle's FINAL (resting) position blocks its footprint.
+        # Unbounded (float('inf')) reproduces the original "rest forever" behaviour; a finite
+        # value lets the planner route through a spot another agent currently rests on for
+        # arrivals beyond the horizon. ``obstacle_horizon`` is either one scalar for every
+        # obstacle, or a dict ``{obstacle_name: horizon}`` (``None``/``<= 0`` -> inf; names
+        # missing from the dict rest forever). NeuralATTF uses the dict form: a moving agent's
+        # final waypoint is held for one timestep (it is reassigned next tick), while an idle,
+        # unassigned agent blocks its spot until it is told to move.
+        if isinstance(obstacle_horizon, dict):
+            self.obstacle_horizon = float('inf')
+            self.obstacle_horizons = {name: self._norm_horizon(h) for name, h in obstacle_horizon.items()}
+        else:
+            self.obstacle_horizon = self._norm_horizon(obstacle_horizon)
+            self.obstacle_horizons = {}
         self.sipp_graph = {}
         if radius > 0:
             # Radius-based SIPP always relies on constraint sweep queries.
@@ -248,34 +257,79 @@ class SippGraph(object):
             self.sipp_graph.setdefault((src_pos, tgt_pos), SippEdge())
             self.sipp_graph.setdefault((tgt_pos, src_pos), SippEdge())
 
+    @staticmethod
+    def _norm_horizon(horizon) -> float:
+        """``None`` / non-positive -> rest forever (inf); otherwise the horizon in seconds."""
+        return float(horizon) if horizon is not None and horizon > 0 else float('inf')
+
+    def _horizon_for(self, dyn_name) -> float:
+        """Resting horizon of one dynamic obstacle (per-name override, else the global value)."""
+        return self.obstacle_horizons.get(dyn_name, self.obstacle_horizon)
+
     def init_intervals(self,dyn_obstacles:dict = {}):
+        """Block the SIPP graph with other agents' timed schedules ``[{x, y, t}, ...]``.
+
+        Per schedule entry (radius > 0):
+        - final point: the resting footprint (vertices AND edges) is blocked for
+          ``[t, t + horizon]`` where ``horizon`` comes from :meth:`_horizon_for`;
+        - a wait (next point at the same position): the footprint is blocked for
+          exactly ``[t, next_t]`` from the schedule's own timestamps. The stationary
+          sweep itself reports ``(0, inf)``, so using it directly (as this method
+          once did) blocked every wait forever, regardless of the horizon;
+        - a move: the sweep's relative windows, computed at the speed the schedule
+          actually implies (``dist / (next_t - t)``). A time-sampled schedule whose
+          tick straddles a wait-then-move covers less than ``velocity * dt``; sweeping
+          it at the nominal velocity would compress the window and leave the segment
+          end unblocked while the obstacle is still moving through it.
+        """
         if not dyn_obstacles or len(dyn_obstacles) == 0: return
         for dyn_name, schedule in dyn_obstacles.items():
             self.dyn_obstacles[dyn_name] = np.array([State(position=(location["x"],location["y"]), t=location["t"]) for location in schedule])
-            # for location in schedule:
-            for i in range(len(schedule)):
+            horizon = self._horizon_for(dyn_name)
+            n_points = len(schedule)
+            for i in range(n_points):
                 location = schedule[i]
                 position = (location["x"],location["y"])
-                t = max(0,location["t"])
-                
-                last_t = i == len(schedule)-1
+                t = max(0.0, float(location["t"]))
+
+                last_t = i == n_points-1
 
                 if self.radius > 0:
                     if last_t:
                         overlapping_vertices,overlapping_edges = self._get_constraint_sweep_cached(position, position,self.velocity, 2*self.radius)
-                        next_t = t + self.obstacle_horizon  # inf -> blocks forever (default)
-                        for vertex_pos, vertex_interval in overlapping_vertices.items():
+                        next_t = t + horizon  # inf -> blocks forever
+                        for vertex_pos in overlapping_vertices:
                             self.sipp_graph[vertex_pos].split_interval(t, next_t)
+                        for edge_pos in overlapping_edges:
+                            self.sipp_graph[edge_pos].add_unsafe_interval(t, next_t)
                         continue
-                    else:
-                        next_location = schedule[i + 1]
-                        next_position = (next_location["x"], next_location["y"])
-                        overlapping_vertices, overlapping_edges = self._get_constraint_sweep_cached(position, next_position, self.velocity, 2 * self.radius)
-                        next_t = next_location["t"]
+
+                    next_location = schedule[i + 1]
+                    next_position = (next_location["x"], next_location["y"])
+                    next_t = max(0.0, float(next_location["t"]))
+                    if next_position == position:
+                        # Wait: block the footprint for the schedule's own window only.
+                        if next_t - t > 1e-9:
+                            overlapping_vertices,overlapping_edges = self._get_constraint_sweep_cached(position, position,self.velocity, 2*self.radius)
+                            for vertex_pos in overlapping_vertices:
+                                self.sipp_graph[vertex_pos].split_interval(t, next_t)
+                            for edge_pos in overlapping_edges:
+                                self.sipp_graph[edge_pos].add_unsafe_interval(t, next_t)
+                        continue
+
+                    # Move: sweep at the speed the schedule implies (falls back to the
+                    # nominal velocity when they agree, to keep the sweep cache warm).
+                    sweep_velocity = self.velocity
+                    duration = next_t - t
+                    if self.velocity > 0 and duration > 1e-9:
+                        implied = math.dist(position, next_position) / duration
+                        if abs(implied - self.velocity) > 1e-6:
+                            sweep_velocity = implied
+                    overlapping_vertices, overlapping_edges = self._get_constraint_sweep_cached(position, next_position, sweep_velocity, 2 * self.radius)
                     for vertex_pos, vertex_interval in overlapping_vertices.items():
                         t_start,t_end = vertex_interval
                         t1 = t+t_start
-                        t2 = t+t_end 
+                        t2 = t+t_end
                         self.sipp_graph[vertex_pos].split_interval(t1, t2)
                     for edge_pos, edge_interval in overlapping_edges.items():
                         # edge_interval is a 2-tuple (t_start, t_end) from
@@ -285,7 +339,7 @@ class SippGraph(object):
                         self.sipp_graph[edge_pos].add_unsafe_interval(t + t_start, t + t_end)
                 else:
                     t1 = t
-                    t2 = t1 + 1 if not last_t else (t1 + self.obstacle_horizon)
+                    t2 = t1 + 1 if not last_t else (t1 + horizon)
                     self.sipp_graph[position].split_interval(t1, t2,1)
 
         # Update the intervals of the SIPP graph based on the agent's plan (treated as dynamic obstacles)

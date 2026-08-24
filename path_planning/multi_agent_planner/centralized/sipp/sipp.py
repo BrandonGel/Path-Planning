@@ -21,7 +21,7 @@ from path_planning.multi_agent_planner.data_type import HEURISTIC_TYPE
 from path_planning.multi_agent_planner.centralized.sipp.graph_generation import SippNode
 
 class SippPlanner(SippGraph):
-    def __init__(self, graph_map: GraphSampler,dynamic_obstacles:dict = {},agents:list = [],radius:float = 0.0,velocity:float = 0.0,use_constraint_sweep:bool = True, heuristic_type: str = 'manhattan',time_limit: float | None = None, max_iterations: int | None = None,verbose: bool = False,sipp_max_iterations: int = 10000, obstacle_horizon: float | None = None, require_goal_safe_forever: bool = True):
+    def __init__(self, graph_map: GraphSampler,dynamic_obstacles:dict = {},agents:list = [],radius:float = 0.0,velocity:float = 0.0,use_constraint_sweep:bool = True, heuristic_type: str = 'manhattan',time_limit: float | None = None, max_iterations: int | None = None,verbose: bool = False,sipp_max_iterations: int = 10000, obstacle_horizon: float | dict | None = None, require_goal_safe_forever: bool = True):
         SippGraph.__init__(self,graph_map,dynamic_obstacles,radius,velocity,use_constraint_sweep,heuristic_type,time_limit,max_iterations,verbose,obstacle_horizon)
         self.agents = agents
         # A finished agent occupies its goal for all future time, so a goal
@@ -45,6 +45,13 @@ class SippPlanner(SippGraph):
             self.heuristic_type = HEURISTIC_TYPE["manhattan"]
         else:
             self.heuristic_type = HEURISTIC_TYPE[heuristic_type]
+
+    def _interval_containing(self, position, t: float):
+        """The safe interval of ``position`` that contains time ``t`` (None if blocked)."""
+        for interval in self.sipp_graph[position].interval_list:
+            if interval[0] <= t <= interval[1]:
+                return interval
+        return None
 
     def shuffle_agents(self):
         random.shuffle(self.agents)
@@ -250,16 +257,24 @@ class SippPlanner(SippGraph):
                 if len(self.sipp_graph[start].interval_list) == 0 or len(self.sipp_graph[goal].interval_list) == 0:
                     success = False
                     break
+                # The agent is at ``start`` at t=0, so its initial safe interval must be the
+                # one containing t=0. Seeding with interval_list[0] regardless would let the
+                # search "wait" at the start through a blocked window (another agent
+                # sweeping over it) and emit a plan that collides before it even moves.
+                start_interval = self._interval_containing(start, 0.0)
+                if start_interval is None:
+                    success = False
+                    break
                 # If start already equals goal, low-level search should terminate immediately.
                 # Treat this as a zero-cost single-state plan and continue.
                 if start == goal:
-                    initial_state = State(start, 0, self.sipp_graph[start].interval_list[0])
+                    initial_state = State(start, 0, start_interval)
                     self.plan[agent["name"]] = [initial_state]
                     self.plan_cost[agent["name"]] = 0.0
                     self.action_cost[agent["name"]] = [(0.0, 0.0)]
                     self.update_intervals([[initial_state]], [[(0.0, 0.0)]], [agent["name"]])
                     continue
-                initial_state = State(start, 0, self.sipp_graph[start].interval_list[0])
+                initial_state = State(start, 0, start_interval)
                 initial_state_key = (start, initial_state.interval)
 
                 # Min-heap: (f, counter, state); counter ensures we never compare State objects

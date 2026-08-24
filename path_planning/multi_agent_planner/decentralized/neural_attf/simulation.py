@@ -161,29 +161,44 @@ class Simulation:
                 token["agents"][name] = token["agents"][name][n:]
             if traversed:
                 # Record every fine waypoint traversed this tick with fractional
-                # sub-stamps over (t-1, t], so the plotted polyline hugs the roadmap
-                # while the last point lands exactly on the integer tick.
-                m_total = len(traversed)
+                # sub-stamps over (t-1, t] proportional to arc length (constant speed
+                # within the tick), so the polyline hugs the roadmap while the last
+                # point lands exactly on the integer tick.
+                legs = [agents_pos_now[name]] + list(traversed)
+                seg = [math.dist(legs[m], legs[m + 1]) for m in range(len(legs) - 1)]
+                total = sum(seg)
+                acc = 0.0
                 for m, wp in enumerate(traversed, start=1):
-                    self.actual_paths[name].append(
-                        _point_to_dict((self.time - 1) + m / m_total, wp)
-                    )
+                    acc += seg[m - 1]
+                    frac = acc / total if total > 0 else m / len(traversed)
+                    self.actual_paths[name].append(_point_to_dict((self.time - 1) + frac, wp))
             else:
                 self.actual_paths[name].append(_point_to_dict(self.time, agent_pos_next[name]))
+
+    @staticmethod
+    def _step_points(planned, i):
+        """Points visited going from ``planned[i]`` to ``planned[i + 1]``: any roadmap
+        vertices the waypoint carries as ``via`` (see NeuralATTF._Waypoint), then the
+        waypoint itself."""
+        nxt = planned[i + 1]
+        return [tuple(v) for v in getattr(nxt, "via", ())] + [tuple(nxt)]
 
     def _advance_plan(self, planned, budget):
         """Walk the committed waypoint list ``planned`` (``planned[0]`` == current pos)
         from the head, accumulating Euclidean arc length until the next waypoint would
         exceed ``budget``. Returns ``(n_consumed, traversed)``: the number of head
-        entries to pop and the waypoints actually visited this tick (excluding the
-        current position). A wait (zero-length step) consumes exactly one entry and
-        stops, preserving holds. ``budget <= 0`` falls back to one waypoint per tick.
+        entries to pop and the points actually visited this tick (excluding the
+        current position; a waypoint's ``via`` vertices precede it). A wait
+        (zero-length step) consumes exactly one entry and stops, preserving holds.
+        ``budget <= 0`` falls back to one waypoint per tick.
         """
         traversed: List[tuple] = []
         used = 0.0
         i = 0
         while i + 1 < len(planned):
-            seg = math.dist(planned[i], planned[i + 1])
+            step = self._step_points(planned, i)
+            legs = [tuple(planned[i])] + step
+            seg = sum(math.dist(legs[m], legs[m + 1]) for m in range(len(legs) - 1))
             if seg == 0.0:
                 # Wait at the vertex: advance exactly one entry, then stop.
                 if not traversed:
@@ -194,7 +209,7 @@ class Simulation:
                 break  # next waypoint would overrun the arc-length budget
             used += seg
             i += 1
-            traversed.append(tuple(planned[i]))
+            traversed.extend(step)
             if budget <= 0.0 or used >= budget:
                 break
         return i, traversed

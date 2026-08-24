@@ -52,12 +52,32 @@ def _point_schedule(p, t) -> dict:
     return d
 
 
+class _Waypoint(tuple):
+    """A committed per-tick waypoint that remembers the roadmap vertices the agent
+    passes *within* the tick (``via``, in order, strictly between the previous
+    waypoint and this one). Behaves exactly like a position tuple (equality,
+    hashing, indexing), so all position bookkeeping is unaffected; the simulation
+    drives through ``via`` so the executed motion follows the roadmap instead of
+    the chord between the two samples, and other agents see the same polyline.
+    """
+
+    def __new__(cls, pos, via=()):
+        obj = super().__new__(cls, tuple(float(c) for c in pos))
+        obj.via = tuple(tuple(float(c) for c in v) for v in via)
+        return obj
+
+
+def _wp(p):
+    """Position tuple for a path entry, keeping ``_Waypoint`` (and its vias) intact."""
+    return p if isinstance(p, _Waypoint) else tuple(p)
+
+
 class _Loc:
     """Minimal stand-in exposing ``.point`` (matches cbs.Location's interface)."""
     __slots__ = ("point",)
 
     def __init__(self, point):
-        self.point = tuple(point)
+        self.point = _wp(point)
 
 
 class _SegState:
@@ -88,10 +108,10 @@ class NeuralATTF:
         device: str = "cpu",
         sipp_time_limit: float | None = None,
         timestep_duration: float = 1.0,
-        max_waypoint_edge_len: float = 5.0,
         park_retry_cooldown: int = 3,
         parking_goal_clearance: float = 0.0,
         sipp_obstacle_horizon: float | None = None,
+        sipp_clearance_margin: float = 0.005,
     ):
         self.graph_map = graph_map
         self.agents = agents
@@ -108,24 +128,28 @@ class NeuralATTF:
         self.low_level = low_level
         self.device = device
         # Wall-clock cap (s) per SIPP low-level call; None = unbounded (stops only
-        # at the iteration cap). Real seconds each simulation step represents:
-        # one step covers ~= timestep_duration * velocity world units.
+        # at the iteration cap). Real seconds each simulation step represents. SIPP
+        # schedules are resampled once per timestep (see _resample_by_time), so the
+        # committed waypoint list has exactly one entry per simulation tick and
+        # waypoint index k == time k * timestep_duration, for the agent's own path and
+        # for the other agents' paths SIPP plans against.
         self.sipp_time_limit = sipp_time_limit
         self.timestep_duration = float(timestep_duration)
-        # Max spacing (world units) between consecutive trajectory waypoints. SIPP edges
-        # longer than this are subdivided equal-parts so the path is a fine polyline that
-        # the simulation walks at constant velocity (multiple waypoints per tick).
-        self.max_waypoint_edge_len = float(max_waypoint_edge_len)
         self.park_retry_cooldown = int(park_retry_cooldown)
         # Idle agents avoid parking within this distance of an ACTIVE (pending/assigned)
         # delivery goal, so finished agents leave congested destination regions instead of
         # resting there and walling off the corridor for later tasks. 0 disables the rule.
         self.parking_goal_clearance = float(parking_goal_clearance)
-        # Finite blocking horizon (s) for other agents' resting positions in SIPP; None/<=0 =
-        # unbounded (block forever). A finite value lets SIPP route through a currently-resting
-        # agent for far-future arrivals, breaking corridor deadlocks (the blocker is then moved
-        # by the idle-agent re-router, or the conflict is caught by the sim backstop).
+        # Fallback resting horizon (s) for other agents in SIPP. Normally unused:
+        # _other_agent_schedules assigns every other agent an explicit horizon - a moving
+        # agent's final waypoint is held for exactly one timestep (it is reassigned to a
+        # task or a parking spot at the next time_forward), while an idle, unassigned
+        # agent (committed path of length 1) blocks its footprint until it is moved.
         self.sipp_obstacle_horizon = sipp_obstacle_horizon
+        # Extra agent-agent clearance (world units) handed to SIPP on top of agent_radius.
+        # The sweep clears other agents at exactly 2 * radius and the solution checker
+        # flags distance <= 2 * radius, so tangential passes would sit on the threshold.
+        self.sipp_clearance_margin = float(sipp_clearance_margin)
 
         # Agent footprint is the set of graph nodes a radius-``agent_radius`` disk
         # covers (computed via the map's CGAL swept-collision query), so it works on
@@ -238,12 +262,11 @@ class NeuralATTF:
             ):
                 task_name = token["agents_to_tasks"][agent]["task_name"]
                 entry = token["agents_to_tasks"][agent]
-                # Full waypoint route of the in-progress task (legacy entries only
-                # carried start/goal). NOTE: progress through a partially-completed
-                # multi-leg route is not tracked, so a delayed mid-route agent
-                # replans the whole route from its current position (acceptable
-                # while delay_probability == 0).
-                task = entry.get("waypoints", [entry["start"], entry["goal"]])
+                # Remaining waypoint route of the in-progress task (legacy entries
+                # only carried start/goal); ``next_wp`` is advanced in time_forward
+                # step 1 as the agent reaches each waypoint, so a mid-route replan
+                # resumes from the legs still to do.
+                task = self._remaining_waypoints(entry)
                 pairs.append((agent, task_name, task, -1))
             elif len(available_tasks) != 0:
                 agent_position = idle_agents[agent][0]
@@ -509,13 +532,27 @@ class NeuralATTF:
 
     # ------------------------------------------------------------- A* driver
 
-    def plan(self, agent_name, start, goal, all_idle_agents, all_delayed_agents, cost_map, cost: int):
+    def plan(
+        self, agent_name, start, goal, all_idle_agents, all_delayed_agents, cost_map, cost: int,
+        rest_forever: bool = False,
+    ):
+        """Low-level plan ``start -> goal`` for one agent.
+
+        ``cost`` is the tick at which this leg starts relative to now (0 for a leg
+        starting immediately; the running offset for later legs of a multi-waypoint
+        task). ``rest_forever`` marks a leg whose end is a permanent rest (parking,
+        deadlock relocation, idle reroute): SIPP then only accepts a goal whose safe
+        interval is unbounded, so no already-committed path crosses the resting spot.
+        Task legs leave it False - the agent rests one tick and is reassigned.
+        """
         start = tuple(start)
         goal = tuple(goal)
         if self.low_level == "sipp":
             # Continuous-time, interval-based, radius-aware low-level planning.
-            # cost_map / cost (grid time-offset) are not used by SIPP.
-            return self._plan_sipp(agent_name, start, goal)
+            # cost_map is grid-only; cost is the leg's start-tick offset.
+            return self._plan_sipp(
+                agent_name, start, goal, offset_steps=int(cost), rest_forever=rest_forever
+            )
         moving = self.get_moving_obstacles_agents(self.token["agents"], cost)
         idle = self.get_idle_obstacles_agents(all_idle_agents, all_delayed_agents, cost)
         agents = [{"name": agent_name, "start": start, "goal": goal}]
@@ -563,50 +600,186 @@ class NeuralATTF:
         _, idx = self._node_kdtree.query(np.asarray(pt, dtype=float), k=1)
         return tuple(nodes[int(idx)].current)
 
-    def _other_agent_schedules(self, agent_name) -> dict:
-        """Other agents' committed paths as SIPP dynamic obstacles: name -> timed
-        schedule ``[{x, y, t}]``. SIPP plans in seconds, so step index ``k`` is
-        stamped at SIPP time ``k * timestep_duration`` to align other agents'
-        committed paths with SIPP's continuous clock."""
-        sched = {}
-        for name, path in self.token["agents"].items():
-            if name == agent_name or not path:
-                continue
-            sched[name] = [
-                _point_schedule(p, k * self.timestep_duration) for k, p in enumerate(path)
-            ]
-        return sched
+    def _snap_start(self, pt):
+        """Roadmap node a SIPP plan starts from, and the time (s) needed to reach it.
 
-    def _plan_sipp(self, agent_name, start, goal):
-        start = self._snap_to_node(start)
+        A re-planned agent usually sits mid-edge (its committed path is sampled per
+        tick, so a hold or a re-validation catches it between vertices). Planning
+        from the nearest node and then jumping to it would execute an unchecked,
+        off-roadmap chord; instead the start is snapped to the nearer ENDPOINT of the
+        edge the agent is on, so the first move stays on the roadmap, and the
+        returned ``t_reach`` lets the caller shift the world by the time that move
+        takes. Points already on a node (or off every edge) snap as before with
+        ``t_reach = 0``.
+        """
+        from path_planning.common.environment.node import Node
+
+        pt = tuple(float(c) for c in pt)
+        if Node(pt) in self.graph_map.node_index_dict:
+            return pt, 0.0
+        nodes = self.graph_map.nodes
+        snapped = self._snap_to_node(pt)
+        if not nodes or self.velocity <= 0:
+            return snapped, 0.0
+        p = np.asarray(pt, dtype=float)
+        k = min(8, len(nodes))
+        _, idxs = self._node_kdtree.query(p, k=k)
+        idxs = np.atleast_1d(idxs)
+        best = None  # (distance to edge, endpoint distance, endpoint)
+        for i in idxs:
+            i = int(i)
+            a = np.asarray(nodes[i].current, dtype=float)
+            for j in self.graph_map.road_map[i]:
+                b = np.asarray(nodes[int(j)].current, dtype=float)
+                ab = b - a
+                denom = float(ab @ ab)
+                if denom <= 0:
+                    continue
+                s = max(0.0, min(1.0, float((p - a) @ ab) / denom))
+                d_edge = float(np.linalg.norm(p - (a + s * ab)))
+                if d_edge > 1e-6:
+                    continue
+                for end in (a, b):
+                    d_end = float(np.linalg.norm(p - end))
+                    if best is None or (d_edge, d_end) < (best[0], best[1]):
+                        best = (d_edge, d_end, tuple(float(c) for c in end))
+        if best is None:
+            return snapped, 0.0
+        return best[2], best[1] / self.velocity
+
+    def _other_agent_schedules(
+        self, agent_name, offset_steps: int = 0, exclude=(), offset_time: float = 0.0
+    ) -> tuple:
+        """Other agents' committed paths as SIPP dynamic obstacles.
+
+        Returns ``(schedules, horizons)``: ``schedules`` maps name -> timed schedule
+        ``[{x, y, t}]`` and ``horizons`` maps name -> how long (s) the agent's final
+        position stays blocked after it arrives there.
+
+        Committed paths hold one waypoint per simulation tick (see
+        :meth:`_resample_by_time`), so waypoint ``k`` is stamped at SIPP time
+        ``k * timestep_duration``. ``offset_steps`` is the tick the leg being planned
+        starts at: each other path is sliced from that index so SIPP's ``t = 0``
+        coincides with the leg's real start.
+
+        Resting semantics:
+        - a MOVING agent (path length > 1) is assumed to stay at its final waypoint
+          for exactly one timestep - it is reassigned to a task or a parking spot
+          at the next ``time_forward`` - so its horizon is ``timestep_duration``;
+          a mover whose path ends before the leg starts is kept as one resting
+          point with the same one-tick hold;
+        - an IDLE, unassigned agent (path length 1) blocks its footprint until it
+          is told to move (horizon ``None`` -> forever).
+        ``exclude`` drops names entirely (used to let an agent escape from inside an
+        idle agent's footprint). ``offset_time`` adds a fractional shift (s) on top
+        of ``offset_steps`` - the time the planning agent needs to reach the roadmap
+        node its plan starts from (see :meth:`_snap_start`).
+        """
+        dt = self.timestep_duration
+        shift = offset_steps * dt + float(offset_time)
+        sched = {}
+        horizons = {}
+        for name, path in self.token["agents"].items():
+            if name == agent_name or not path or name in exclude:
+                continue
+            if len(path) == 1:
+                sched[name] = [_point_schedule(path[0], 0.0)]
+                horizons[name] = None
+                continue
+            # Absolute timeline of the committed path: waypoint k at k*dt, with the
+            # roadmap vertices passed inside tick k (its vias) stamped by arc-length
+            # fraction of the tick.
+            timed = [(tuple(path[0]), 0.0)]
+            for k in range(1, len(path)):
+                prev = tuple(path[k - 1])
+                vias = list(getattr(path[k], "via", ()))
+                if vias:
+                    legs = [prev] + vias + [tuple(path[k])]
+                    seg = [math.dist(legs[i], legs[i + 1]) for i in range(len(legs) - 1)]
+                    total = sum(seg)
+                    acc = 0.0
+                    for i, q in enumerate(vias):
+                        acc += seg[i]
+                        frac = acc / total if total > 0 else (i + 1) / (len(vias) + 1)
+                        timed.append((q, (k - 1 + frac) * dt))
+                timed.append((tuple(path[k]), k * dt))
+            # Re-base onto the leg's own clock: drop what happens before the leg
+            # starts, interpolating the position at exactly t = 0.
+            rebased = [(q, tq - shift) for q, tq in timed]
+            first_future = next((i for i, (_, tq) in enumerate(rebased) if tq > 1e-9), None)
+            if first_future is None:
+                rebased = [(rebased[-1][0], 0.0)]
+            elif first_future == 0:
+                pass
+            else:
+                (qa, ta), (qb, tb) = rebased[first_future - 1], rebased[first_future]
+                frac = 0.0 if tb - ta <= 1e-12 else (0.0 - ta) / (tb - ta)
+                q0 = tuple(a + frac * (b - a) for a, b in zip(qa, qb))
+                rebased = [(q0, 0.0)] + rebased[first_future:]
+            sched[name] = [_point_schedule(q, tq) for q, tq in rebased]
+            horizons[name] = dt
+        return sched, horizons
+
+    def _plan_sipp(self, agent_name, start, goal, offset_steps: int = 0, rest_forever: bool = False):
+        actual_start = tuple(float(c) for c in start)
+        start, t_reach = self._snap_start(actual_start)
         goal = self._snap_to_node(goal)
         heur = self.heuristic_type if self.heuristic_type in {"manhattan", "euclidean"} else "euclidean"
         budget = max(int(self.a_star_max_iter), 10 * len(self.graph_map.nodes))
-        planner = SippPlanner(
-            self.graph_map,
-            dynamic_obstacles=self._other_agent_schedules(agent_name),
-            agents=[{"name": agent_name, "start": start, "goal": goal}],
-            radius=self.agent_radius,
-            velocity=self.velocity,
-            use_constraint_sweep=True,
-            heuristic_type=heur,
-            time_limit=self.sipp_time_limit,
-            sipp_max_iterations=budget,
-            obstacle_horizon=self.sipp_obstacle_horizon,
-            # NeuralATTF re-plans agents as the simulation progresses, so a
-            # goal accepted in a bounded safe interval is fine here - unlike
-            # a one-shot solve, a future conflict at that spot triggers a
-            # replan rather than going undetected.
-            require_goal_safe_forever=False,
-        )
+        radius = self.agent_radius + self.sipp_clearance_margin if self.agent_radius > 0 else 0.0
+
+        def build(exclude=()):
+            # SIPP's t=0 is the moment the agent stands on ``start``; the world is
+            # shifted by the time it takes to get there from its true position.
+            sched, horizons = self._other_agent_schedules(
+                agent_name, offset_steps, exclude, offset_time=t_reach
+            )
+            return SippPlanner(
+                self.graph_map,
+                dynamic_obstacles=sched,
+                agents=[{"name": agent_name, "start": start, "goal": goal}],
+                radius=radius,
+                velocity=self.velocity,
+                use_constraint_sweep=True,
+                heuristic_type=heur,
+                time_limit=self.sipp_time_limit,
+                sipp_max_iterations=budget,
+                obstacle_horizon=horizons,
+                # Task legs accept a bounded goal interval: the agent rests one tick
+                # and is reassigned. Legs ending in a permanent rest (parking etc.)
+                # need an unbounded interval so no committed path crosses the spot.
+                require_goal_safe_forever=rest_forever,
+            )
+
+        planner = build()
+        if offset_steps == 0 and not planner.sipp_graph[start].interval_list:
+            # Our own start lies inside an idle agent's (forever-blocked) footprint,
+            # e.g. two agents were held next to each other by the simulation. SIPP
+            # cannot even seed its search then, so plan the escape ignoring those
+            # idle agents; the idle-agent re-router / deadlock recovery separate them.
+            clearance = 2.0 * radius
+            covering = {
+                name
+                for name, path in self.token["agents"].items()
+                if name != agent_name and len(path) == 1 and math.dist(path[0], start) <= clearance
+            }
+            if covering:
+                print(
+                    f"[NeuralATTF] {agent_name} starts inside idle {sorted(covering)}; "
+                    "planning escape ignoring them"
+                )
+                planner = build(exclude=covering)
         solution, info = planner.compute_plan()
         self._record_sipp_metrics(info)
         schedule = solution.get(agent_name) if solution else None
         if not schedule:
             return False
-        positions = self._resample_unit(
-            schedule, goal, dt=self.timestep_duration, max_edge_len=self.max_waypoint_edge_len
-        )
+        if t_reach > 0.0:
+            # Put the plan back on the simulation clock: the agent first drives from
+            # its true (mid-edge) position to ``start`` along the edge it is on.
+            schedule = [dict(s, t=float(s["t"]) + t_reach) for s in schedule]
+            schedule = [_point_schedule(actual_start, 0.0)] + schedule
+        positions = self._resample_by_time(schedule, goal, dt=self.timestep_duration)
         return {agent_name: [_SegState(p) for p in positions]}
 
     def _record_sipp_metrics(self, info: dict) -> None:
@@ -618,51 +791,58 @@ class NeuralATTF:
             self.token["sipp_iterations_max_seen"] = iters
 
     @staticmethod
-    def _resample_unit(schedule, goal, dt: float = 1.0, max_edge_len: float = 5.0):
-        """Convert a continuous-time SIPP schedule ``[{t,x,y}]`` into a FINE waypoint
-        polyline that follows the roadmap edges.
+    def _resample_by_time(schedule, goal, dt: float = 1.0):
+        """Convert a continuous-time SIPP schedule ``[{t,x,y}]`` into one waypoint
+        per simulation tick: ``out[k]`` is the position on the timed schedule at
+        ``t0 + k * dt`` (linear interpolation along the segment being traversed).
 
-        SIPP plans on the roadmap, so each schedule entry is a roadmap vertex and
-        every pair of consecutive distinct entries is exactly one collision-free
-        edge. We walk the schedule vertex-to-vertex (so a chord never cuts a corner
-        through an obstacle) and subdivide each edge **equal-parts** so consecutive
-        waypoints are at most ``max_edge_len`` world units apart:
+        The simulation consumes exactly one waypoint per tick, so this is what
+        makes "waypoint index k" mean "time k * dt" - for the agent's own path and
+        for the schedules other agents plan against. Waits become repeated points;
+        the last sample lands on the first tick at or after the schedule's end and
+        is forced onto ``goal``. A single-point schedule yields ``[point]``.
 
-        - a wait (consecutive equal vertices) becomes ``round((t1-t0)/dt)``
-          repeated positions (>= 1), so the hold is never silently dropped;
-        - a move of length ``L`` along one edge is split into ``n = ceil(L/max_edge_len)``
-          equal sub-segments (each ``L/n <= max_edge_len``), all collinear on that edge.
-
-        This sets the path *shape* only; the per-tick distance an agent travels is the
-        simulation's arc-length budget (it walks multiple of these waypoints per tick at
-        constant velocity). The result ends exactly on ``goal``. Output guarantee: every
-        consecutive pair is equal (a wait) or collinear on one collision-free roadmap
-        edge, so no chord crosses a static obstacle.
+        Each sample is a :class:`_Waypoint` whose ``via`` lists the schedule
+        vertices passed strictly inside the preceding tick, so the executed
+        motion (and what other agents plan against) follows the roadmap rather
+        than the chord between two mid-edge samples.
         """
         dt = float(dt) if dt and dt > 0 else 1.0
-        max_edge_len = float(max_edge_len) if max_edge_len and max_edge_len > 0 else 0.0
         pts = sorted(((float(s["t"]), _as_point(s)) for s in schedule), key=lambda x: x[0])
         if not pts:
-            return [tuple(goal)]
+            return [_Waypoint(goal)]
 
-        out = [tuple(pts[0][1])]
-        for (t0, p0), (t1, p1) in zip(pts, pts[1:]):
-            if p1 == p0:
-                # Wait at the vertex: one repeat per dt of held real time (>= 1).
-                n_wait = max(1, int(round((t1 - t0) / dt)))
-                out.extend([tuple(p1)] * n_wait)
-                continue
-            # Move along the single roadmap edge p0 -> p1, equal-parts subdivided.
-            if max_edge_len > 0.0:
-                n_sub = max(1, int(math.ceil(math.dist(p0, p1) / max_edge_len)))
+        t0, t_end = pts[0][0], pts[-1][0]
+        n_steps = max(0, int(math.ceil((t_end - t0) / dt - 1e-9)))
+        out = []
+        j = 0
+        prev_tk = t0
+        for k in range(n_steps + 1):
+            tk = t0 + k * dt
+            # Schedule vertices strictly inside (prev_tk, tk) are vias of this sample.
+            via = [q for (tq, q) in pts if prev_tk + 1e-9 < tq < tk - 1e-9]
+            while j + 1 < len(pts) and pts[j + 1][0] <= tk + 1e-9:
+                j += 1
+            if j + 1 >= len(pts):
+                p = pts[-1][1]
             else:
-                n_sub = 1
-            for k in range(1, n_sub + 1):
-                frac = k / n_sub
-                out.append(tuple(a + frac * (b - a) for a, b in zip(p0, p1)))
+                (ta, pa), (tb, pb) = pts[j], pts[j + 1]
+                if tb - ta <= 1e-12 or pa == pb:
+                    p = pa
+                else:
+                    frac = (tk - ta) / (tb - ta)
+                    p = tuple(a + frac * (b - a) for a, b in zip(pa, pb))
+            # Drop vias that coincide with a neighbouring sample (waits, exact hits).
+            cleaned = []
+            last = tuple(out[-1]) if out else None
+            for q in via:
+                if q != last and q != tuple(p) and (not cleaned or q != cleaned[-1]):
+                    cleaned.append(q)
+            out.append(_Waypoint(p, cleaned))
+            prev_tk = tk
 
-        if out[-1] != tuple(goal):
-            out.append(tuple(goal))
+        if tuple(out[-1]) != tuple(goal):
+            out.append(_Waypoint(goal))
         return out
 
     # ---------------------------------------------------- safe-idle dispatch
@@ -682,7 +862,10 @@ class NeuralATTF:
         if cur in self.non_task_endpoints and not self._near_active_goal(cur):
             return True
         target = self.get_closest_non_task_endpoint(agent_pos)
-        path = self.plan(agent_name, agent_pos, target, all_idle_agents, all_delayed_agents, None, 0)
+        path = self.plan(
+            agent_name, agent_pos, target, all_idle_agents, all_delayed_agents, None, 0,
+            rest_forever=True,
+        )
         if not path:
             print(f"Solution to non-task endpoint not found for {agent_name}; trying deadlock recovery.")
             self.deadlock_recovery(agent_name, agent_pos, all_idle_agents, all_delayed_agents, self.deadlock_radius)
@@ -695,7 +878,7 @@ class NeuralATTF:
             "goal": tuple(target),
             "predicted_cost": 0,
         }
-        self.token["agents"][agent_name] = [tuple(state.location.point) for state in path[agent_name]]
+        self.token["agents"][agent_name] = [_wp(state.location.point) for state in path[agent_name]]
         return True
 
     # ------------------------------------------------------ deadlock recovery
@@ -782,11 +965,14 @@ class NeuralATTF:
         # plans collision-free (SIPP/A* treat other agents' paths as dynamic
         # obstacles, so a successful plan == no interference).
         for target in candidates:
-            path = self.plan(agent_name, agent_pos, target, all_idle_agents, all_delayed_agents, None, 0)
+            path = self.plan(
+                agent_name, agent_pos, target, all_idle_agents, all_delayed_agents, None, 0,
+                rest_forever=True,
+            )
             if not path:
                 continue
             self.update_ends(agent_pos, agent_name)
-            self.token["agents"][agent_name] = [tuple(state.location.point) for state in path[agent_name]]
+            self.token["agents"][agent_name] = [_wp(state.location.point) for state in path[agent_name]]
             return
         print(f"Deadlock recovery: no collision-free escape for {agent_name}.")
 
@@ -834,13 +1020,88 @@ class NeuralATTF:
 
     # -------------------------------------------------------- main step loop
 
+    @staticmethod
+    def _remaining_waypoints(entry: dict) -> list:
+        """Waypoints of an in-progress task still to be visited (never empty)."""
+        wps = [tuple(p) for p in entry.get("waypoints", [entry["start"], entry["goal"]])]
+        rest = wps[int(entry.get("next_wp", 0)):]
+        return rest if rest else [tuple(entry["goal"])]
+
+    def _plan_task_route(
+        self, agent_name, agent_pos, waypoints, all_idle_agents, all_delayed_agents, cost_maps=None
+    ):
+        """Plan ``agent_pos -> waypoints[0] -> waypoints[1] -> ...`` as a chain of
+        low-level segments and join them into one committed position list.
+
+        ``cum`` is the tick each leg starts at (one committed waypoint == one tick,
+        for both low levels), so every leg is checked against the other agents'
+        paths at the right time; each non-final segment drops its last point when
+        joined (it equals the next segment's first point). Returns
+        ``(joined_or_None, legs_attempted)``.
+        """
+        segments = []
+        seg_start = agent_pos
+        cum = 0
+        for i, wp in enumerate(waypoints):
+            cost_map = cost_maps[i] if cost_maps is not None and i < len(cost_maps) else None
+            seg = self.plan(agent_name, seg_start, wp, all_idle_agents, all_delayed_agents, cost_map, cum)
+            if not seg:
+                return None, i + 1
+            for _ in range(self.num_goal_wait_steps):
+                seg[agent_name].append(seg[agent_name][-1])
+            segments.append(seg[agent_name])
+            cum += len(seg[agent_name]) - 1
+            seg_start = wp
+        joined = []
+        for i, seg_pts in enumerate(segments):
+            pts = [_wp(s.location.point) for s in seg_pts]
+            joined += pts[:-1] if i < len(segments) - 1 else pts
+        return joined, len(waypoints)
+
+    def _replan_mover(self, name: str) -> None:
+        """Re-plan a moving agent from its current position because a blocker it was
+        planned around (assumed to leave after its one-tick hold) is still resting
+        there. Its committed path is dropped first; a task agent re-plans the legs it
+        has left, anything else is sent to parking. If no plan exists the agent simply
+        stays put (a length-1 path), i.e. it stops short of the blocker and becomes a
+        resting obstacle itself instead of driving into one."""
+        pos = tuple(self.token["agents"][name][0])
+        self.token["agents"][name] = [pos]
+        self.token["n_replans"] += 1
+        all_idle_agents = {k: v for k, v in self.token["agents"].items() if k != name}
+        all_delayed_agents = [a for a in self.token["delayed_agents"] if a != name]
+        entry = self.token["agents_to_tasks"].get(name)
+        if entry and entry.get("task_name") != "safe_idle":
+            joined, _ = self._plan_task_route(
+                name, pos, self._remaining_waypoints(entry), all_idle_agents, all_delayed_agents
+            )
+            if joined is not None:
+                self.token["agents"][name] = joined
+                entry["predicted_cost"] = len(joined)
+            return
+        if entry:
+            self.token["occupied_non_task_endpoints"].discard(tuple(entry["goal"]))
+            self.token["agents_to_tasks"].pop(name, None)
+        self.go_to_closest_non_task_endpoint(name, pos, all_idle_agents, all_delayed_agents)
+
     def time_forward(self, t: int, position: dict, delayed_agents: List[str], agents_size=None):
         if agents_size is not None:
             self.token["agents_size"] = agents_size
 
-        # 1) check task completions
+        # 1) check task completions (and waypoint progress of multi-leg tasks)
         for agent_name in self.token["agents"]:
             pos = _as_point(position[agent_name])
+            entry = self.token["agents_to_tasks"].get(agent_name)
+            if entry and entry.get("task_name") != "safe_idle" and "waypoints" in entry:
+                # Committed paths pass exactly through each leg's waypoint at a tick
+                # boundary, so "standing on waypoint k" means legs 0..k are done. A
+                # later replan (delay, blocker re-validation) then resumes from the
+                # remaining legs instead of redoing the whole route.
+                wps = entry["waypoints"]
+                k = entry.get("next_wp", 0)
+                while k < len(wps) and pos == tuple(wps[k]):
+                    k += 1
+                entry["next_wp"] = k
             if (
                 agent_name in self.token["agents_to_tasks"]
                 and pos == tuple(self.token["agents_to_tasks"][agent_name]["goal"])
@@ -886,43 +1147,23 @@ class NeuralATTF:
             agent_pos = idle_agents.pop(agent_name)[0]
 
             if closest_task:
-                # Plan the full multi-leg route agent_pos -> wp0 -> wp1 -> ... as a
-                # chain of A* segments. ``cum`` is the running time offset (matches
-                # the old 0 / cost1-1 offsets for the 2-waypoint case); each
-                # non-final segment drops its last point when joined (it equals the
-                # next segment's first point). Cost maps are consumed per segment
-                # when an encoder is configured (None otherwise).
+                # Plan the multi-leg route agent_pos -> wp0 -> wp1 -> ... (see
+                # _plan_task_route). Cost maps are consumed per segment when an
+                # encoder is configured (None otherwise).
                 waypoints = [tuple(p) for p in closest_task]
-                segments = []
-                seg_start = agent_pos
-                cum = 0
-                ok = True
-                for wp in waypoints:
-                    cost_map = None
-                    if cost_lookups is not None and cost_map_idx < len(cost_lookups):
-                        cost_map = cost_lookups[cost_map_idx]
-                        cost_map_idx += 1
-                    seg = self.plan(
-                        agent_name, seg_start, wp, all_idle_agents, all_delayed_agents, cost_map, cum
-                    )
-                    if not seg:
-                        ok = False
-                        break
-                    for _ in range(self.num_goal_wait_steps):
-                        seg[agent_name].append(seg[agent_name][-1])
-                    segments.append(seg[agent_name])
-                    cum += len(seg[agent_name]) - 1
-                    seg_start = wp
-                if not ok:
+                cost_maps = None
+                if cost_lookups is not None:
+                    cost_maps = cost_lookups[cost_map_idx:cost_map_idx + len(waypoints)]
+                joined, legs_tried = self._plan_task_route(
+                    agent_name, agent_pos, waypoints, all_idle_agents, all_delayed_agents, cost_maps
+                )
+                cost_map_idx += legs_tried
+                if joined is None:
                     if len(self.token["delayed_agents"]) == 0:
                         self.deadlock_recovery(
                             agent_name, agent_pos, all_idle_agents, all_delayed_agents, self.deadlock_radius
                         )
                     continue
-                joined = []
-                for i, seg_pts in enumerate(segments):
-                    pts = [tuple(s.location.point) for s in seg_pts]
-                    joined += pts[:-1] if i < len(segments) - 1 else pts
                 last_pos = joined[-1]
                 self.assigned_tasks.add(closest_task_name)
                 # Assignment-time bookkeeping (first-assignment time is sticky; the
@@ -949,6 +1190,7 @@ class NeuralATTF:
                     "start": wpts[0],
                     "goal": wpts[-1],
                     "waypoints": wpts,
+                    "next_wp": 0,
                     "predicted_cost": len(joined),
                 }
                 self.token["agents"][agent_name] = joined
@@ -1010,7 +1252,7 @@ class NeuralATTF:
         nearest open node) clears them out of the aisles entirely, avoiding the mid-aisle
         oscillation that stalled the all-nearest-node variant. Falls back to the nearest
         non-interfering node when no parking endpoint is reachable."""
-        # Nodes covered by every agent's *moving* path (len > 1), keyed by their owner.
+        # Nodes covered by every agent's *moving* path (len > 1) -> set of owners.
         moving_cover: dict = {}
         for name, path in self.token["agents"].items():
             if len(path) <= 1:
@@ -1018,7 +1260,7 @@ class NeuralATTF:
             for i in range(len(path)):
                 prev = path[i - 1] if i >= 1 else path[i]
                 for c in self._covered_nodes(prev, path[i]):
-                    moving_cover.setdefault(tuple(c), name)
+                    moving_cover.setdefault(tuple(c), set()).add(name)
         if not moving_cover:
             return
 
@@ -1034,39 +1276,65 @@ class NeuralATTF:
             pos = tuple(path[0])
             hits = cover_tree.query_ball_point(np.asarray(pos, dtype=float), clearance)
             # Interfering only if some overlapping moving-path node belongs to ANOTHER agent.
-            if not hits or all(moving_cover[cover_pts[h]] == name for h in hits):
+            movers = set()
+            for h in hits:
+                movers |= moving_cover[cover_pts[h]]
+            movers.discard(name)
+            if not movers:
                 continue
             all_idle_agents = {k: v for k, v in self.token["agents"].items() if k != name}
             all_delayed_agents = [a for a in self.token["delayed_agents"] if a != name]
+            # An idle agent that still owns a task (its route could not be planned this
+            # step) keeps that assignment while it is nudged aside; it is re-planned from
+            # its remaining legs once it is idle again. Only a parking assignment is
+            # replaced by the new parking target.
+            entry = self.token["agents_to_tasks"].get(name)
+            has_task = bool(entry) and entry.get("task_name") != "safe_idle"
             # Prefer free parking endpoints (off-aisle); fall back to nearest non-interfering node.
             parking = self._free_parking_endpoints_sorted(pos, exclude=pos)
             committed = False
             for target in parking:
-                new_path = self.plan(name, pos, target, all_idle_agents, all_delayed_agents, None, 0)
+                new_path = self.plan(
+                    name, pos, target, all_idle_agents, all_delayed_agents, None, 0, rest_forever=True
+                )
                 if not new_path:
                     continue
                 self.update_ends(pos, name)
                 self.token["occupied_non_task_endpoints"].discard(pos)
                 self.token["occupied_non_task_endpoints"].add(tuple(target))
-                self.token["agents_to_tasks"][name] = {
-                    "task_name": "safe_idle",
-                    "start": tuple(pos),
-                    "goal": tuple(target),
-                    "predicted_cost": 0,
-                }
-                self.token["agents"][name] = [tuple(s.location.point) for s in new_path[name]]
+                if not has_task:
+                    self.token["agents_to_tasks"][name] = {
+                        "task_name": "safe_idle",
+                        "start": tuple(pos),
+                        "goal": tuple(target),
+                        "predicted_cost": 0,
+                    }
+                self.token["agents"][name] = [_wp(s.location.point) for s in new_path[name]]
                 self.token["n_replans"] += 1
                 committed = True
                 break
-            if committed:
+            if not committed:
+                for target in self._close_non_interfering_nodes(pos, name, self.deadlock_radius):
+                    new_path = self.plan(
+                        name, pos, target, all_idle_agents, all_delayed_agents, None, 0, rest_forever=True
+                    )
+                    if not new_path:
+                        continue
+                    self.update_ends(pos, name)
+                    self.token["occupied_non_task_endpoints"].discard(pos)
+                    if not has_task:
+                        self.token["agents_to_tasks"].pop(name, None)
+                    self.token["agents"][name] = [_wp(s.location.point) for s in new_path[name]]
+                    self.token["n_replans"] += 1
+                    committed = True
+                    break
+            if committed or self.low_level != "sipp":
                 continue
-            for target in self._close_non_interfering_nodes(pos, name, self.deadlock_radius):
-                new_path = self.plan(name, pos, target, all_idle_agents, all_delayed_agents, None, 0)
-                if not new_path:
-                    continue
-                self.update_ends(pos, name)
-                self.token["occupied_non_task_endpoints"].discard(pos)
-                self.token["agents_to_tasks"].pop(name, None)
-                self.token["agents"][name] = [tuple(s.location.point) for s in new_path[name]]
-                self.token["n_replans"] += 1
-                break
+            # The blocker cannot move. SIPP movers were planned on the assumption that
+            # it would leave after its one-tick hold; that assumption is now false, so
+            # their committed paths are invalid: re-plan each of them against the
+            # blocker's (now permanent) footprint before they drive into it. (The grid
+            # low level already treats idle agents as static obstacles when planning.)
+            for mover in sorted(movers):
+                if len(self.token["agents"].get(mover, [])) > 1:
+                    self._replan_mover(mover)
