@@ -101,7 +101,14 @@ def solve_mapf(map_, agents,mapf_solver_config:dict) -> Tuple[dict, float]:
             use_constraint_sweep=True,
             heuristic_type=heuristic_type,
         )
-        icbs = ICBS(env,time_limit=time_limit,max_iterations=max_iterations,verbose=False)
+        icbs = ICBS(
+            env,
+            time_limit=time_limit,
+            max_iterations=max_iterations,
+            verbose=False,
+            icbs_mode=mapf_solver_config.get("icbs_mode", ""),
+            focal_w=float(mapf_solver_config.get("focal_w", 1.5)),
+        )
         solution, solution_info = icbs.search()
     elif mapf_solver_name == 'lacam':
         starts, goals = set_starts_goals_config(
