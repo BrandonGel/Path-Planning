@@ -240,7 +240,10 @@ class Environment(object):
                 neighbors.append(n)
         return neighbors
 
-    def get_conflicts(self, solution, get_first_conflict: bool = True):
+    def get_conflicts(self, solution, get_first_conflict: bool = True, max_conflicts: int | None = None):
+        """Enumerate conflicts; ``max_conflicts`` stops the sweep once that
+        many are collected (callers that only compare a count against a known
+        bound don't need the full list)."""
         max_t = max(len(plan) for plan in solution.values())
         conflicts = []
         agent_pairs = list(combinations(solution.keys(), 2))
@@ -280,6 +283,8 @@ class Environment(object):
                         if get_first_conflict:
                             return c
                         conflicts.append(c)
+                        if max_conflicts is not None and len(conflicts) >= max_conflicts:
+                            return conflicts
                         continue
 
                     state_1b = self.get_state(agent_1, solution, t + 1)
@@ -295,6 +300,8 @@ class Environment(object):
                         if get_first_conflict:
                             return c
                         conflicts.append(c)
+                        if max_conflicts is not None and len(conflicts) >= max_conflicts:
+                            return conflicts
             else:
                 for agent_1, agent_2 in agent_pairs:
                     if self.use_constraint_sweep:
@@ -325,6 +332,8 @@ class Environment(object):
                             if get_first_conflict:
                                 return c
                             conflicts.append(c)
+                            if max_conflicts is not None and len(conflicts) >= max_conflicts:
+                                return conflicts
                     else:
                         state_1a = self.get_state(agent_1, solution, t)
                         state_1b = self.get_state(agent_1, solution, t + 1)
@@ -355,6 +364,8 @@ class Environment(object):
                             if get_first_conflict:
                                 return c
                             conflicts.append(c)
+                            if max_conflicts is not None and len(conflicts) >= max_conflicts:
+                                return conflicts
         return conflicts
 
     def create_constraints_from_conflict(self, conflict):

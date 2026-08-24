@@ -9,6 +9,7 @@ class AStar():
         self.admissible_heuristic = env.admissible_heuristic
         self.is_at_goal = env.is_at_goal
         self.get_neighbors = env.get_neighbors
+        self.get_step_cost = env.get_step_cost
         self.max_iterations = max_iterations if max_iterations > 0 or max_iterations is None else float("inf")
         self.radius = radius
 
@@ -24,8 +25,6 @@ class AStar():
         Modified low level search with conflict-aware tie-breaking.
         """
         initial_state = self.agent_dict[agent_name]["start"]
-        step_cost = 1 # Standard step cost
-        
         closed_set = set()
         counter = count()
         open_heap = []
@@ -56,7 +55,11 @@ class AStar():
             for neighbor in self.get_neighbors(current):
                 if neighbor in closed_set: continue
                 
-                tentative_g_score = g_score[current] + step_cost
+                # Match CBS: real roadmap edge weight per move (unit cost for a
+                # wait). A fixed step cost of 1 only matches the unit-length
+                # discrete grid and puts g on a different scale than the
+                # dijkstra/euclidean heuristics on continuous roadmaps.
+                tentative_g_score = g_score[current] + self.get_step_cost(current, neighbor)
 
                 # Calculate conflicts if a solution/other paths are provided
                 num_conflicts = 0

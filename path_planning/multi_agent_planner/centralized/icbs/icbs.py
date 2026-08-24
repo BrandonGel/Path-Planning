@@ -20,7 +20,7 @@ class IEnvironment(Environment):
         radius=0.0,
         velocity=0.0,
         use_constraint_sweep=True,
-        heuristic_type: str = 'manhattan',
+        heuristic_type: str = 'dijkstra',
     ):
         super().__init__(
             graph_map,
@@ -49,6 +49,7 @@ class ICBS(CBS):
         time_limit: float | None = None,
         max_iterations: int | None = None,
         verbose: bool = False,
+        max_scored_conflicts: int | None = 8,
     ):
         """
         :param environment: IEnvironment instance
@@ -56,9 +57,18 @@ class ICBS(CBS):
                            high-level CBS search. If None, no time limit is
                            enforced. If exceeded, the search terminates early
                            and returns an empty solution.
+        :param max_scored_conflicts: Cap on how many conflicts
+                           _get_best_conflict classifies per CT node. Scoring a
+                           conflict runs a full low-level A* per involved
+                           agent, which dominates runtime on conflict-heavy
+                           (radius > 0) instances. Branching on any conflict
+                           keeps CBS complete and optimal, so capping only
+                           risks missing a cardinal conflict a full scan would
+                           have found. None scans the whole list.
         """
         super().__init__(environment, time_limit, max_iterations, verbose)
         self.env = environment
+        self.max_scored_conflicts = max_scored_conflicts
 
     def _get_best_conflict(self, P, conflict_list):
         best_conflict = None
@@ -66,6 +76,8 @@ class ICBS(CBS):
         best_costs = None
         best_paths = None
 
+        if self.max_scored_conflicts is not None:
+            conflict_list = conflict_list[:self.max_scored_conflicts]
         for conflict in conflict_list:
             costs, paths = self.get_conflict_cost(P, conflict)
             c_vals = list(costs.values())
@@ -213,7 +225,7 @@ class ICBS(CBS):
                 continue
             
             # Branching (if no bypass)
-            self._branch(P, best_conflict, best_costs)
+            self._branch(P, best_conflict, best_costs, best_paths)
         self.total_time = min(self.time_limit, time.time() - st) 
         self.total_iterations = min(self.max_iterations, iterations)
         solution_info["runtime"] = self.total_time
@@ -239,7 +251,7 @@ class ICBS(CBS):
                 new_constraints_dict[a] = P.constraint_dict[a]
         return new_constraints_dict
 
-    def _branch(self, P, conflict, costs):
+    def _branch(self, P, conflict, costs, paths=None):
         """Expands the high-level tree by creating child nodes."""
         for agent in costs.keys():
             if costs[agent] == float('inf'): continue # Prune if no path exists
@@ -248,7 +260,20 @@ class ICBS(CBS):
             new_node.solution = P.solution.copy()
             new_node.solution_cost = P.solution_cost.copy()
             new_node.constraint_dict = self._get_updated_constraints(P, agent, conflict)
-            
+
+            path = paths.get(agent) if paths else None
+            if path is not None:
+                # Reuse the path computed while scoring this conflict in
+                # get_conflict_cost: that search ran under exactly these
+                # constraints (P's plus this conflict's constraint for this
+                # agent, built identically by _get_updated_constraints), so
+                # re-running A* here would repeat identical work.
+                new_node.solution[agent] = path
+                new_node.solution_cost[agent] = P.solution_cost[agent] + costs[agent]
+                new_node.cost = sum(new_node.solution_cost.values())
+                heapq.heappush(self.open_list, (new_node.cost, next(self.counter), new_node))
+                continue
+
             self.env.constraint_dict = new_node.constraint_dict
             # Re-plan only the affected agent
             res = self.env.compute_agent_solution(agent, new_node.solution, new_node.solution_cost)
