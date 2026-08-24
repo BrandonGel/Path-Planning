@@ -21,9 +21,18 @@ from path_planning.multi_agent_planner.data_type import HEURISTIC_TYPE
 from path_planning.multi_agent_planner.centralized.sipp.graph_generation import SippNode
 
 class SippPlanner(SippGraph):
-    def __init__(self, graph_map: GraphSampler,dynamic_obstacles:dict = {},agents:list = [],radius:float = 0.0,velocity:float = 0.0,use_constraint_sweep:bool = True, heuristic_type: str = 'manhattan',time_limit: float | None = None, max_iterations: int | None = None,verbose: bool = False,sipp_max_iterations: int = 10000, obstacle_horizon: float | None = None):
+    def __init__(self, graph_map: GraphSampler,dynamic_obstacles:dict = {},agents:list = [],radius:float = 0.0,velocity:float = 0.0,use_constraint_sweep:bool = True, heuristic_type: str = 'manhattan',time_limit: float | None = None, max_iterations: int | None = None,verbose: bool = False,sipp_max_iterations: int = 10000, obstacle_horizon: float | None = None, require_goal_safe_forever: bool = True):
         SippGraph.__init__(self,graph_map,dynamic_obstacles,radius,velocity,use_constraint_sweep,heuristic_type,time_limit,max_iterations,verbose,obstacle_horizon)
         self.agents = agents
+        # A finished agent occupies its goal for all future time, so a goal
+        # arrival is only truly collision-free if the accepted safe interval
+        # extends to infinity - otherwise a later-planned agent may legally
+        # transit through that spot once its own (bounded) view of the
+        # interval considers it free, producing an undetected collision.
+        # Callers that replan around finished agents themselves (e.g.
+        # NeuralATTF) can disable this to accept a goal in any safe interval.
+        self.require_goal_safe_forever = require_goal_safe_forever
+        self._goal_dist_maps = {}  # goal_idx -> {node_idx: shortest-path cost to goal}
         self.agent_names = [agent["name"] for agent in agents]
         self.plan = {}
         self.plan_cost = {}
@@ -79,13 +88,9 @@ class SippPlanner(SippGraph):
     def get_earliest_no_collision_arrival_time_body(self,start_t, vertex_interval, edge_interval, start_pos, neighbour,m_time):
         arrive_t = max(start_t, vertex_interval[0],edge_interval[0] + m_time) 
         depart_t = arrive_t - m_time
-        if arrive_t > vertex_interval[1]:
+        if not (depart_t >= edge_interval[0] - 1e-9 and depart_t <= edge_interval[1]):
             return None
-        if depart_t > edge_interval[1] + 1e-9:
-            return None
-        if not self.sipp_graph[start_pos].is_in_safe_interval(depart_t):
-            return None
-        if not self.sipp_graph[neighbour].is_in_safe_interval(arrive_t):
+        if not(arrive_t >= vertex_interval[0] and arrive_t <= vertex_interval[1]):
             return None
         return arrive_t
 
@@ -162,9 +167,62 @@ class SippPlanner(SippGraph):
             dist =  fabs(position[0] - goal[0]) + fabs(position[1]-goal[1])
         elif self.heuristic_type == HEURISTIC_TYPE["euclidean"]:
             dist = math.sqrt((position[0] - goal[0])**2 + (position[1]-goal[1])**2)
+        elif self.heuristic_type == HEURISTIC_TYPE["dijkstra"]:
+            dist = self._dijkstra_heuristic(position, goal)
         else:
             raise ValueError(f"Invalid heuristic type: {self.heuristic_type}")
         return dist if self.velocity == 0 else dist / self.velocity
+
+    def _goal_distance_map(self, goal_idx: int):
+        """Single-source Dijkstra from the goal over the roadmap.
+
+        Roadmap edges are bidirectional with symmetric costs, so distances from
+        the goal equal shortest-path costs to the goal from every node. Computed
+        once per goal per SippPlanner instance (i.e. once per solve_mapf call,
+        reused across every shuffle-order retry and every agent sharing that
+        goal) and cached; used as the exact (admissible, consistent) low-level
+        A* heuristic.
+        """
+        cached = self._goal_dist_maps.get(goal_idx)
+        if cached is not None:
+            return cached
+        road_map = getattr(self.graph_map, "road_map", None)
+        dist = {goal_idx: 0.0}
+        if road_map is None or len(road_map) == 0:
+            self._goal_dist_maps[goal_idx] = dist
+            return dist
+        heap = [(0.0, goal_idx)]
+        seen = set()
+        while heap:
+            d, u = heapq.heappop(heap)
+            if u in seen:
+                continue
+            seen.add(u)
+            u_node = self.graph_map.nodes[u]
+            for v in road_map[u]:
+                nd = d + float(self.graph_map.get_cost(u_node, self.graph_map.nodes[v]))
+                if nd < dist.get(v, float("inf")):
+                    dist[v] = nd
+                    heapq.heappush(heap, (nd, v))
+        self._goal_dist_maps[goal_idx] = dist
+        return dist
+
+    def _dijkstra_heuristic(self, position, goal):
+        """True roadmap shortest-path distance from position to goal.
+
+        Falls back to euclidean distance (an admissible lower bound, since
+        move costs are euclidean edge lengths) when either point is not a
+        roadmap node or the goal is unreachable from position.
+        """
+        node_index_dict = getattr(self.graph_map, "node_index_dict", {})
+        loc_node = Node(tuple(float(x) for x in position), None, 0, 0)
+        goal_node = Node(tuple(float(x) for x in goal), None, 0, 0)
+        if loc_node in node_index_dict and goal_node in node_index_dict:
+            dist = self._goal_distance_map(int(node_index_dict[goal_node]))
+            d = dist.get(int(node_index_dict[loc_node]))
+            if d is not None:
+                return d
+        return math.sqrt((position[0] - goal[0]) ** 2 + (position[1] - goal[1]) ** 2)
 
     def compute_plan(self):
         solution_info = {}
@@ -243,13 +301,19 @@ class SippPlanner(SippGraph):
                             g_score[succ_key] = tentative_g_score
                             action_cost[succ_key] = time_taken
                             
-                            if successor.position == goal:
-                                # Goal accepted as soon as it is spatially reached within its
-                                # current safe interval. The former check_goal_safe_forever gate
-                                # (goal must stay collision-free for all future time) was removed:
-                                # idle/finished agents that later block a mover are instead
-                                # re-routed by NeuralATTF, and residual conflicts are caught by the
-                                # simulation collision backstop.
+                            if successor.position == goal and (
+                                not self.require_goal_safe_forever
+                                or math.isinf(successor.interval[1])
+                            ):
+                                # Accept the goal only once its safe interval extends to
+                                # infinity - the agent stays there forever afterward, so a
+                                # bounded interval means some later-planned agent could
+                                # still legally transit through this spot. When the current
+                                # interval is bounded, fall through and push this state onto
+                                # the open heap like any other successor: the vertex's other
+                                # (possibly infinite) intervals are separate successor states
+                                # reachable by waiting/detouring, so the search can still find
+                                # a permanently safe arrival if one exists.
                                 if self.verbose:
                                     print("Plan successfully calculated!!")
                                 goal_reached = True

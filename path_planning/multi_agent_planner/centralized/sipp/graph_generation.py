@@ -1,6 +1,7 @@
 from path_planning.common.environment.map.graph_sampler import GraphSampler
 from path_planning.common.environment.node import Node
 from typing import Any, List, Tuple
+import bisect
 import numpy as np
 
 class State(object):
@@ -54,16 +55,14 @@ class SippNode(object):
                     interval_list.append((b_end, s_end))
         self.interval_list = sorted([(start, end) for start, end in interval_list if end-start > 1e-6])
 
-    def is_in_safe_interval(self, depart_t, arrive_t= None):
-        if arrive_t is None:
-            arrive_t = depart_t
+    def is_in_safe_interval(self, arrive_t):
         lo, hi = 0, len(self.interval_list) - 1
         while lo <= hi:
             mid = (lo + hi) // 2
             start, end = self.interval_list[mid]
-            if start <= depart_t and arrive_t <= end:
+            if start <= arrive_t and arrive_t <= end:
                 return True
-            elif depart_t < start:
+            elif arrive_t < start:
                 hi = mid - 1
             else:
                 lo = mid + 1
@@ -98,26 +97,107 @@ class SippNode(object):
         self.interval_list = result
 
 # Used for only when the agent is moving on an edge and not on a vertex
-class SippEdge(object):
+class UnsafeIntervalList(object):
+    """Sorted list of pairwise-disjoint closed unsafe intervals.
+
+    Stored as two parallel lists (`starts`, `ends`) so bisect can locate the
+    overlap range in O(log n). Intervals are treated as closed, so touching
+    intervals ([1,2] and [2,3]) are merged as well. Insertion finds the run of
+    existing intervals overlapping [t1, t2], collapses it into one merged
+    interval, and splices it in place. Iteration yields (t1, t2) tuples in
+    ascending order.
+    """
+
+    __slots__ = ("starts", "ends")
+
     def __init__(self):
-        self.unsafe_interval_list = []
+        # Lists are allocated on first add(): init_graph builds one record per
+        # directed edge on every reset_graph and most never receive an interval.
+        self.starts = None
+        self.ends = None
+
+    def __len__(self):
+        return 0 if self.starts is None else len(self.starts)
+
+    def __bool__(self):
+        return bool(self.starts)
+
+    def __iter__(self):
+        return iter(()) if self.starts is None else iter(zip(self.starts, self.ends))
+
+    def __getitem__(self, idx):
+        return (self.starts[idx], self.ends[idx])
+
+    def __repr__(self):
+        return f"UnsafeIntervalList({list(self)})"
+
+    def to_list(self):
+        return list(self)
+
+    def clear(self):
+        self.starts = None
+        self.ends = None
+
+    def _overlap_range(self, t1, t2):
+        """Index range [lo, hi) of stored intervals overlapping the closed window [t1, t2]."""
+        lo = bisect.bisect_left(self.ends, t1)     # first interval with end >= t1
+        hi = bisect.bisect_right(self.starts, t2)  # first interval with start > t2
+        return lo, hi
+
+    def add(self, t1, t2):
+        """Insert [t1, t2], merging with every existing interval it overlaps."""
+        if t2 < t1:
+            t1, t2 = t2, t1
+        if self.starts is None:
+            self.starts, self.ends = [t1], [t2]
+            return (t1, t2)
+        lo, hi = self._overlap_range(t1, t2)
+        if lo < hi:
+            if self.starts[lo] < t1:
+                t1 = self.starts[lo]
+            if self.ends[hi - 1] > t2:
+                t2 = self.ends[hi - 1]
+        self.starts[lo:hi] = [t1]
+        self.ends[lo:hi] = [t2]
+        return (t1, t2)
+
+    def overlapping(self, t1, t2):
+        """Stored intervals overlapping the closed window [t1, t2], in order."""
+        if self.starts is None:
+            return []
+        lo, hi = self._overlap_range(t1, t2)
+        return list(zip(self.starts[lo:hi], self.ends[lo:hi]))
+
+    def intersects(self, t1, t2):
+        if self.starts is None:
+            return False
+        lo = bisect.bisect_left(self.ends, t1)
+        return lo < len(self.starts) and self.starts[lo] <= t2
+
+
+class SippEdge(UnsafeIntervalList):
+    """Edge record for the SIPP graph: a merged, sorted list of unsafe intervals.
+
+    Subclasses UnsafeIntervalList directly (no wrapper object) because
+    init_graph builds one SippEdge per directed edge and self-loop on every
+    reset_graph, so construction cost matters.
+    """
+
+    __slots__ = ()
+
+    @property
+    def unsafe_interval_list(self):
+        return self
 
     def add_unsafe_interval(self, t1, t2):
-        self.unsafe_interval_list.append((t1, t2))
+        self.add(t1, t2)
 
-    def get_unsafe_intervals(self, t1,t2):
-        unsafe_interval_list = []
-        for ii in range(len(self.unsafe_interval_list)):    
-            t1_unsafe, t2_unsafe  = self.unsafe_interval_list[ii]
-            if t1_unsafe <= t2 and t1 <= t2_unsafe:
-                unsafe_interval_list.append((t1_unsafe, t2_unsafe))
-        return unsafe_interval_list
+    def get_unsafe_intervals(self, t1, t2):
+        return self.overlapping(t1, t2)
 
     def is_in_unsafe_interval(self, t1, t2):
-        for t1_unsafe, t2_unsafe in self.unsafe_interval_list:
-            if t1_unsafe <= t2 and t1 <= t2_unsafe:
-                return True
-        return False
+        return self.intersects(t1, t2)
+
 
 class SippGraph(object):
     def __init__(self, graph_map: GraphSampler,dynamic_obstacles:dict = {},radius:float = 0.0,velocity:float = 0.0,use_constraint_sweep:bool = True, heuristic_type: str = 'manhattan',time_limit: float | None = None, max_iterations: int | None = None,verbose: bool = False, obstacle_horizon: float | None = None):
@@ -154,6 +234,8 @@ class SippGraph(object):
         for node in self.graph_map.nodes:
             node_sipp_dict = {node.current:SippNode()}
             self.sipp_graph.update(node_sipp_dict)
+            # Self-loop (wait) edge: the constraint sweep emits (p, p) edge keys.
+            self.sipp_graph[(node.current, node.current)] = SippEdge()
 
         # Initialize SIPP edges keyed by endpoint positions (p1, p2),
         # to match the keys returned by GraphSampler.get_constraint_sweep.
@@ -161,8 +243,10 @@ class SippGraph(object):
             src_idx, tgt_idx = edge
             src_pos = self.graph_map.nodes[src_idx].current
             tgt_pos = self.graph_map.nodes[tgt_idx].current
-            self.sipp_graph[(src_pos, tgt_pos)] = SippEdge()
-            self.sipp_graph[(tgt_pos, src_pos)] = SippEdge()
+            # graph_map.edges usually lists both directions; setdefault avoids
+            # constructing (and discarding) a second SippEdge per undirected edge.
+            self.sipp_graph.setdefault((src_pos, tgt_pos), SippEdge())
+            self.sipp_graph.setdefault((tgt_pos, src_pos), SippEdge())
 
     def init_intervals(self,dyn_obstacles:dict = {}):
         if not dyn_obstacles or len(dyn_obstacles) == 0: return
@@ -182,8 +266,6 @@ class SippGraph(object):
                         next_t = t + self.obstacle_horizon  # inf -> blocks forever (default)
                         for vertex_pos, vertex_interval in overlapping_vertices.items():
                             self.sipp_graph[vertex_pos].split_interval(t, next_t)
-                        # for edge_pos, edge_interval in overlapping_edges.items():
-                        #     self.sipp_graph[edge_pos].split_interval(t, next_t)
                         continue
                     else:
                         next_location = schedule[i + 1]
@@ -271,8 +353,8 @@ class SippGraph(object):
 
         # Move action
         for node in nodes:
-            if self.is_valid_position(node.current):
-                neighbors.append(node.current)
+            # if self.is_valid_position(node.current):
+            neighbors.append(node.current)
         return neighbors
 
     def _get_constraint_sweep_cached(self, p1, p2,v, r):

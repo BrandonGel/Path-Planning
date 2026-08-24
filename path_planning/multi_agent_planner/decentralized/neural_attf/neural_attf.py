@@ -593,6 +593,11 @@ class NeuralATTF:
             time_limit=self.sipp_time_limit,
             sipp_max_iterations=budget,
             obstacle_horizon=self.sipp_obstacle_horizon,
+            # NeuralATTF re-plans agents as the simulation progresses, so a
+            # goal accepted in a bounded safe interval is fine here - unlike
+            # a one-shot solve, a future conflict at that spot triggers a
+            # replan rather than going undetected.
+            require_goal_safe_forever=False,
         )
         solution, info = planner.compute_plan()
         self._record_sipp_metrics(info)
