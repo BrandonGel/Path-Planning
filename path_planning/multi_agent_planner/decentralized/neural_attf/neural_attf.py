@@ -55,16 +55,43 @@ def _point_schedule(p, t) -> dict:
 class _Waypoint(tuple):
     """A committed per-tick waypoint that remembers the roadmap vertices the agent
     passes *within* the tick (``via``, in order, strictly between the previous
-    waypoint and this one). Behaves exactly like a position tuple (equality,
-    hashing, indexing), so all position bookkeeping is unaffected; the simulation
-    drives through ``via`` so the executed motion follows the roadmap instead of
-    the chord between the two samples, and other agents see the same polyline.
+    waypoint and this one) and *when* it reaches each of them (``via_t``, the
+    fraction of the tick, in (0, 1), aligned with ``via``). Behaves exactly like
+    a position tuple (equality, hashing, indexing), so all position bookkeeping
+    is unaffected; the simulation drives through ``via`` at those times so the
+    executed motion follows the roadmap - including any wait SIPP inserted
+    inside the tick, which appears as the same vertex twice with its arrival and
+    departure fractions - and other agents plan against exactly that motion.
+    ``via_t=None`` (legacy) means "unknown": consumers fall back to constant
+    speed within the tick (arc-length fractions).
     """
 
-    def __new__(cls, pos, via=()):
+    def __new__(cls, pos, via=(), via_t=None):
         obj = super().__new__(cls, tuple(float(c) for c in pos))
         obj.via = tuple(tuple(float(c) for c in v) for v in via)
+        obj.via_t = None if via_t is None else tuple(float(f) for f in via_t)
+        if obj.via_t is not None and len(obj.via_t) != len(obj.via):
+            raise ValueError("via_t must align with via")
         return obj
+
+
+def _via_fracs_from(prev, wp):
+    """Tick fractions of ``wp``'s vias: its own ``via_t`` when it carries one, else
+    arc-length fractions of the polyline ``prev -> vias -> wp`` (constant speed)."""
+    vias = list(getattr(wp, "via", ()))
+    if not vias:
+        return []
+    fr = getattr(wp, "via_t", None)
+    if fr is not None:
+        return list(fr)
+    legs = [tuple(prev)] + vias + [tuple(wp)]
+    seg = [math.dist(legs[i], legs[i + 1]) for i in range(len(legs) - 1)]
+    total = sum(seg)
+    out, acc = [], 0.0
+    for i in range(len(vias)):
+        acc += seg[i]
+        out.append(acc / total if total > 0 else (i + 1) / (len(vias) + 1))
+    return out
 
 
 def _wp(p):
@@ -535,6 +562,7 @@ class NeuralATTF:
     def plan(
         self, agent_name, start, goal, all_idle_agents, all_delayed_agents, cost_map, cost: int,
         rest_forever: bool = False,
+        final_leg: bool = False,
     ):
         """Low-level plan ``start -> goal`` for one agent.
 
@@ -543,7 +571,9 @@ class NeuralATTF:
         task). ``rest_forever`` marks a leg whose end is a permanent rest (parking,
         deadlock relocation, idle reroute): SIPP then only accepts a goal whose safe
         interval is unbounded, so no already-committed path crosses the resting spot.
-        Task legs leave it False - the agent rests one tick and is reassigned.
+        Task legs leave it False - the agent rests one tick and is reassigned;
+        ``final_leg`` marks the last leg of a task route, whose goal must then stay
+        safe through that one-tick hold (see :meth:`_plan_sipp`).
         """
         start = tuple(start)
         goal = tuple(goal)
@@ -551,7 +581,8 @@ class NeuralATTF:
             # Continuous-time, interval-based, radius-aware low-level planning.
             # cost_map is grid-only; cost is the leg's start-tick offset.
             return self._plan_sipp(
-                agent_name, start, goal, offset_steps=int(cost), rest_forever=rest_forever
+                agent_name, start, goal, offset_steps=int(cost), rest_forever=rest_forever,
+                final_leg=final_leg,
             )
         moving = self.get_moving_obstacles_agents(self.token["agents"], cost)
         idle = self.get_idle_obstacles_agents(all_idle_agents, all_delayed_agents, cost)
@@ -687,20 +718,13 @@ class NeuralATTF:
                 horizons[name] = None
                 continue
             # Absolute timeline of the committed path: waypoint k at k*dt, with the
-            # roadmap vertices passed inside tick k (its vias) stamped by arc-length
-            # fraction of the tick.
+            # roadmap vertices passed inside tick k (its vias) stamped at the tick
+            # fractions the waypoint carries (``via_t``; arc-length fallback).
             timed = [(tuple(path[0]), 0.0)]
             for k in range(1, len(path)):
-                prev = tuple(path[k - 1])
                 vias = list(getattr(path[k], "via", ()))
                 if vias:
-                    legs = [prev] + vias + [tuple(path[k])]
-                    seg = [math.dist(legs[i], legs[i + 1]) for i in range(len(legs) - 1)]
-                    total = sum(seg)
-                    acc = 0.0
-                    for i, q in enumerate(vias):
-                        acc += seg[i]
-                        frac = acc / total if total > 0 else (i + 1) / (len(vias) + 1)
+                    for q, frac in zip(vias, _via_fracs_from(path[k - 1], path[k])):
                         timed.append((q, (k - 1 + frac) * dt))
                 timed.append((tuple(path[k]), k * dt))
             # Re-base onto the leg's own clock: drop what happens before the leg
@@ -720,10 +744,27 @@ class NeuralATTF:
             horizons[name] = dt
         return sched, horizons
 
-    def _plan_sipp(self, agent_name, start, goal, offset_steps: int = 0, rest_forever: bool = False):
+    def _plan_sipp(
+        self, agent_name, start, goal, offset_steps: int = 0, rest_forever: bool = False,
+        final_leg: bool = False,
+    ):
         actual_start = tuple(float(c) for c in start)
         start, t_reach = self._snap_start(actual_start)
         goal = self._snap_to_node(goal)
+        dt = float(self.timestep_duration)
+        # The committed path is sampled per tick, so after reaching the goal at
+        # ``t`` the agent rests there until the next tick boundary (the following
+        # leg starts on a boundary); after a route's final leg the other agents
+        # additionally assume a one-tick hold. SIPP only validates the arrival, so
+        # ask it for a goal interval that also covers that rest - otherwise another
+        # committed path may legally sweep through the spot while we sit on it.
+        hold = self.num_goal_wait_steps * dt + (dt if final_leg else 0.0)
+
+        def goal_safe_until(t_arrive):
+            world = t_arrive + t_reach  # SIPP clock -> tick-aligned clock (offset is a multiple of dt)
+            boundary = math.ceil(world / dt - 1e-9) * dt
+            return boundary - t_reach + hold
+
         heur = self.heuristic_type if self.heuristic_type in {"manhattan", "euclidean"} else "euclidean"
         budget = max(int(self.a_star_max_iter), 10 * len(self.graph_map.nodes))
         radius = self.agent_radius + self.sipp_clearance_margin if self.agent_radius > 0 else 0.0
@@ -749,6 +790,7 @@ class NeuralATTF:
                 # and is reassigned. Legs ending in a permanent rest (parking etc.)
                 # need an unbounded interval so no committed path crosses the spot.
                 require_goal_safe_forever=rest_forever,
+                goal_safe_until=None if rest_forever else goal_safe_until,
             )
 
         planner = build()
@@ -803,9 +845,12 @@ class NeuralATTF:
         is forced onto ``goal``. A single-point schedule yields ``[point]``.
 
         Each sample is a :class:`_Waypoint` whose ``via`` lists the schedule
-        vertices passed strictly inside the preceding tick, so the executed
-        motion (and what other agents plan against) follows the roadmap rather
-        than the chord between two mid-edge samples.
+        entries strictly inside the preceding tick and ``via_t`` the tick
+        fraction at which each is reached, so the executed motion (and what
+        other agents plan against) follows the roadmap *with SIPP's timing*:
+        a wait inside the tick is kept as the vertex at its arrival and departure
+        times instead of being smeared into slow uniform motion, which would put
+        the agent in the lane while whatever it waited for is still there.
         """
         dt = float(dt) if dt and dt > 0 else 1.0
         pts = sorted(((float(s["t"]), _as_point(s)) for s in schedule), key=lambda x: x[0])
@@ -819,8 +864,9 @@ class NeuralATTF:
         prev_tk = t0
         for k in range(n_steps + 1):
             tk = t0 + k * dt
-            # Schedule vertices strictly inside (prev_tk, tk) are vias of this sample.
-            via = [q for (tq, q) in pts if prev_tk + 1e-9 < tq < tk - 1e-9]
+            # Schedule entries strictly inside (prev_tk, tk) are vias of this sample,
+            # stamped by their fraction of the tick.
+            via = [(q, (tq - prev_tk) / dt) for (tq, q) in pts if prev_tk + 1e-9 < tq < tk - 1e-9]
             while j + 1 < len(pts) and pts[j + 1][0] <= tk + 1e-9:
                 j += 1
             if j + 1 >= len(pts):
@@ -832,13 +878,14 @@ class NeuralATTF:
                 else:
                     frac = (tk - ta) / (tb - ta)
                     p = tuple(a + frac * (b - a) for a, b in zip(pa, pb))
-            # Drop vias that coincide with a neighbouring sample (waits, exact hits).
+            # Drop exact duplicates (same point at the same instant); a repeated
+            # point at a later fraction is a wait and is kept.
             cleaned = []
-            last = tuple(out[-1]) if out else None
-            for q in via:
-                if q != last and q != tuple(p) and (not cleaned or q != cleaned[-1]):
-                    cleaned.append(q)
-            out.append(_Waypoint(p, cleaned))
+            for q, f in via:
+                if cleaned and cleaned[-1][0] == q and abs(cleaned[-1][1] - f) <= 1e-9:
+                    continue
+                cleaned.append((q, f))
+            out.append(_Waypoint(p, [q for q, _ in cleaned], [f for _, f in cleaned]))
             prev_tk = tk
 
         if tuple(out[-1]) != tuple(goal):
@@ -1044,18 +1091,30 @@ class NeuralATTF:
         cum = 0
         for i, wp in enumerate(waypoints):
             cost_map = cost_maps[i] if cost_maps is not None and i < len(cost_maps) else None
-            seg = self.plan(agent_name, seg_start, wp, all_idle_agents, all_delayed_agents, cost_map, cum)
+            seg = self.plan(
+                agent_name, seg_start, wp, all_idle_agents, all_delayed_agents, cost_map, cum,
+                final_leg=(i == len(waypoints) - 1),
+            )
             if not seg:
                 return None, i + 1
             for _ in range(self.num_goal_wait_steps):
-                seg[agent_name].append(seg[agent_name][-1])
+                # A plain copy: re-appending the last sample would replay its vias.
+                seg[agent_name].append(_SegState(tuple(seg[agent_name][-1].location.point)))
             segments.append(seg[agent_name])
             cum += len(seg[agent_name]) - 1
             seg_start = wp
         joined = []
+        prev_last = None
         for i, seg_pts in enumerate(segments):
             pts = [_wp(s.location.point) for s in seg_pts]
+            if prev_last is not None:
+                # The previous leg's final sample is the same position as this leg's
+                # first, but it is the one that carries the vias / via_t of the tick
+                # that reaches it; keep it so the join does not turn that tick into a
+                # straight chord executed (and seen by others) at the wrong times.
+                pts[0] = prev_last
             joined += pts[:-1] if i < len(segments) - 1 else pts
+            prev_last = pts[-1]
         return joined, len(waypoints)
 
     def _replan_mover(self, name: str) -> None:

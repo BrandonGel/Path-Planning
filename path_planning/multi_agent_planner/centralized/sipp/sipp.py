@@ -21,7 +21,7 @@ from path_planning.multi_agent_planner.data_type import HEURISTIC_TYPE
 from path_planning.multi_agent_planner.centralized.sipp.graph_generation import SippNode
 
 class SippPlanner(SippGraph):
-    def __init__(self, graph_map: GraphSampler,dynamic_obstacles:dict = {},agents:list = [],radius:float = 0.0,velocity:float = 0.0,use_constraint_sweep:bool = True, heuristic_type: str = 'manhattan',time_limit: float | None = None, max_iterations: int | None = None,verbose: bool = False,sipp_max_iterations: int = 10000, obstacle_horizon: float | dict | None = None, require_goal_safe_forever: bool = True):
+    def __init__(self, graph_map: GraphSampler,dynamic_obstacles:dict = {},agents:list = [],radius:float = 0.0,velocity:float = 0.0,use_constraint_sweep:bool = True, heuristic_type: str = 'manhattan',time_limit: float | None = None, max_iterations: int | None = None,verbose: bool = False,sipp_max_iterations: int = 10000, obstacle_horizon: float | dict | None = None, require_goal_safe_forever: bool = True, goal_safe_until=None):
         SippGraph.__init__(self,graph_map,dynamic_obstacles,radius,velocity,use_constraint_sweep,heuristic_type,time_limit,max_iterations,verbose,obstacle_horizon)
         self.agents = agents
         # A finished agent occupies its goal for all future time, so a goal
@@ -32,6 +32,12 @@ class SippPlanner(SippGraph):
         # Callers that replan around finished agents themselves (e.g.
         # NeuralATTF) can disable this to accept a goal in any safe interval.
         self.require_goal_safe_forever = require_goal_safe_forever
+        # Optional refinement of the bounded-goal case: ``goal_safe_until(t_arrive)``
+        # returns the time the goal must stay safe until for an arrival at
+        # ``t_arrive`` (e.g. the end of the executor's tick plus the hold other
+        # agents assume). A goal reached inside an interval that ends earlier is
+        # not accepted; the search keeps waiting/detouring for a later interval.
+        self.goal_safe_until = goal_safe_until
         self._goal_dist_maps = {}  # goal_idx -> {node_idx: shortest-path cost to goal}
         self.agent_names = [agent["name"] for agent in agents]
         self.plan = {}
@@ -231,6 +237,17 @@ class SippPlanner(SippGraph):
                 return d
         return math.sqrt((position[0] - goal[0]) ** 2 + (position[1] - goal[1]) ** 2)
 
+    def _goal_interval_ok(self, state) -> bool:
+        """Whether arriving at the goal in ``state`` leaves it safe for as long as the
+        caller needs: forever (``require_goal_safe_forever``), until
+        ``goal_safe_until(t)`` when given, else any safe interval."""
+        end = state.interval[1]
+        if self.require_goal_safe_forever:
+            return math.isinf(end)
+        if self.goal_safe_until is not None:
+            return end >= self.goal_safe_until(state.time) - 1e-9
+        return True
+
     def compute_plan(self):
         solution_info = {}
         solution = {}
@@ -316,10 +333,7 @@ class SippPlanner(SippGraph):
                             g_score[succ_key] = tentative_g_score
                             action_cost[succ_key] = time_taken
                             
-                            if successor.position == goal and (
-                                not self.require_goal_safe_forever
-                                or math.isinf(successor.interval[1])
-                            ):
+                            if successor.position == goal and self._goal_interval_ok(successor):
                                 # Accept the goal only once its safe interval extends to
                                 # infinity - the agent stays there forever afterward, so a
                                 # bounded interval means some later-planned agent could
