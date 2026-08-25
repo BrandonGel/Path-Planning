@@ -200,6 +200,33 @@ class SippEdge(UnsafeIntervalList):
         return self.intersects(t1, t2)
 
 
+# Upper bound on the roadmap-level sweep memo (entries); cleared when exceeded so
+# very long runs with ever-new time-sampled query points stay bounded in memory.
+SWEEP_MEMO_MAX_ENTRIES = 250_000
+
+
+def cached_constraint_sweep(graph_map, p1, p2, v, r):
+    """Memoized ``graph_map.get_constraint_sweep(p1, p2, v, r, use_interval=True,
+    get_time_interval=True)``: ``(vertex -> (t_start, t_end), (u, v) edge ->
+    (t_start, t_end))`` for a disk of radius ``r`` moving ``p1 -> p2`` at speed
+    ``v``, times relative to the start of that move. The memo lives on the roadmap
+    (``graph_map._sipp_sweep_memo``) so it survives across SippGraph instances:
+    NeuralATTF builds one planner per low-level call and re-sweeps the other
+    agents' still-committed paths every time, which is why the same queries recur
+    call after call. ``GraphSampler.set_constraint_sweep`` drops it whenever the
+    roadmap itself changes."""
+    key = (p1, p2, v, r)
+    memo = getattr(graph_map, "_sipp_sweep_memo", None)
+    if memo is None:
+        memo = graph_map._sipp_sweep_memo = {}
+    hit = memo.get(key)
+    if hit is None:
+        if len(memo) >= SWEEP_MEMO_MAX_ENTRIES:
+            memo.clear()
+        hit = memo[key] = graph_map.get_constraint_sweep(p1, p2, v, r, use_interval=True, get_time_interval=True)
+    return hit
+
+
 class SippGraph(object):
     def __init__(self, graph_map: GraphSampler,dynamic_obstacles:dict = {},radius:float = 0.0,velocity:float = 0.0,use_constraint_sweep:bool = True, heuristic_type: str = 'manhattan',time_limit: float | None = None, max_iterations: int | None = None,verbose: bool = False, obstacle_horizon: float | dict | None = None):
         self.graph_map = graph_map
@@ -415,27 +442,10 @@ class SippGraph(object):
             neighbors.append(node.current)
         return neighbors
 
-    # Upper bound on the roadmap-level sweep memo (entries); cleared when exceeded so
-    # very long runs with ever-new time-sampled query points stay bounded in memory.
-    SWEEP_MEMO_MAX_ENTRIES = 250_000
-
     def _get_constraint_sweep_cached(self, p1, p2,v, r):
-        """Memoized ``get_constraint_sweep`` (interval form). The memo lives on the
-        roadmap (``graph_map._sipp_sweep_memo``) so it survives across SippGraph
-        instances: NeuralATTF builds one planner per low-level call and re-sweeps
-        the other agents' still-committed paths every time, which is why the same
-        (p1, p2, v, r) queries recur call after call. ``set_constraint_sweep``
-        drops it whenever the roadmap itself changes."""
-        key = (p1, p2, v, r)
-        memo = getattr(self.graph_map, "_sipp_sweep_memo", None)
-        if memo is None:
-            memo = self.graph_map._sipp_sweep_memo = {}
-        hit = memo.get(key)
-        if hit is None:
-            if len(memo) >= self.SWEEP_MEMO_MAX_ENTRIES:
-                memo.clear()
-            hit = memo[key] = self.graph_map.get_constraint_sweep(p1, p2,v, r, use_interval=True,get_time_interval=True)
-        return hit
+        """Memoized ``get_constraint_sweep`` (interval form); see
+        :func:`cached_constraint_sweep`."""
+        return cached_constraint_sweep(self.graph_map, p1, p2, v, r)
 
     def reset_graph(self):
         self.sipp_graph = {}

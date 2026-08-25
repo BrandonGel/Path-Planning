@@ -43,6 +43,7 @@ class Simulation:
         rng: random.Random | None = None,
         velocity: float = 0.0,
         timestep_duration: float = 1.0,
+        agent_radius: float = 0.0,
     ):
         self.tasks = list(tasks)
         self.agents = agents
@@ -55,6 +56,9 @@ class Simulation:
         self.velocity = float(velocity)
         self.timestep_duration = float(timestep_duration)
         self.arc_budget = self.velocity * self.timestep_duration
+        # Body radius for the radius-aware hold backstop (see time_forward). 0 ->
+        # taken from the planner (``algorithm.agent_radius``) when it has one.
+        self.agent_radius = float(agent_radius)
 
         self.time = 0
         self.delayed_agents: set = set()
@@ -108,14 +112,24 @@ class Simulation:
         agent_plan: Dict[str, tuple] = {}      # name -> (n_consumed, traversed waypoints)
         agent_pos_next: Dict[str, tuple] = {}  # name -> end-of-tick position
 
+        delayed = set()  # agents held this tick; reported to the planner next tick
         for agent in agents_to_move:
             name = agent["name"]
             cur = position[name]
             agents_pos_now[name] = cur
             planned = token["agents"][name]
-            if len(planned) <= 1 or self.rng.random() < self.delay_probability:
+            if len(planned) <= 1:
                 agent_plan[name] = (0, [], None)
                 agent_pos_next[name] = cur
+            elif self.rng.random() < self.delay_probability:
+                # Random hold. It MUST be reported: the committed path is time-sampled
+                # (waypoint k == tick k), so from now on this agent would run one tick
+                # behind everything the others planned against; the planner resets and
+                # re-plans a delayed agent from where it actually stands.
+                agent_plan[name] = (0, [], None)
+                agent_pos_next[name] = cur
+                delayed.add(name)
+                self.times_agent_delayed[name] += 1
             else:
                 # Advance up to one tick's worth of arc length (multiple fine waypoints).
                 n, traversed, fracs = self._advance_plan(planned, self.arc_budget)
@@ -126,7 +140,6 @@ class Simulation:
         # end-of-tick positions; a held agent gets zero motion this tick. (SIPP already
         # plans collision-free against other committed paths; this is a backstop.)
         collision = True
-        delayed = set()
         while collision:
             collision = False
             collision_set = set()
@@ -151,6 +164,47 @@ class Simulation:
                 delayed.add(name)
                 agent_pos_next[name] = agents_pos_now[name]
                 agent_plan[name] = (0, [], None)
+
+        # Radius-aware backstop. Committed paths are mutually consistent, but a hold
+        # (random delay, or one of the holds above) is applied AFTER everyone's motion
+        # for this tick was planned on the assumption that the held agent moves on.
+        # Anyone whose motion this tick sweeps within 2r of an agent that is standing
+        # still is therefore held too - and reported as delayed, so the planner
+        # re-syncs its path next tick - instead of driving through a stopped body.
+        # Consistent plans never bring a mover within 2r of a resting agent, so this
+        # only fires when a hold has already broken the plan. A mover that already
+        # stands within 2r (it was held inside the footprint, or the two were parked
+        # next to each other) is only held if its motion brings it CLOSER than it
+        # starts - moving away is the escape the planner just computed for it.
+        radius = self.agent_radius
+        if radius <= 0.0:
+            radius = float(getattr(algorithm, "agent_radius", 0.0) or 0.0)
+        if radius > 0.0:
+            clearance = 2.0 * radius - 1e-9
+            names = [a["name"] for a in agents_to_move]
+            changed = True
+            while changed:
+                changed = False
+                stationary = [
+                    n for n in names
+                    if all(p == agents_pos_now[n] for p in agent_plan[n][1])
+                ]
+                for name in names:
+                    traversed = agent_plan[name][1]
+                    if name in delayed or not traversed or name in stationary:
+                        continue
+                    legs = [agents_pos_now[name]] + list(traversed)
+                    for other in stationary:
+                        if other == name:
+                            continue
+                        d_min = self._polyline_point_dist(legs, agents_pos_now[other])
+                        d_start = math.dist(agents_pos_now[name], agents_pos_now[other])
+                        if d_min < clearance and d_min < d_start - 1e-9:
+                            delayed.add(name)
+                            agent_pos_next[name] = agents_pos_now[name]
+                            agent_plan[name] = (0, [], None)
+                            changed = True
+                            break
 
         for agent in agents_to_move:
             name = agent["name"]
@@ -177,6 +231,23 @@ class Simulation:
                     self.actual_paths[name].append(_point_to_dict((self.time - 1) + frac, wp))
             else:
                 self.actual_paths[name].append(_point_to_dict(self.time, agent_pos_next[name]))
+
+    @staticmethod
+    def _polyline_point_dist(legs, point) -> float:
+        """Minimum Euclidean distance from ``point`` to the polyline ``legs``."""
+        best = float("inf")
+        px = point
+        for a, b in zip(legs, legs[1:]):
+            ab = [bb - aa for aa, bb in zip(a, b)]
+            ap = [pp - aa for aa, pp in zip(a, px)]
+            denom = sum(c * c for c in ab)
+            t = 0.0 if denom <= 0.0 else max(0.0, min(1.0, sum(x * y for x, y in zip(ap, ab)) / denom))
+            d = math.dist(px, [aa + t * c for aa, c in zip(a, ab)])
+            if d < best:
+                best = d
+        if len(legs) == 1:
+            best = math.dist(px, legs[0])
+        return best
 
     @staticmethod
     def _step_points(planned, i):

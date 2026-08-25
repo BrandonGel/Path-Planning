@@ -27,6 +27,7 @@ import numpy as np
 from path_planning.common.environment.map.graph_sampler import GraphSampler
 from path_planning.multi_agent_planner.decentralized.neural_attf.cbs import Environment
 from path_planning.multi_agent_planner.decentralized.neural_attf.grid_overlay import GridOverlay
+from path_planning.multi_agent_planner.centralized.sipp.graph_generation import cached_constraint_sweep
 from path_planning.multi_agent_planner.centralized.sipp.sipp import SippPlanner
 
 try:
@@ -632,7 +633,12 @@ class NeuralATTF:
         return tuple(nodes[int(idx)].current)
 
     def _snap_start(self, pt):
-        """Roadmap node a SIPP plan starts from, and the time (s) needed to reach it.
+        """Nearest ``(node, t_reach)`` of :meth:`_snap_start_candidates`."""
+        return self._snap_start_candidates(pt)[0]
+
+    def _snap_start_candidates(self, pt):
+        """Roadmap nodes a SIPP plan may start from, nearest first, each with the
+        time (s) needed to reach it: ``[(node, t_reach), ...]``.
 
         A re-planned agent usually sits mid-edge (its committed path is sampled per
         tick, so a hold or a re-validation catches it between vertices). Planning
@@ -640,23 +646,26 @@ class NeuralATTF:
         off-roadmap chord; instead the start is snapped to the nearer ENDPOINT of the
         edge the agent is on, so the first move stays on the roadmap, and the
         returned ``t_reach`` lets the caller shift the world by the time that move
-        takes. Points already on a node (or off every edge) snap as before with
-        ``t_reach = 0``.
+        takes. Both endpoints of the edge are offered (nearest first) so the caller
+        can fall back to the other one when the move to the nearest is not safe
+        (see :meth:`_reach_segment_safe`). Points already on a node (or off every
+        edge) snap as before with ``t_reach = 0``.
         """
         from path_planning.common.environment.node import Node
 
         pt = tuple(float(c) for c in pt)
         if Node(pt) in self.graph_map.node_index_dict:
-            return pt, 0.0
+            return [(pt, 0.0)]
         nodes = self.graph_map.nodes
         snapped = self._snap_to_node(pt)
         if not nodes or self.velocity <= 0:
-            return snapped, 0.0
+            return [(snapped, 0.0)]
         p = np.asarray(pt, dtype=float)
-        k = min(8, len(nodes))
-        _, idxs = self._node_kdtree.query(p, k=k)
-        idxs = np.atleast_1d(idxs)
-        best = None  # (distance to edge, endpoint distance, endpoint)
+        # The containing edge's endpoints can be far from ``pt`` (long aisle edges)
+        # while many unrelated nodes are closer, so search every node within one
+        # maximum edge length rather than a fixed k nearest.
+        idxs = self._node_kdtree.query_ball_point(p, self._max_edge_len() + 1e-6)
+        found = {}  # endpoint -> (distance to edge, endpoint distance)
         for i in idxs:
             i = int(i)
             a = np.asarray(nodes[i].current, dtype=float)
@@ -671,12 +680,118 @@ class NeuralATTF:
                 if d_edge > 1e-6:
                     continue
                 for end in (a, b):
+                    key = tuple(float(c) for c in end)
                     d_end = float(np.linalg.norm(p - end))
-                    if best is None or (d_edge, d_end) < (best[0], best[1]):
-                        best = (d_edge, d_end, tuple(float(c) for c in end))
-        if best is None:
-            return snapped, 0.0
-        return best[2], best[1] / self.velocity
+                    if key not in found or (d_edge, d_end) < found[key]:
+                        found[key] = (d_edge, d_end)
+        if not found:
+            # Off every edge (should not happen for a committed-path position): drive
+            # the chord to the nearest node, at least time-consistently.
+            return [(snapped, math.dist(pt, snapped) / self.velocity)]
+        ordered = sorted(found.items(), key=lambda kv: kv[1])
+        return [(end, d_end / self.velocity) for end, (_, d_end) in ordered]
+
+    def _max_edge_len(self) -> float:
+        """Longest roadmap edge (cached per roadmap size)."""
+        nodes = self.graph_map.nodes
+        key = (len(nodes), len(self.graph_map.edges))
+        cached = getattr(self, "_max_edge_len_cache", None)
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        best = 0.0
+        for e in self.graph_map.edges:
+            d = math.dist(nodes[int(e[0])].current, nodes[int(e[1])].current)
+            if d > best:
+                best = d
+        self._max_edge_len_cache = (key, best)
+        return best
+
+    def _reach_segment_safe(self, actual, start, other_end, t_reach, sched, horizons) -> bool:
+        """Whether driving ``actual -> start`` over ``[0, t_reach]`` (world clock) is
+        clear of the other agents. ``actual`` lies on roadmap edge
+        ``(other_end, start)``; SIPP validates a plan only from ``start`` on, so this
+        pre-segment is the one part of a re-planned agent's motion it never checks.
+
+        Two stages. The swept-footprint machinery SIPP blocks its graph with is the
+        pre-filter: every other-agent schedule segment overlapping the window is
+        swept (memoized on the roadmap, see :func:`cached_constraint_sweep`) and
+        only segments whose sweep touches this edge, in a contact window that
+        intersects ``[0, t_reach]``, are considered further - waits and the resting
+        hold after a schedule's last point included. Because that window is for the
+        WHOLE edge (an idle agent 20 m down a long aisle edge "touches" it forever,
+        which would pin a held agent for good), the decision is then the exact
+        closest approach between our motion along the driven sub-segment and the
+        obstacle's motion inside that window. An obstacle already inside the
+        clearance at t=0 (we were held inside its footprint) is ignored when the
+        move takes us away from it - that is the escape.
+        """
+        if t_reach <= 0.0 or other_end is None:
+            return True
+        keys = {(tuple(other_end), tuple(start)), (tuple(start), tuple(other_end))}
+        r_sweep = 2.0 * (self.agent_radius + self.sipp_clearance_margin)
+        v_nom = float(self.velocity)
+        a = np.asarray(actual, dtype=float)
+        b = np.asarray(start, dtype=float)
+
+        def edge_hit(edges):
+            for k in keys:
+                iv = edges.get(k)
+                if iv is not None:
+                    return iv
+            return None
+
+        def overlaps(t0, t1):
+            return t0 <= t_reach + 1e-9 and t1 >= -1e-9
+
+        v_a = (b - a) / t_reach
+
+        def approaches(q0, t0, q1, t1, w0, w1):
+            """Closest approach < clearance between us (a + v_a t) and the obstacle
+            (q0 -> q1 over [t0, t1], resting if q0 == q1) inside [w0, w1]."""
+            ta, tb = max(0.0, w0, t0), min(t_reach, w1, t1)
+            if tb < ta:
+                return False
+            q0 = np.asarray(q0, dtype=float)
+            q1 = np.asarray(q1, dtype=float)
+            v_q = (q1 - q0) / (t1 - t0) if (t1 - t0) > 1e-9 and np.isfinite(t1) else np.zeros_like(q0)
+            r0 = (a - q0) + v_q * t0
+            v_rel = v_a - v_q
+            vv = float(v_rel @ v_rel)
+            t_star = ta if vv <= 1e-12 else min(tb, max(ta, -float(r0 @ v_rel) / vv))
+            return min(float(np.linalg.norm(r0 + v_rel * t)) for t in (ta, t_star, tb)) < r_sweep
+
+        for name, pts in sched.items():
+            if not pts:
+                continue
+            timed = [(float(p["t"]), tuple(_as_point(p))) for p in pts]
+            q0 = np.asarray(timed[0][1], dtype=float)
+            d0 = float(np.linalg.norm(a - q0))
+            if d0 < r_sweep and float(np.linalg.norm(b - q0)) >= d0:
+                continue  # already inside its clearance and moving away: escaping
+            h = horizons.get(name)
+            h = float("inf") if h is None else float(h)
+            t_last, p_last = timed[-1]
+            segs = list(zip(timed, timed[1:])) + [((t_last, p_last), (t_last + h, p_last))]
+            for (t0, p0), (t1, p1) in segs:
+                if not overlaps(t0, t1):
+                    continue
+                if p0 == p1:
+                    _, edges = cached_constraint_sweep(self.graph_map, p0, p0, v_nom, r_sweep)
+                    if edge_hit(edges) is not None and approaches(p0, t0, p1, t1, t0, t1):
+                        return False  # resting footprint on our sub-segment during [t0, t1]
+                    continue
+                dur = t1 - t0
+                v_seg = v_nom
+                if v_nom > 0 and dur > 1e-9:
+                    implied = math.dist(p0, p1) / dur
+                    if abs(implied - v_nom) > 1e-6:
+                        v_seg = implied
+                _, edges = cached_constraint_sweep(self.graph_map, p0, p1, v_seg, r_sweep)
+                iv = edge_hit(edges)
+                if iv is not None and overlaps(t0 + iv[0], t0 + iv[1]):
+                    if approaches(p0, t0, p1, t1, t0 + iv[0], t0 + iv[1]):
+                        return False
+        return True
 
     def _other_agent_schedules(
         self, agent_name, offset_steps: int = 0, exclude=(), offset_time: float = 0.0
@@ -749,7 +864,24 @@ class NeuralATTF:
         final_leg: bool = False,
     ):
         actual_start = tuple(float(c) for c in start)
-        start, t_reach = self._snap_start(actual_start)
+        # Mid-edge start: SIPP checks the plan from the snapped node on, so the move
+        # to that node is validated here; fall back to the edge's other endpoint,
+        # and give up (the caller re-plans next tick) when neither is safe now.
+        chosen = None
+        world_sched = None
+        candidates = self._snap_start_candidates(actual_start)
+        for cand, cand_reach in candidates:
+            if cand_reach > 0.0 and offset_steps == 0:
+                if world_sched is None:
+                    world_sched = self._other_agent_schedules(agent_name, 0, (), 0.0)
+                other_end = next((c for c, _ in candidates if c != cand), None)
+                if not self._reach_segment_safe(actual_start, cand, other_end, cand_reach, *world_sched):
+                    continue
+            chosen = (cand, cand_reach)
+            break
+        if chosen is None:
+            return False
+        start, t_reach = chosen
         goal = self._snap_to_node(goal)
         dt = float(self.timestep_duration)
         # The committed path is sampled per tick, so after reaching the goal at
