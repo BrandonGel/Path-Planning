@@ -228,7 +228,6 @@ class SippGraph(object):
         self.radius = radius
         self.velocity = velocity
         self.use_constraint_sweep = use_constraint_sweep
-        self._constraint_sweep_cache = {}  # (p1, p2, r) -> (nodes, edges, start_nodes)
         self.heuristic_type = heuristic_type
         self.dynamic_obstacles = dynamic_obstacles
         self.reset_graph()
@@ -254,8 +253,12 @@ class SippGraph(object):
             tgt_pos = self.graph_map.nodes[tgt_idx].current
             # graph_map.edges usually lists both directions; setdefault avoids
             # constructing (and discarding) a second SippEdge per undirected edge.
-            self.sipp_graph.setdefault((src_pos, tgt_pos), SippEdge())
-            self.sipp_graph.setdefault((tgt_pos, src_pos), SippEdge())
+            # graph_map.edges usually lists both directions: construct each record
+            # once (setdefault would build and discard a SippEdge per duplicate).
+            if (src_pos, tgt_pos) not in self.sipp_graph:
+                self.sipp_graph[(src_pos, tgt_pos)] = SippEdge()
+            if (tgt_pos, src_pos) not in self.sipp_graph:
+                self.sipp_graph[(tgt_pos, src_pos)] = SippEdge()
 
     @staticmethod
     def _norm_horizon(horizon) -> float:
@@ -346,6 +349,7 @@ class SippGraph(object):
    
     def update_intervals(self,plans: List[List[State]] | List[State] | State,action_costs: List[List[Tuple[float,float]]] | List[Tuple[float,float]] | Tuple[float,float],dyn_names: List[str]):
         if not plans or len(plans) == 0: return
+        self._graph_fresh = False
         for plan,action_cost,dyn_name in zip(plans,action_costs,dyn_names):
             for i in range(len(plan)):
                 location = plan[i]
@@ -411,14 +415,32 @@ class SippGraph(object):
             neighbors.append(node.current)
         return neighbors
 
+    # Upper bound on the roadmap-level sweep memo (entries); cleared when exceeded so
+    # very long runs with ever-new time-sampled query points stay bounded in memory.
+    SWEEP_MEMO_MAX_ENTRIES = 250_000
+
     def _get_constraint_sweep_cached(self, p1, p2,v, r):
-        """Cached wrapper for get_constraint_sweep to avoid duplicate queries."""
+        """Memoized ``get_constraint_sweep`` (interval form). The memo lives on the
+        roadmap (``graph_map._sipp_sweep_memo``) so it survives across SippGraph
+        instances: NeuralATTF builds one planner per low-level call and re-sweeps
+        the other agents' still-committed paths every time, which is why the same
+        (p1, p2, v, r) queries recur call after call. ``set_constraint_sweep``
+        drops it whenever the roadmap itself changes."""
         key = (p1, p2, v, r)
-        if key not in self._constraint_sweep_cache:
-            self._constraint_sweep_cache[key] = self.graph_map.get_constraint_sweep(p1, p2,v, r, use_interval=True,get_time_interval=True)
-        return self._constraint_sweep_cache[key]
-    
+        memo = getattr(self.graph_map, "_sipp_sweep_memo", None)
+        if memo is None:
+            memo = self.graph_map._sipp_sweep_memo = {}
+        hit = memo.get(key)
+        if hit is None:
+            if len(memo) >= self.SWEEP_MEMO_MAX_ENTRIES:
+                memo.clear()
+            hit = memo[key] = self.graph_map.get_constraint_sweep(p1, p2,v, r, use_interval=True,get_time_interval=True)
+        return hit
+
     def reset_graph(self):
         self.sipp_graph = {}
         self.init_graph()
         self.init_intervals(self.dynamic_obstacles)
+        # Fresh: only dynamic obstacles are in it. compute_plan skips its own
+        # reset while this holds (a planner built and used once pays one build).
+        self._graph_fresh = True

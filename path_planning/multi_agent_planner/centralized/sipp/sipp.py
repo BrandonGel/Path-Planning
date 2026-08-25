@@ -260,7 +260,8 @@ class SippPlanner(SippGraph):
         self.max_iterations = len(self.agents)
         for _ in range(self.max_iterations):
             self.shuffle_agents()
-            self.reset_graph()
+            if not getattr(self, "_graph_fresh", False):
+                self.reset_graph()  # __init__ already built a fresh graph for the first pass
             self.plan = {}
             self.plan_cost = {}
             self.action_cost = {}

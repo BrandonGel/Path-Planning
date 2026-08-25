@@ -38,6 +38,13 @@ class CGAL_Sweep:
         self.edge_aabbs = []
         self.edge_rtree = None
 
+    def clear_caches(self):
+        """Drop memoized query results but keep the spatial indices / geometry
+        (the roadmap is unchanged; only the queries' relevance has expired)."""
+        self.overlapping_sweep = {}
+        self.overlapping_interval_sweep = {}
+        self.segment_spatial_cache = {}
+
     @staticmethod
     def _undirected_key(src: int, tgt: int) -> tuple[int, int]:
         """Canonical undirected key; self-loops stay ``(i, i)``."""
