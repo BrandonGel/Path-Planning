@@ -126,8 +126,12 @@ class InputFile:
         }
         total_cells = int(math.prod(dimensions))
         num_dims = len(dimensions)
+        # Clearance (in cells) kept between agents' start/goal cells and obstacles /
+        # other agents: 2 * agent_radius, i.e. two agent radii (this matches the
+        # RA-L dataset generation, which used int(agent_radius / 0.5) at resolution 1).
+        INFLATE_RADIUS_SCALE = 2.0
         num_cells_to_inflate = (
-            math.ceil(agent_radius / resolution) if resolution > 0 else 0
+            math.ceil(INFLATE_RADIUS_SCALE * agent_radius / resolution) if resolution > 0 else 0
         )
         # total_cells = int(math.prod(no_resolution_dimensions)) 
         if 0 < nb_obstacles < 1:

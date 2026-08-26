@@ -20,6 +20,7 @@ Shapely/GEOS is planar, so this backend is 2D only (``set_graph`` raises for 3D)
 from __future__ import annotations
 
 import numpy as np
+import shapely
 from shapely import LineString, Point, STRtree
 
 
@@ -179,16 +180,32 @@ class ShapelySweep:
     # ------------------------------------------------------------ spatial helpers
 
     def _vertices_within(self, geom, r):
-        """Indices of roadmap vertices within distance r of ``geom``."""
+        """Indices of roadmap vertices strictly within distance r of ``geom``.
+
+        GEOS ``dwithin`` is inclusive (distance <= r), which would report a vertex
+        that merely *touches* the swept disc (distance == r) as a contact. Two
+        discs of radius r/2 at exactly distance r are tangent, not colliding
+        (the solution checker and the CGAL backend both use strict ``<``), so the
+        candidates are post-filtered with an exact strict distance test.
+        """
         if self.vertex_tree is None:
             return np.empty(0, dtype=np.int64)
-        return np.asarray(self.vertex_tree.query(geom, predicate="dwithin", distance=r), dtype=np.int64)
+        hits = np.asarray(self.vertex_tree.query(geom, predicate="dwithin", distance=r), dtype=np.int64)
+        if len(hits) == 0:
+            return hits
+        d = shapely.distance(geom, self.vertex_tree.geometries[hits])
+        return hits[d < r]
 
     def _edges_within(self, geom, r):
-        """Indices (into the edge arrays) of roadmap edges within distance r of ``geom``."""
+        """Indices (into the edge arrays) of roadmap edges strictly within distance r of ``geom``
+        (see :meth:`_vertices_within` for why the inclusive ``dwithin`` hits are re-filtered)."""
         if self.edge_tree is None:
             return np.empty(0, dtype=np.int64)
-        return np.asarray(self.edge_tree.query(geom, predicate="dwithin", distance=r), dtype=np.int64)
+        hits = np.asarray(self.edge_tree.query(geom, predicate="dwithin", distance=r), dtype=np.int64)
+        if len(hits) == 0:
+            return hits
+        d = shapely.distance(geom, self.edge_tree.geometries[hits])
+        return hits[d < r]
 
     def _segment_spatial_hits(self, u, v, r):
         """Raw candidate hits ``(vertex_hits, edge_hits)`` for the capsule sweep u->v (u != v).
@@ -297,7 +314,12 @@ class ShapelySweep:
     # ------------------------------------------------------------ interval math
 
     def get_interval_from_quadratic_equation(self, r0: np.ndarray, vel: np.ndarray, r: float, tdur: float):
-        """Solve ||r0 + t*vel||^2 = r^2 for t in [0, tdur]. Copied from CGAL_Sweep."""
+        """Solve ||r0 + t*vel||^2 = r^2 for t in [0, tdur]. Copied from CGAL_Sweep.
+
+        Returns ``(t1, t2, valid)``. ``valid[i]`` is False when the relative motion never
+        brings the point strictly inside radius r (no real roots, e.g. pure tangency);
+        such rows carry the placeholder window ``(0, tdur)`` and must be ignored by
+        callers -- the inclusive spatial pre-query can hand in tangent candidates."""
         r0 = np.asarray(r0)
         vel = np.asarray(vel)
         if r0.ndim == 1:
@@ -312,6 +334,8 @@ class ShapelySweep:
             t1 = np.zeros_like(b, dtype=float)
             t2 = tdur * np.ones_like(b, dtype=float)
             tdur_arr = np.broadcast_to(tdur, b.shape).astype(float)
+            # Stationary relative motion (a == 0): inside iff c < 0 for all t.
+            valid = np.broadcast_to(c < 0.0, b.shape).copy()
             if a > 0.0:
                 valid = disc >= 0.0
                 if np.any(valid):
@@ -332,6 +356,9 @@ class ShapelySweep:
             tdur_arr = np.broadcast_to(tdur, a.shape).astype(float)
             moving = a > 0.0
             valid = moving & (disc >= 0.0)
+            stationary_inside = (~moving) & (c < 0.0)
+            t2[stationary_inside] = tdur_arr[stationary_inside]
+            valid = valid | stationary_inside
             if np.any(valid):
                 sqrt_disc = np.sqrt(disc[valid])
                 t1_raw = (-b[valid] - sqrt_disc) / (2.0 * a[valid])
@@ -340,7 +367,7 @@ class ShapelySweep:
                 t2[valid] = np.clip(t2_raw, 0.0, tdur_arr[valid])
         else:
             raise ValueError("vel must be either a 1D or 2D array.")
-        return t1, t2
+        return t1, t2, valid
 
     def overlapping_interval_cgal(
         self,
@@ -453,7 +480,12 @@ class ShapelySweep:
         if len(vertex_hits):
             if get_time_interval:
                 r0 = u_arr - self.vertex_positions[vertex_hits]
-                t1, t2 = self.get_interval_from_quadratic_equation(r0, vel_vec, r, tdur)
+                t1, t2, valid = self.get_interval_from_quadratic_equation(r0, vel_vec, r, tdur)
+                # Tangent / never-inside candidates are not contacts: leave them out
+                # of the vertex windows and of the endpoint-sphere tables below.
+                vertex_hits = vertex_hits[valid]
+                t1 = t1[valid]
+                t2 = t2[valid]
                 vtx_t_lo = np.full(self.vertex_positions.shape[0], np.inf)
                 vtx_t_hi = np.full(self.vertex_positions.shape[0], -np.inf)
                 vtx_t_lo[vertex_hits] = t1

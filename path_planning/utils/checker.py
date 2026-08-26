@@ -125,7 +125,7 @@ def check_collision(solution, r, verbose: bool = True):
                 eps = 1e-9
                 if a < eps:
                     # Relative velocity ~ 0: distance approximately constant over this slice.
-                    if c + eps <= collision_radius_sq:
+                    if c + eps < collision_radius_sq:
                         # Entire local interval is colliding.
                         local_start, local_end = 0.0, duration
                     else:
