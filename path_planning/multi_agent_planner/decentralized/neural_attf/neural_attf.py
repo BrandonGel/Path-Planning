@@ -218,6 +218,10 @@ class NeuralATTF:
         self.token["path_ends"] = set()
         self.token["occupied_non_task_endpoints"] = set()
         self.token["delayed_agents"] = []
+        # agent -> static roadmap route of a task leg that could not be planned this
+        # step (SIPP mode); idle agents resting on it are nudged aside like blockers
+        # of a committed path (see _reroute_interfering_idle_agents).
+        self.token["blocked_routes"] = {}
         self.token["delayed_agents_to_reach_task_start"] = []
         # task name -> time first assigned / owning agent at assignment.
         self.token["assigned_tasks_times"] = {}
@@ -691,6 +695,85 @@ class NeuralATTF:
         ordered = sorted(found.items(), key=lambda kv: kv[1])
         return [(end, d_end / self.velocity) for end, (_, d_end) in ordered]
 
+    def _idle_blocked_nodes(self, agent_name, start) -> set:
+        """Roadmap nodes inside the resting footprint of some OTHER idle agent
+        (length-1 path) - blocked forever as far as SIPP is concerned. Idle agents
+        whose footprint covers ``start`` are skipped (escaping from inside one is
+        allowed, see _plan_sipp)."""
+        blocked = set()
+        clearance = 2.0 * self.agent_radius if self.agent_radius > 0 else 1e-9
+        for name, path in self.token["agents"].items():
+            if name == agent_name or len(path) != 1:
+                continue
+            p = tuple(path[0])
+            if math.dist(p, start) <= clearance:
+                continue
+            blocked |= self._covered_nodes(p, p)
+        return blocked
+
+    def _statically_reachable(self, agent_name, start, goal) -> bool:
+        """Cheap necessary condition for a SIPP plan ``start -> goal`` to exist: a
+        roadmap route avoiding every other idle agent's (forever-blocked) footprint.
+        Used before expensive low-level calls that would otherwise exhaust their
+        iteration budget on an unreachable goal."""
+        if self.low_level != "sipp":
+            return True
+        goal = tuple(goal)
+        blocked = self._idle_blocked_nodes(agent_name, tuple(start))
+        blocked.discard(self._snap_to_node(goal))
+        return bool(self._static_route(start, goal, blocked))
+
+    def _static_route(self, start, goal, blocked=frozenset()) -> list:
+        """Shortest roadmap route (node tuples, directed edges, Euclidean weights)
+        from the node nearest ``start`` to the node nearest ``goal``, ignoring time
+        and other agents except the nodes in ``blocked``; ``[]`` when unreachable."""
+        import heapq
+
+        nodes = self.graph_map.nodes
+        if not nodes:
+            return []
+        pos2idx = {tuple(n.current): i for i, n in enumerate(nodes)}
+        s = pos2idx.get(self._snap_to_node(start))
+        g = pos2idx.get(self._snap_to_node(goal))
+        if s is None or g is None:
+            return []
+        dist = {s: 0.0}
+        prev = {}
+        heap = [(0.0, s)]
+        while heap:
+            d, u = heapq.heappop(heap)
+            if u == g:
+                break
+            if d > dist.get(u, float("inf")):
+                continue
+            pu = nodes[u].current
+            for v in self.graph_map.road_map[u]:
+                v = int(v)
+                if blocked and tuple(nodes[v].current) in blocked and v != g:
+                    continue
+                nd = d + math.dist(pu, nodes[v].current)
+                if nd < dist.get(v, float("inf")):
+                    dist[v] = nd
+                    prev[v] = u
+                    heapq.heappush(heap, (nd, v))
+        if g not in dist:
+            return []
+        route = [g]
+        while route[-1] != s:
+            route.append(prev[route[-1]])
+        return [tuple(nodes[i].current) for i in reversed(route)]
+
+    def _note_blocked_route(self, agent_name, agent_pos, waypoints, legs_tried) -> None:
+        """Record the static route of the task leg that failed to plan (leg index
+        ``legs_tried - 1``) so idle agents resting on it are nudged aside."""
+        idx = max(0, int(legs_tried) - 1)
+        if idx >= len(waypoints):
+            return
+        leg_start = tuple(agent_pos) if idx == 0 else tuple(waypoints[idx - 1])
+        route = self._static_route(leg_start, tuple(waypoints[idx]))
+        if route:
+            self.token["blocked_routes"][agent_name] = route
+
     def _max_edge_len(self) -> float:
         """Longest roadmap edge (cached per roadmap size)."""
         nodes = self.graph_map.nodes
@@ -1041,10 +1124,12 @@ class NeuralATTF:
         if cur in self.non_task_endpoints and not self._near_active_goal(cur):
             return True
         target = self.get_closest_non_task_endpoint(agent_pos)
-        path = self.plan(
-            agent_name, agent_pos, target, all_idle_agents, all_delayed_agents, None, 0,
-            rest_forever=True,
-        )
+        path = None
+        if self._statically_reachable(agent_name, agent_pos, target):
+            path = self.plan(
+                agent_name, agent_pos, target, all_idle_agents, all_delayed_agents, None, 0,
+                rest_forever=True,
+            )
         if not path:
             print(f"Solution to non-task endpoint not found for {agent_name}; trying deadlock recovery.")
             self.deadlock_recovery(agent_name, agent_pos, all_idle_agents, all_delayed_agents, self.deadlock_radius)
@@ -1080,6 +1165,11 @@ class NeuralATTF:
                 footprint |= self._covered_nodes(prev, path[i])
             # Resting (idle) footprint at the committed path end.
             footprint |= self._covered_nodes(path[-1], path[-1])
+        for owner, route in self.token.get("blocked_routes", {}).items():
+            if owner == agent_name:
+                continue
+            for i in range(len(route)):
+                footprint |= self._covered_nodes(route[i - 1] if i else route[i], route[i])
         footprint |= {tuple(p) for p in self.token["path_ends"]}
         footprint |= {tuple(p) for p in self.token["occupied_non_task_endpoints"]}
         for task in self.token["tasks"].values():
@@ -1144,6 +1234,8 @@ class NeuralATTF:
         # plans collision-free (SIPP/A* treat other agents' paths as dynamic
         # obstacles, so a successful plan == no interference).
         for target in candidates:
+            if not self._statically_reachable(agent_name, agent_pos, target):
+                continue
             path = self.plan(
                 agent_name, agent_pos, target, all_idle_agents, all_delayed_agents, None, 0,
                 rest_forever=True,
@@ -1223,6 +1315,8 @@ class NeuralATTF:
         cum = 0
         for i, wp in enumerate(waypoints):
             cost_map = cost_maps[i] if cost_maps is not None and i < len(cost_maps) else None
+            if not self._statically_reachable(agent_name, seg_start, wp):
+                return None, i + 1  # sealed off by idle footprints: SIPP would only burn its budget
             seg = self.plan(
                 agent_name, seg_start, wp, all_idle_agents, all_delayed_agents, cost_map, cum,
                 final_leg=(i == len(waypoints) - 1),
@@ -1306,6 +1400,7 @@ class NeuralATTF:
                 self.token["agents_to_tasks"].pop(agent_name)
 
         # 2) replan delayed agents
+        self.token["blocked_routes"] = {}
         self.token["delayed_agents"] = list(delayed_agents)
         for agent_name in self.token["delayed_agents"]:
             path = self.token["agents"][agent_name]
@@ -1350,6 +1445,8 @@ class NeuralATTF:
                 )
                 cost_map_idx += legs_tried
                 if joined is None:
+                    if self.low_level == "sipp":
+                        self._note_blocked_route(agent_name, agent_pos, waypoints, legs_tried)
                     if len(self.token["delayed_agents"]) == 0:
                         self.deadlock_recovery(
                             agent_name, agent_pos, all_idle_agents, all_delayed_agents, self.deadlock_radius
@@ -1443,7 +1540,11 @@ class NeuralATTF:
         nearest open node) clears them out of the aisles entirely, avoiding the mid-aisle
         oscillation that stalled the all-nearest-node variant. Falls back to the nearest
         non-interfering node when no parking endpoint is reachable."""
-        # Nodes covered by every agent's *moving* path (len > 1) -> set of owners.
+        # Nodes covered by every agent's *moving* path (len > 1) -> set of owners,
+        # plus the static route of every task leg that could not be planned this
+        # step: an idle agent parked on the only corridor into a goal makes that
+        # leg unplannable in the first place, so it must be nudged off it too, or
+        # the leg (and the task) never gets a path at all.
         moving_cover: dict = {}
         for name, path in self.token["agents"].items():
             if len(path) <= 1:
@@ -1451,6 +1552,11 @@ class NeuralATTF:
             for i in range(len(path)):
                 prev = path[i - 1] if i >= 1 else path[i]
                 for c in self._covered_nodes(prev, path[i]):
+                    moving_cover.setdefault(tuple(c), set()).add(name)
+        for name, route in self.token.get("blocked_routes", {}).items():
+            for i in range(len(route)):
+                prev = route[i - 1] if i >= 1 else route[i]
+                for c in self._covered_nodes(prev, route[i]):
                     moving_cover.setdefault(tuple(c), set()).add(name)
         if not moving_cover:
             return
@@ -1481,10 +1587,17 @@ class NeuralATTF:
             # replaced by the new parking target.
             entry = self.token["agents_to_tasks"].get(name)
             has_task = bool(entry) and entry.get("task_name") != "safe_idle"
-            # Prefer free parking endpoints (off-aisle); fall back to nearest non-interfering node.
-            parking = self._free_parking_endpoints_sorted(pos, exclude=pos)
+            # Prefer free parking endpoints (off-aisle) that are not themselves on a
+            # covered node (else the blocker is just nudged again next step); fall
+            # back to nearest non-interfering node.
+            parking = [
+                ep for ep in self._free_parking_endpoints_sorted(pos, exclude=pos)
+                if not cover_tree.query_ball_point(np.asarray(ep, dtype=float), clearance)
+            ]
             committed = False
             for target in parking:
+                if not self._statically_reachable(name, pos, target):
+                    continue
                 new_path = self.plan(
                     name, pos, target, all_idle_agents, all_delayed_agents, None, 0, rest_forever=True
                 )
@@ -1506,6 +1619,8 @@ class NeuralATTF:
                 break
             if not committed:
                 for target in self._close_non_interfering_nodes(pos, name, self.deadlock_radius):
+                    if not self._statically_reachable(name, pos, target):
+                        continue
                     new_path = self.plan(
                         name, pos, target, all_idle_agents, all_delayed_agents, None, 0, rest_forever=True
                     )
