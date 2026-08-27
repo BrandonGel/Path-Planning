@@ -70,6 +70,25 @@ def get_graph_file_path(base_path: Path,graph_file_name:str =None):
     graph_file = base_path / graph_file_name
     return graph_file
 
+def get_graph_runtime_file_path(base_path: Path, graph_file_name: str = "graph_map.pkl"):
+    """Sidecar recording how long the roadmap in ``graph_file_name`` took to build:
+    ``<pickle stem>_runtime.yaml`` in the same directory as the pickle."""
+    return Path(base_path) / f"{Path(graph_file_name).stem}_runtime.yaml"
+
+
+def write_runtime_yaml(path: Path, payload: dict):
+    """Write a roadmap-generation runtime record (see get_graph_runtime_file_path)."""
+    import yaml
+    from datetime import datetime
+    from path_planning.utils.util import _to_native_yaml
+
+    payload = dict(payload)
+    payload.setdefault("generated_at", datetime.now().isoformat(timespec="seconds"))
+    with open(path, "w") as f:
+        yaml.safe_dump(_to_native_yaml(payload), f, sort_keys=False)
+    return Path(path)
+
+
 def get_graph_gnn_file_path(base_path: Path):
     graph_gnn_file = base_path / "graph.npz"
     return graph_gnn_file

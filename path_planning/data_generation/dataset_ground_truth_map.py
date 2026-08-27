@@ -21,6 +21,7 @@ from path_planning.multi_agent_planner.mapf_solver import solve_mapf
 from path_planning.common.environment.map.graph_sampler import GraphSampler
 from path_planning.utils.util import set_global_seed
 import math
+import time
 from tqdm import tqdm
 from multiprocessing import Pool, cpu_count
 import shutil
@@ -265,6 +266,9 @@ def create_map(param: Dict, generate_new_graph: bool = False,graph_file: Path =N
         map_ = GraphSampler(bounds=bounds, resolution=resolution, start=[], goal=[], sampling_dist_dict=sampling_dist_dict)
         map_.load_graph_sampler(graph_file,args)
     else:
+        # Roadmap generation is timed stage by stage and recorded next to the pickle
+        # (<stem>_runtime.yaml) so its cost can be compared with the GNN reconstruction.
+        t_start = time.perf_counter()
         obstacles_world = np.array(param["map"]["obstacles"])
         obs_size = param.get("obs_size", param.get("map", {}).get("obs_size", 0.5))
         agents = param["agents"]
@@ -303,15 +307,34 @@ def create_map(param: Dict, generate_new_graph: bool = False,graph_file: Path =N
         goal = [a["goal"] for a in agents_rt]
         map_.set_start(start)
         map_.set_goal(goal)
+        t_setup = time.perf_counter()
 
         if road_map_type == 'grid':
             nodes = map_.generateRandomNodes(generate_grid_nodes=True)
         else:
             nodes = map_.generateRandomNodes()
+        t_sample = time.perf_counter()
         map_.generate_map(road_map_type,nodes)
+        t_build = time.perf_counter()
         map_.save_graph_sampler(graph_file)
+        t_save = time.perf_counter()
+        write_runtime_yaml(
+            get_graph_runtime_file_path(Path(graph_file).parent, Path(graph_file).name),
+            {
+                "road_map_type": road_map_type,
+                "runtime": t_save - t_start,
+                "runtime_breakdown": {
+                    "setup": t_setup - t_start,
+                    "sample_nodes": t_sample - t_setup,
+                    "build_roadmap": t_build - t_sample,
+                    "save": t_save - t_build,
+                },
+                "num_nodes": len(map_.nodes),
+                "num_edges": len(map_.edges),
+            },
+        )
         if verbose:
-            print(f"Generated and saved graph to {graph_file}")
+            print(f"Generated and saved graph to {graph_file} ({t_save - t_start:.2f}s)")
     return map_
 
 def generate_permutation(inpt: Dict, config: Dict, case_path: Path, generate_new_graph: bool = False, verbose: bool = True):
