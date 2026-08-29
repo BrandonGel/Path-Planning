@@ -191,61 +191,63 @@ def get_boundary(map_,mask:np.ndarray):
     b = map_.bounds
 
     # --- 0) Get the holes where there are no connecting edges inside ---
+    # One seed point per connected obstacle component: its first cell in row-major order
+    # (what np.argwhere(labeled == comp)[0] returned, found here in a single pass instead of
+    # one full-grid scan per component).
     labeled, num = label(mask)
     holes = []
-    for comp in range(1, num + 1):
-        coords = np.argwhere(labeled == comp)
-        if coords.shape[0] == 0:
-            continue
-        r0, c0 = int(coords[0, 0]), int(coords[0, 1])
-        hx = float(b[0, 0]) + (r0 + 0.5) * res + offset[0]
-        hy = float(b[1, 0]) + (c0 + 0.5) * res + offset[1]
-        holes.append((hx, hy))
+    if num > 0:
+        labs, first = np.unique(labeled.ravel(), return_index=True)
+        for comp, idx in zip(labs.tolist(), first.tolist()):
+            if comp == 0:
+                continue
+            r0, c0 = divmod(int(idx), W)
+            hx = float(b[0, 0]) + (r0 + 0.5) * res + offset[0]
+            hy = float(b[1, 0]) + (c0 + 0.5) * res + offset[1]
+            holes.append((hx, hy))
 
     # --- 1) boundary segments (world-space) ---
-    # A cell face is on the boundary if it touches free space or the map boundary.
-    rows, cols = np.where(mask)
-    seg_set = set()
+    # A cell face is on the boundary if it touches free space or the map boundary. Done per
+    # face direction on the whole grid (a Python loop over the ~5M masked cells took ~4 s);
+    # the corner coordinates are computed with the same float operations as before so the
+    # vertices are bit-identical.
+    b00, b10 = float(b[0, 0]), float(b[1, 0])
+    off0, off1 = offset[0], offset[1]
+    padded = np.zeros((H + 2, W + 2), dtype=bool)
+    padded[1:-1, 1:-1] = mask
 
-    # cell corners (world coordinates)
-    def cell_corners(r: int, c: int):
-        x0 = float(b[0, 0]) + r * res + offset[0]
-        y0 = float(b[1, 0]) + c * res + offset[1]
-        return [
-            (x0, y0),
-            (x0 + res, y0),
-            (x0 + res, y0 + res),
-            (x0, y0 + res),
-        ]
+    def corners_of(rr, cc):
+        x0 = b00 + rr * res + off0
+        y0 = b10 + cc * res + off1
+        return [(x0, y0), (x0 + res, y0), (x0 + res, y0 + res), (x0, y0 + res)]
 
     # (dr, dc, corner_idx_1, corner_idx_2) for each face of cell (r,c)
     faces = [(-1, 0, 0, 3), (1, 0, 1, 2), (0, -1, 0, 1), (0, 1, 2, 3)]
-    for r, c in zip(rows.tolist(), cols.tolist()):
-        corners = cell_corners(r, c)
-        for dr, dc, ci1, ci2 in faces:
-            nr, nc = r + dr, c + dc
-            if nr < 0 or nr >= H or nc < 0 or nc >= W or (not mask[nr, nc]):
-                p1, p2 = corners[ci1], corners[ci2]
-                if p1 > p2:
-                    p1, p2 = p2, p1
-                seg_set.add((p1, p2))
+    seg_rows = []
+    for dr, dc, ci1, ci2 in faces:
+        neighbour = padded[1 + dr:H + 1 + dr, 1 + dc:W + 1 + dc]  # False outside the grid
+        rr, cc = np.nonzero(mask & ~neighbour)
+        if rr.size == 0:
+            continue
+        cs = corners_of(rr, cc)
+        (x1, y1), (x2, y2) = cs[ci1], cs[ci2]
+        swap = (x1 > x2) | ((x1 == x2) & (y1 > y2))  # tuple order: p1 < p2
+        seg_rows.append(np.stack([np.where(swap, x2, x1), np.where(swap, y2, y1),
+                                  np.where(swap, x1, x2), np.where(swap, y1, y2)], axis=1))
+    if seg_rows:
+        segs = np.unique(np.concatenate(seg_rows, axis=0), axis=0)  # == sorted(seg_set)
+    else:
+        segs = np.empty((0, 4), dtype=float)
 
     # --- 2) unique boundary vertices ---
-    pt_set = set()
-    for p1, p2 in seg_set:
-        pt_set.add(p1)
-        pt_set.add(p2)
-
-    bnd_pts = np.array(sorted(pt_set), dtype=float)  # (N,2)
-
-    # map point -> index
-    pt_index = {pt: i for i, pt in enumerate(sorted(pt_set))}
+    endpoints = np.concatenate([segs[:, :2], segs[:, 2:]], axis=0)
+    bnd_pts, inverse = np.unique(endpoints, axis=0, return_inverse=True)  # sorted (N,2)
+    inverse = np.asarray(inverse).reshape(-1)
+    bnd_pts = np.asarray(bnd_pts, dtype=float).reshape(-1, 2)
 
     # segments as pairs of vertex indices
-    bnd_segs = np.array(
-        [(pt_index[p1], pt_index[p2]) for p1, p2 in sorted(seg_set)],
-        dtype=int,
-    )
+    n_seg = len(segs)
+    bnd_segs = np.stack([inverse[:n_seg], inverse[n_seg:]], axis=1).astype(int)
 
     # --- 3) add outer map rectangle so the domain is enclosed ---
     x_min, x_max = float(b[0, 0]) + offset[0], float(b[0, 1]) + offset[0]

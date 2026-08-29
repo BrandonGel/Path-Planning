@@ -1,5 +1,6 @@
 from typing import Any, List, Tuple
 import heapq
+import math
 import numpy as np
 from path_planning.common.environment.map.halton import halton_sampling
 from scipy.spatial import KDTree, Delaunay
@@ -49,7 +50,8 @@ class GraphSampler(Grid):
         self.start_to_all_edges_dict = {}
         self.goal_to_all_edges_dict = {}
         self.nodes = []
-        self.obstacle_nodes = []
+        self._obstacle_nodes_cache = None  # see obstacle_nodes (built on demand)
+        self._blocked_cache = None         # see _blocked_mask()
         self.track_with_link = False
         self.road_map = []
         self.road_map_edge_weights = []
@@ -89,12 +91,14 @@ class GraphSampler(Grid):
         start_pixel = [self.world_to_map(s,discrete=True) for s in start]
         for s in start_pixel:
             self.type_map[tuple(s)] = TYPES.START
+        self._blocked_cache = None
         
     def set_goal(self, goal):
         self.goal = goal
         goal_pixel =  [self.world_to_map(g,discrete=True) for g in goal]
         for g in goal_pixel:
             self.type_map[tuple(g)] = TYPES.GOAL
+        self._blocked_cache = None
     
     def set_endpoints(self, pickups=None, deliveries=None, parking=None):
         """Store task endpoints (world coords) for visualization only.
@@ -207,17 +211,40 @@ class GraphSampler(Grid):
             self.type_map[obstacles[:,0], obstacles[:,1], obstacles[:,2]] = TYPES.OBSTACLE
         else:
             raise ValueError(f"Unsupported dimensions: {len(obstacles.shape)}")
-        for obstacle in obstacles:
-            pos = tuple(obstacle)
-            node = Node(pos,None,0,0)
-            self.obstacle_nodes.append(node)
+        # One Node object per obstacle cell (4.5M on a 0.05 m plant map) cost ~7 s and ~1.5 GB
+        # per environment build and nothing reads them during planning: obstacle_nodes is now
+        # built on demand from self.obstacles (see the property below).
+        self._obstacle_nodes_cache = None
         self._esdf_initialized = False
+        self._blocked_cache = None
 
     def get_obstacle_map(self) -> np.ndarray:
         return self.type_map.data == TYPES.OBSTACLE
 
+    @property
+    def obstacle_nodes(self) -> List[Node]:
+        """Node objects for the obstacle cells, materialised on first access only."""
+        if self._obstacle_nodes_cache is None:
+            self._obstacle_nodes_cache = [Node(tuple(obs), None, 0, 0) for obs in self.obstacles]
+        return self._obstacle_nodes_cache
+
+    @obstacle_nodes.setter
+    def obstacle_nodes(self, nodes):
+        self._obstacle_nodes_cache = list(nodes)
+
     def get_obstacle_nodes(self) -> List[Node]:
         return self.obstacle_nodes
+
+    def _blocked_mask(self) -> np.ndarray:
+        """Boolean grid of the cells is_expandable() rejects (OBSTACLE or INFLATION), cached
+        until the type map changes (set_obstacle_map / set_inflation_radius / set_start /
+        set_goal / rotate / clear_data / _load_from_dict all drop the cache)."""
+        m = self._blocked_cache
+        data = self.type_map.data
+        if m is None or m.shape != data.shape:
+            m = (data == TYPES.OBSTACLE) | (data == TYPES.INFLATION)
+            self._blocked_cache = m
+        return m
 
     def get_cost(self, p1_node: tuple, p2_node: tuple) -> float:
         """
@@ -352,24 +379,102 @@ class GraphSampler(Grid):
 
     def in_collision(self, p1: Tuple[float, ...], p2 : Tuple[float, ...] = None) -> bool:
         """
-        Check if the line of sight between two continuous (world) points is in collision
-        using DDA (Digital Differential Analyzer) grid traversal to check all tiles the line crosses.
-        Optimized version with early termination on first collision.
-        
+        Check if the line of sight between two continuous (world) points is in collision:
+        every grid cell the segment crosses (excluding the start cell, including the end
+        cell) must be expandable.
+
+        The reference implementation is the step-wise DDA in ``_in_collision_dda``. In 2-D the
+        cells that DDA visits are simply the segment's grid crossings ordered by parameter t,
+        so ``_in_collision_2d`` computes them all at once and tests the blocked mask in one
+        shot (~20 us instead of ~600 us per edge on the plant map); it hands the rare cases
+        where DDA's tie-breaking / clipping rules could matter back to the DDA.
+
         Args:
             p1: Start point in continuous (world) coordinates
             p2: End point in continuous (world) coordinates
-        
+
         Returns:
             in_collision: True if any tile along the line is in collision, False otherwise
         """
-        
-        # Check if start point has the correct dimension
-        dim = self.dim
-
         if p2 is None:
             return not self.is_expandable(self.world_to_map(p1,discrete=True))
-        
+        if self.dim == 2 and len(p1) == 2 and len(p2) == 2:
+            r = self._in_collision_2d(p1, p2)
+            if r is not None:
+                return r
+        return self._in_collision_dda(p1, p2)
+
+    def _in_collision_2d(self, p1, p2):
+        """Closed-form 2-D line-of-sight test; None when the caller must use the DDA.
+
+        Models _in_collision_dda exactly: each axis with |delta| > 1e-10 yields crossing
+        times t_j = off/|d| + j/|d| (j = 0, 1, ...; a start point exactly on a boundary gives
+        an immediate step, and the DDA's on-a-corner special case is mirrored); the walk
+        takes the first ``dist`` = |Δcell_x| + |Δcell_y| crossings in t order and stops at
+        the first blocked / out-of-grid cell (collision) or on reaching the end cell (free).
+        Near-ties between the two axes, and endpoints outside the grid, go to the DDA."""
+        inv_res = 1.0 / float(self.resolution)
+        b = self.bounds
+        lo0, lo1 = float(b[0][0]), float(b[1][0])
+        a0 = (float(p1[0]) - lo0) * inv_res
+        a1 = (float(p1[1]) - lo1) * inv_res
+        c0 = (float(p2[0]) - lo0) * inv_res
+        c1 = (float(p2[1]) - lo1) * inv_res
+        blocked = self._blocked_mask()
+        H, W = blocked.shape
+        g0, g1, h0, h1 = math.floor(a0), math.floor(a1), math.floor(c0), math.floor(c1)
+        if not (0 <= g0 < H and 0 <= g1 < W and 0 <= h0 < H and 0 <= h1 < W):
+            return None  # DDA clips out-of-grid endpoints; keep its exact behaviour
+        dist = abs(h0 - g0) + abs(h1 - g1)
+        if dist == 0:
+            return False  # same cell: the DDA takes no step and reports no collision
+        d0, d1 = c0 - a0, c1 - a1
+        ad0, ad1 = abs(d0), abs(d1)
+        fin0, fin1 = ad0 > 1e-10, ad1 > 1e-10
+        if not (fin0 or fin1):
+            return False  # no finite axis: the DDA breaks out of its loop
+        s0 = 1 if d0 > 0 else (-1 if d0 < 0 else 0)
+        s1 = 1 if d1 > 0 else (-1 if d1 < 0 else 0)
+        off0 = (math.ceil(a0) - a0) if d0 > 0 else (a0 - math.floor(a0))
+        off1 = (math.ceil(a1) - a1) if d1 > 0 else (a1 - math.floor(a1))
+        T0 = off0 / ad0 if fin0 else math.inf
+        T1 = off1 / ad1 if fin1 else math.inf
+        if fin0 and fin1 and abs(T0) < 1e-10 and abs(T1) < 1e-10:
+            T0, T1 = ad0 * 1e-10, ad1 * 1e-10  # DDA: start exactly on a cell corner
+        j = np.arange(dist, dtype=float)
+        if fin0 and fin1:
+            t = np.concatenate([T0 + j * (1.0 / ad0), T1 + j * (1.0 / ad1)])
+            order = np.argsort(t, kind="stable")
+            ts = t[order]
+            ax = order >= dist  # False: x step, True: y step
+            # A near-tie inside the taken prefix (or across its end) would invoke the DDA's
+            # tie rule / could reorder under its accumulated floating point: let it decide.
+            if np.any((np.abs(np.diff(ts[:dist + 1])) < 1e-9) & (ax[1:dist + 1] != ax[:dist])):
+                return None
+            ax = ax[:dist]
+            xs = g0 + s0 * np.cumsum(~ax)
+            ys = g1 + s1 * np.cumsum(ax)
+        elif fin0:
+            xs = g0 + s0 * np.arange(1, dist + 1)
+            ys = np.full(dist, g1)
+        else:
+            xs = np.full(dist, g0)
+            ys = g1 + s1 * np.arange(1, dist + 1)
+        oob = (xs < 0) | (xs >= H) | (ys < 0) | (ys >= W)
+        hit = oob | blocked[np.clip(xs, 0, H - 1), np.clip(ys, 0, W - 1)]
+        reach = (xs == h0) & (ys == h1)
+        if not hit.any():
+            return False
+        i_hit = int(np.argmax(hit))
+        return bool(not reach.any() or i_hit <= int(np.argmax(reach)))
+
+    def _in_collision_dda(self, p1: Tuple[float, ...], p2: Tuple[float, ...]) -> bool:
+        """
+        Reference DDA (Digital Differential Analyzer) grid traversal checking all tiles the
+        line crosses, with early termination on the first collision.
+        """
+        dim = self.dim
+
         # Check if end point has the correct dimension
         if  len(p1) != dim and len(p2) != dim:
             raise ValueError(f"End point must have dimension {dim}")
@@ -1199,7 +1304,10 @@ class GraphSampler(Grid):
         return point_int
 
     def set_obstacles(self, obstacles: np.ndarray):
-        self.obstacles = [tuple[Any, ...](obs) for obs in obstacles]
+        # Kept as an (N, dim) int array: converting 4.5M rows to tuples cost ~2 s per build
+        # (and pickled ~10 s); len() / iteration / np.asarray on it behave as before.
+        obstacles = np.asarray(obstacles, dtype=np.int64)
+        self.obstacles = obstacles if obstacles.size else []
         self.set_obstacle_map(obstacles)
 
     def set_inflation_radius(self, radius: float):
@@ -1207,6 +1315,33 @@ class GraphSampler(Grid):
         self.inflate_obstacles(radius)
         # inflate_obstacles calls update_esdf internally — mark cache valid.
         self._esdf_initialized = True
+        self._blocked_cache = None
+
+    def grid_state(self) -> dict:
+        """The rasterised environment (what set_obstacles + set_inflation_radius produce), for
+        caching across processes: see set_grid_state()."""
+        return {"type_map": self.type_map.data.copy(),
+                "esdf": self._esdf.copy() if getattr(self, "_esdf_initialized", False) else None,
+                "obstacles": np.asarray(self.obstacles, dtype=np.int64).reshape(-1, self.dim),
+                "inflation_radius": float(self.inflation_radius)}
+
+    def set_grid_state(self, state: dict):
+        """Install a grid_state() snapshot (same bounds / resolution) instead of re-rasterising
+        the obstacle cells and re-running the distance transform."""
+        tm = np.asarray(state["type_map"])
+        if tm.shape != self.type_map.data.shape:
+            raise ValueError(f"grid state shape {tm.shape} != map shape {self.type_map.data.shape}")
+        self.type_map.data[...] = tm
+        obstacles = np.asarray(state["obstacles"], dtype=np.int64)
+        self.obstacles = obstacles if obstacles.size else []
+        self.inflation_radius = float(state["inflation_radius"])
+        if state.get("esdf") is not None:
+            self._esdf = np.asarray(state["esdf"], dtype=np.float32).copy()
+            self._esdf_initialized = True
+        else:
+            self._esdf_initialized = False
+        self._obstacle_nodes_cache = None
+        self._blocked_cache = None
 
     def clear_data(self):
         self.road_map = []
@@ -1226,6 +1361,8 @@ class GraphSampler(Grid):
         self.obstacles = []
         self.inflation_radius = 0.0
         self._esdf_initialized = False
+        self._obstacle_nodes_cache = None
+        self._blocked_cache = None
 
     def save_graph_sampler(self, path: str):
         data = {
@@ -1257,12 +1394,34 @@ class GraphSampler(Grid):
         with open(path, 'wb') as f:
             pickle.dump(data, f)
 
+    def _adopt_grid(self, src) -> bool:
+        """Reproduce what set_obstacles + set_inflation_radius would build from ``src``'s
+        finished grid (same map, same inflation radius) without re-rasterising 4.5M cells and
+        re-running the distance transform (~10 s on the plant map). Mirrors that flow exactly:
+        START/GOAL marks (already on the fresh map) survive, OBSTACLE overwrites, INFLATION
+        only lands on FREE cells. Returns False when ``src`` is not usable."""
+        if src is None:
+            return False
+        sd = src.type_map.data
+        tm = self.type_map.data
+        if (sd.shape != tm.shape or float(src.inflation_radius) != float(self.inflation_radius)
+                or not getattr(src, "_esdf_initialized", False)):
+            return False
+        self.obstacles = src.obstacles
+        tm[sd == TYPES.OBSTACLE] = TYPES.OBSTACLE
+        tm[(sd == TYPES.INFLATION) & (tm == TYPES.FREE)] = TYPES.INFLATION
+        self._esdf = src._esdf.copy()
+        self._esdf_initialized = True
+        self._obstacle_nodes_cache = None
+        self._blocked_cache = None
+        return True
+
     def load_graph_sampler(self, path: str, args: dict = {}):
         with open(path, 'rb') as f:
             data = pickle.load(f)
         self._load_from_dict(data, args)
 
-    def _load_from_dict(self, data: dict, args: dict = {}):
+    def _load_from_dict(self, data: dict, args: dict = {}, grid_from=None):
 
         self.use_discrete_space = data["use_discrete_space"]
         self.set_start(data["start"])
@@ -1276,8 +1435,9 @@ class GraphSampler(Grid):
         self.obstacles = data["obstacles"]
         self.obs_size = data["obs_size"] if "obs_size" in data else 0.5
         self.inflation_radius = data["inflation_radius"]
-        self.set_obstacles(self.obstacles)
-        self.set_inflation_radius(self.inflation_radius)
+        if not self._adopt_grid(grid_from):
+            self.set_obstacles(self.obstacles)
+            self.set_inflation_radius(self.inflation_radius)
         self.track_with_link = data["track_with_link"]
         self.grid_points = data["grid_points"]
 
@@ -1406,17 +1566,10 @@ class GraphSampler(Grid):
                     tuple(int(obs[idx, d]) for d in range(obs.shape[1]))
                 )
                 new_obs[idx] = rotated
-            self.obstacles = [tuple(obs) for obs in new_obs]
+            self.obstacles = np.asarray(new_obs, dtype=np.int64)
 
-        self.obstacle_nodes = [
-            Node(
-                transform_pos(tuple(float(v) for v in n.current)),
-                None,
-                0,
-                0,
-            )
-            for n in self.obstacle_nodes
-        ]
+        self._obstacle_nodes_cache = None  # rebuilt from the rotated self.obstacles on demand
+        self._blocked_cache = None
 
         # 6. Rebuild index dicts
         self.node_index_dict = {node: i for i, node in enumerate(self.nodes)}
@@ -1535,7 +1688,7 @@ class GraphSampler(Grid):
             sweep_backend=getattr(self, "sweep_backend", "cgal"),
             sampling_dist_dict=self.sampling_dist_dict,
         )
-        pruned_sampler._load_from_dict(pruned_data)
+        pruned_sampler._load_from_dict(pruned_data, grid_from=self)
         return pruned_sampler
 
 
