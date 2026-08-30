@@ -1088,8 +1088,35 @@ class GraphSampler(Grid):
             use_exact_collision_check=self.use_exact_collision_check,
         )
 
-    def set_constraint_sweep(self):
+    def _roadmap_signature(self):
+        """Cheap content fingerprint of the roadmap the sweep is built for."""
+        return (
+            len(self.nodes), len(self.edges),
+            hash(tuple(tuple(n.current) for n in self.nodes)),
+            hash(tuple((int(e[0]), int(e[1])) for e in self.edges)),
+        )
+
+    def set_constraint_sweep(self, force: bool = False, keep_query_caches: bool = False):
+        """(Re)bind the sweep backend to the current roadmap.
+
+        Building the backend's spatial indices (vertex KD-tree / edge R-tree, edge
+        geometry arrays) is the expensive part and depends on the roadmap only, so it
+        is skipped when the roadmap is unchanged since the last call (content
+        fingerprint of nodes + edges); per-query memo caches are still cleared then,
+        keeping memory behaviour identical to a full rebuild. Callers that plan many
+        times on one roadmap (NeuralATTF builds a SippPlanner per low-level call)
+        therefore pay the index build once. ``force`` rebuilds regardless;
+        ``keep_query_caches`` also keeps the sweep's memoized query results.
+        """
+        sig = self._roadmap_signature()
+        if not force and getattr(self, "_constraint_sweep_signature", None) == sig:
+            if not keep_query_caches:
+                self.constraint_sweep.clear_caches()
+            self._constraint_sweep_locations_cache = {}
+            return
         self.constraint_sweep.set_graph([node.current for node in self.nodes],self.edges)
+        self._constraint_sweep_signature = sig
+        self._sipp_sweep_memo = {}  # SippGraph's cross-call sweep memo is roadmap-bound
         # Precompute tuples for fast per-index coordinate access — avoids the
         # repeated `self.nodes[idx].current` attribute walk in the hot path.
         self._node_current_tuples = [tuple(n.current) for n in self.nodes]

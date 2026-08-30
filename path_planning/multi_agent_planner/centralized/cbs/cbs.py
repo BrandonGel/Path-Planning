@@ -48,6 +48,7 @@ class State(object):
 class Conflict(object):
     VERTEX = 1
     EDGE = 2
+    SWEEP = 3
     def __init__(self):
         self.time = -1
         self.type = -1
@@ -57,10 +58,11 @@ class Conflict(object):
 
         self.location_1 = Location()
         self.location_2 = Location()
-
+        self.location_1_f = set()
+        self.location_2_f = set()
     def __str__(self):
         return '(' + str(self.time) + ', ' + self.agent_1 + ', ' + self.agent_2 + \
-             ', '+ str(self.location_1) + ', ' + str(self.location_2) + ')'
+             ', '+ str(self.location_1) + ', ' + str(self.location_2)  + ')'
 
 class VertexConstraint(object):
     def __init__(self, time, location):
@@ -101,14 +103,14 @@ class Constraints(object):
             "EC: " + str([str(ec) for ec in self.edge_constraints])
 
 class Environment(object):
-    def __init__(self, graph_map:GraphSampler, agents, astar_max_iterations=10000, radius = 0.0, velocity = 0.0, use_constraint_sweep=True,heuristic_type: str = 'manhattan'):
+    def __init__(self, graph_map:GraphSampler, agents, astar_max_iterations=10000, radius = 0.0, velocity = 0.0, use_constraint_sweep=True,heuristic_type: str = 'dijkstra'):
         self.graph_map = graph_map
         if radius > 0:
             self.graph_map.set_constraint_sweep()
         self.agents = agents
         self.agent_dict = {}
         if heuristic_type not in HEURISTIC_TYPE or heuristic_type is None:
-            self.heuristic_type = HEURISTIC_TYPE["manhattan"]
+            self.heuristic_type = HEURISTIC_TYPE["dijkstra"]
         else:
             self.heuristic_type = HEURISTIC_TYPE[heuristic_type]
         self.make_agent_dict()
@@ -124,6 +126,7 @@ class Environment(object):
         self._constraint_segment_cache = {}  # (p1a, p1b, p2a, p2b, v, r) -> bool
         self._dijkstra_cache = {}  # (start_idx, goal_idx) -> (states, cost)
         self._heuristic_cache = {}  # (location.point, agent_name) -> heuristic value
+        self._goal_dist_maps = {}  # goal_idx -> {node_idx: shortest-path cost to goal}
 
     def _static_shortest_path_states(self, agent_name: str):
         """Compute a static shortest path on the roadmap (no time expansion).
@@ -189,6 +192,38 @@ class Environment(object):
         self._dijkstra_cache[cache_key] = result
         return result
 
+    def _goal_distance_map(self, goal_idx: int):
+        """Single-source Dijkstra from the goal over the roadmap.
+
+        Roadmap edges are bidirectional with symmetric costs, so distances from
+        the goal equal shortest-path costs to the goal from every node. Computed
+        once per goal and cached; used as the exact (admissible, consistent)
+        low-level A* heuristic.
+        """
+        cached = self._goal_dist_maps.get(goal_idx)
+        if cached is not None:
+            return cached
+        road_map = getattr(self.graph_map, "road_map", None)
+        dist = {goal_idx: 0.0}
+        if road_map is None or len(road_map) == 0:
+            self._goal_dist_maps[goal_idx] = dist
+            return dist
+        heap = [(0.0, goal_idx)]
+        seen = set()
+        while heap:
+            d, u = heapq.heappop(heap)
+            if u in seen:
+                continue
+            seen.add(u)
+            u_node = self.graph_map.nodes[u]
+            for v in road_map[u]:
+                nd = d + float(self.graph_map.get_cost(u_node, self.graph_map.nodes[v]))
+                if nd < dist.get(v, float("inf")):
+                    dist[v] = nd
+                    heapq.heappush(heap, (nd, v))
+        self._goal_dist_maps[goal_idx] = dist
+        return dist
+
     def get_neighbors(self, state):
         neighbors = []
         node = Node(tuple[Any, ...](state.location.point))
@@ -205,7 +240,10 @@ class Environment(object):
                 neighbors.append(n)
         return neighbors
 
-    def get_conflicts(self, solution, get_first_conflict: bool = True):
+    def get_conflicts(self, solution, get_first_conflict: bool = True, max_conflicts: int | None = None):
+        """Enumerate conflicts; ``max_conflicts`` stops the sweep once that
+        many are collected (callers that only compare a count against a known
+        bound don't need the full list)."""
         max_t = max(len(plan) for plan in solution.values())
         conflicts = []
         agent_pairs = list(combinations(solution.keys(), 2))
@@ -245,6 +283,8 @@ class Environment(object):
                         if get_first_conflict:
                             return c
                         conflicts.append(c)
+                        if max_conflicts is not None and len(conflicts) >= max_conflicts:
+                            return conflicts
                         continue
 
                     state_1b = self.get_state(agent_1, solution, t + 1)
@@ -260,37 +300,72 @@ class Environment(object):
                         if get_first_conflict:
                             return c
                         conflicts.append(c)
+                        if max_conflicts is not None and len(conflicts) >= max_conflicts:
+                            return conflicts
             else:
                 for agent_1, agent_2 in agent_pairs:
                     if self.use_constraint_sweep:
                         edge_1 = agent_edges[agent_1][t]
                         edge_2 = agent_edges[agent_2][t]
-                        edge_conflict = edge_1 in sweeps[agent_2][t] or edge_2 in sweeps[agent_1][t]
-                        loc_1_pt, loc_2_pt = edge_1
+                        sweep_conflict = edge_1 in sweeps[agent_2][t] or edge_2 in sweeps[agent_1][t]
+                        loc_1_pt, loc_1_pt_f = edge_1
+                        loc_2_pt, loc_2_pt_f = edge_2
+                        if sweep_conflict:
+                            c = Conflict()
+                            c.time = t
+                            c.type = Conflict.SWEEP
+                            c.agent_1 = agent_1
+                            c.agent_2 = agent_2
+                            c.location_1 = Location(loc_1_pt)
+                            for e in sweeps[agent_2][t]:
+                                if e[0] == loc_1_pt:
+                                    c.location_1_f.add(Location(e[1]))
+                            if edge_1 in sweeps[agent_2][t]:
+                                c.location_1_f.add(Location(edge_1[1]))
+
+                            c.location_2 = Location(loc_2_pt)
+                            for e in sweeps[agent_1][t]:
+                                if e[0] == loc_2_pt:
+                                    c.location_2_f.add(Location(e[1]))
+                            if edge_2 in sweeps[agent_1][t]:
+                                c.location_2_f.add(Location(edge_2[1]))
+                            if get_first_conflict:
+                                return c
+                            conflicts.append(c)
+                            if max_conflicts is not None and len(conflicts) >= max_conflicts:
+                                return conflicts
                     else:
                         state_1a = self.get_state(agent_1, solution, t)
                         state_1b = self.get_state(agent_1, solution, t + 1)
                         state_2a = self.get_state(agent_2, solution, t)
                         state_2b = self.get_state(agent_2, solution, t + 1)
-                        edge_conflict = self._get_constraint_segment_cached(
-                            state_1a.location.point, state_1b.location.point,
-                            state_2a.location.point, state_2b.location.point,
+                        edge_1 = (state_1a.location.point, state_1b.location.point)
+                        edge_2 = (state_2a.location.point, state_2b.location.point)
+                        sweep_conflict = self._get_constraint_segment_cached(
+                            edge_1[0], edge_1[1],
+                            edge_2[0], edge_2[1],
                             self.velocity, self.radius,
                         )
-                        loc_1_pt = state_1a.location.point
-                        loc_2_pt = state_1b.location.point
-
-                    if edge_conflict:
-                        c = Conflict()
-                        c.time = t
-                        c.type = Conflict.EDGE
-                        c.agent_1 = agent_1
-                        c.agent_2 = agent_2
-                        c.location_1 = Location(loc_1_pt)
-                        c.location_2 = Location(loc_2_pt)
-                        if get_first_conflict:
-                            return c
-                        conflicts.append(c)
+                        if sweep_conflict:
+                            c = Conflict()
+                            c.time = t
+                            c.type = Conflict.SWEEP
+                            c.agent_1 = agent_1
+                            c.agent_2 = agent_2
+                            # Mirror use_constraint_sweep: start vertex + forbidden
+                            # destinations (here only the taken edge, since we have
+                            # no swept-edge fan without the roadmap sweep).
+                            loc_1_pt, loc_1_next = edge_1
+                            loc_2_pt, loc_2_next = edge_2
+                            c.location_1 = Location(loc_1_pt)
+                            c.location_1_f.add(Location(loc_1_next))
+                            c.location_2 = Location(loc_2_pt)
+                            c.location_2_f.add(Location(loc_2_next))
+                            if get_first_conflict:
+                                return c
+                            conflicts.append(c)
+                            if max_conflicts is not None and len(conflicts) >= max_conflicts:
+                                return conflicts
         return conflicts
 
     def create_constraints_from_conflict(self, conflict):
@@ -314,6 +389,17 @@ class Environment(object):
 
             constraint_dict[conflict.agent_1] = constraint1
             constraint_dict[conflict.agent_2] = constraint2
+        elif conflict.type == Conflict.SWEEP:
+            constraint1 = Constraints()
+            constraint2 = Constraints()
+            for loc in conflict.location_1_f:
+                e_constraint1 = EdgeConstraint(conflict.time, conflict.location_1, loc)
+                constraint1.edge_constraints |= {e_constraint1}
+            for loc in conflict.location_2_f:
+                e_constraint2 = EdgeConstraint(conflict.time, conflict.location_2, loc)
+                constraint2.edge_constraints |= {e_constraint2}
+            constraint_dict[conflict.agent_1] = constraint1
+            constraint_dict[conflict.agent_2] = constraint2
 
         return constraint_dict
 
@@ -324,9 +410,6 @@ class Environment(object):
             return solution[agent_name][-1]
 
     def state_valid(self, state):
-        if self.graph_map.in_collision_point(state.location.point):
-            return False
-        
         return  VertexConstraint(state.time,state.location) not in self.constraints.vertex_constraints
 
     def transition_valid(self, state_1, state_2):
@@ -346,10 +429,29 @@ class Environment(object):
             result = sum(fabs(a - b) for a, b in zip(loc_pt, goal_pt))
         elif self.heuristic_type == HEURISTIC_TYPE["euclidean"]:
             result = sum((a - b) ** 2 for a, b in zip(loc_pt, goal_pt)) ** 0.5
+        elif self.heuristic_type == HEURISTIC_TYPE["dijkstra"]:
+            result = self._dijkstra_heuristic(loc_pt, goal_pt)
         else:
             raise ValueError(f"Invalid heuristic type: {self.heuristic_type}")
         self._heuristic_cache[key] = result
         return result
+
+    def _dijkstra_heuristic(self, loc_pt, goal_pt):
+        """True roadmap shortest-path distance from loc_pt to goal_pt.
+
+        Falls back to euclidean distance (an admissible lower bound, since move
+        costs are euclidean edge lengths) when either point is not a roadmap
+        node or the goal is unreachable from loc_pt.
+        """
+        node_index_dict = getattr(self.graph_map, "node_index_dict", {})
+        loc_node = Node(tuple(float(x) for x in loc_pt), None, 0, 0)
+        goal_node = Node(tuple(float(x) for x in goal_pt), None, 0, 0)
+        if loc_node in node_index_dict and goal_node in node_index_dict:
+            dist = self._goal_distance_map(int(node_index_dict[goal_node]))
+            d = dist.get(int(node_index_dict[loc_node]))
+            if d is not None:
+                return d
+        return sum((a - b) ** 2 for a, b in zip(loc_pt, goal_pt)) ** 0.5
 
     def get_step_cost(self, state_1: State, state_2: State) -> float:
         """Incremental cost between consecutive time-expanded states.
