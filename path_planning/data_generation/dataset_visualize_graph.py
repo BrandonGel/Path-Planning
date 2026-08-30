@@ -33,13 +33,36 @@ def visualize_graph_sample(input_file: Path, graph_dir: Path, graph_file: Path, 
         augmentation_id = int(graph_name_parts[-1])
     else:
         augmentation_id = 0
-    y = np.load(target_file)
+    # Per-node arrays are stored as (N,) or (N, 1); use one value per node.
+    y = np.asarray(np.load(target_file), dtype=float)
+    if y.ndim > 1:
+        y = y.reshape(y.shape[0], -1)[:, 0]
 
     map_ =read_graph_sampler_from_yaml(input_file,graph_file=graph_file, args={"use_constraint_sweep": False})
     use_discrete_space = map_.use_discrete_space
 
-    if len(y) > len(map_.nodes):
-        y = y[y > 0]
+    if len(y) != len(map_.nodes):
+        # ``y`` is a per-node array over the *base* roadmap (graph_map.pkl) while
+        # ``graph_file`` may be a pruned copy of it. Map the values onto the loaded
+        # graph's nodes by coordinate. (The old ``y[y > 0]`` shortcut assumed the
+        # pruned graph is exactly the mask's ones, but prune_map also force-keeps
+        # start/goal anchors whose mask value is 0, so the lengths drift apart.)
+        base_graph_file = get_graph_file_path(graph_dir)  # <graph_dir>/graph_map.pkl
+        base_nodes = None
+        if base_graph_file.exists() and base_graph_file != graph_file:
+            base_map = read_graph_sampler_from_yaml(
+                input_file, graph_file=base_graph_file, args={"use_constraint_sweep": False}
+            )
+            base_nodes = base_map.nodes
+        if base_nodes is not None and len(base_nodes) == len(y):
+            value_at = {tuple(float(c) for c in n.current): float(v) for n, v in zip(base_nodes, y)}
+            y = np.asarray([value_at.get(tuple(float(c) for c in n.current), 0.0) for n in map_.nodes])
+        else:
+            raise ValueError(
+                f"Target array length {len(y)} does not match the graph's {len(map_.nodes)} nodes "
+                f"and cannot be mapped through {base_graph_file}"
+                + (f" ({len(base_nodes)} nodes)" if base_nodes is not None else " (missing)")
+            )
 
     plt.close("all")
     visualizer = Visualizer2D(figname=f"{graph_dir.name} - Graph", figsize=(8, 8))

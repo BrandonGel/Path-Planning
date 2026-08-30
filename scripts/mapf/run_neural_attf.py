@@ -4,7 +4,7 @@ STA*) across several random task frequencies, in both discrete (grid) and
 continuous (PRM) graph modes.
 
 Usage:
-    python scripts/mapf/run_neural_attf.py
+    python scripts/mapf/run_neural_attf.py [--map path/to/mapd.yaml]
 
 Outputs:
     figs/neural_attf/neural_attf_<mode>_freq<f>.png
@@ -44,6 +44,34 @@ from path_planning.utils.util import (
     set_global_seed,
     write_to_yaml,
 )
+
+
+DEFAULT_MAP_YAML = "path_planning/maps/2d/2d_mapd.yaml"
+
+
+def _map_yaml_from_argv(default: str = DEFAULT_MAP_YAML) -> str:
+    """Pop an optional ``--map PATH`` (or ``--map=PATH``) from ``sys.argv``.
+
+    Shared by the Neural-ATTF runners so any MAPD YAML (e.g.
+    ``2d_mapd_8agents.yaml``) can be run without editing the script; the
+    positional arguments of ``run_neural_attf_continous.py`` are untouched.
+    """
+    argv = sys.argv
+    for i, a in enumerate(argv[1:], start=1):
+        if a == "--map" and i + 1 < len(argv):
+            path = argv[i + 1]
+            del argv[i:i + 2]
+            return path
+        if a.startswith("--map="):
+            del argv[i]
+            return a.split("=", 1)[1]
+    return default
+
+
+def _map_tag(map_yaml: str) -> str:
+    """Output-name suffix for non-default maps (keeps the 2d_mapd fixtures stable)."""
+    stem = os.path.splitext(os.path.basename(map_yaml))[0]
+    return "" if stem == "2d_mapd" else f"_{stem}"
 
 
 def _make_map_mapd(map_yaml: str, use_discrete_space: bool, agent_radius: float,
@@ -135,7 +163,7 @@ def _run_mapd(
     and multi-leg tasks are all read from ``map_yaml`` (e.g. ``2d_mapd.yaml``).
     """
     mode = "discrete" if use_discrete_space else "continuous"
-    tag = f"mapd_{mode}"
+    tag = f"mapd_{mode}{_map_tag(map_yaml)}"
     print(f"\n=== Neural-ATTF (MAPD) | {os.path.basename(map_yaml)} | mode={mode} ===")
 
     rng = random.Random(seed)
@@ -271,23 +299,23 @@ def _solve_and_save(
     print(f"  saved static image: {png_path}")
     vis.close()
 
-    if make_gif:
-        schedule = {"schedule": deepcopy(summary["schedule"])}
-        gif_path = os.path.join(out_dir_figs, f"neural_attf_{tag}.gif")
-        vis = Visualizer2D()
-        vis.animate(
-            gif_path,
-            map_,
-            schedule,
-            road_map=road_map,
-            skip_frames=1,
-            intermediate_frames=1,
-            speed=3,
-            radius=agent_radius,
-            map_frame=False,
-        )
-        vis.close()
-        print(f"  saved animation: {gif_path}")
+    # if make_gif:
+    #     schedule = {"schedule": deepcopy(summary["schedule"])}
+    #     gif_path = os.path.join(out_dir_figs, f"neural_attf_{tag}.gif")
+    #     vis = Visualizer2D()
+    #     vis.animate(
+    #         gif_path,
+    #         map_,
+    #         schedule,
+    #         road_map=road_map,
+    #         skip_frames=1,
+    #         intermediate_frames=1,
+    #         speed=3,
+    #         radius=agent_radius,
+    #         map_frame=False,
+    #     )
+    #     vis.close()
+    #     print(f"  saved animation: {gif_path}")
 
 
 def main():
@@ -300,8 +328,9 @@ def main():
     # corridors. The footprint clearance is 2*agent_radius, so a radius >= 0.5
     # makes two agents on adjacent cells (1.0 apart) mutually blocking and
     # deadlocks the corridors. 0.293 -> inflation 1.0 (one cell), still passable.
+    # CLI: `python run_neural_attf.py [--map path/to/mapd.yaml]`
     _run_mapd(
-        map_yaml="path_planning/maps/2d/2d_mapd.yaml",
+        map_yaml=_map_yaml_from_argv(),
         use_discrete_space=True,
         horizon=2000,
         seed=42,

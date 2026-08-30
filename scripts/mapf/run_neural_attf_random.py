@@ -13,7 +13,7 @@ pickup->delivery legs after expansion). Arrival times are spaced by
 ``delay_probability = n_delays_per_agent / horizon``.
 
 Usage:
-    python scripts/mapf/run_neural_attf_random.py
+    python scripts/mapf/run_neural_attf_random.py [--map path/to/mapd.yaml]
 
 Outputs:
     figs/neural_attf/neural_attf_random_<mode>.png
@@ -40,7 +40,7 @@ from path_planning.multi_agent_planner.decentralized.neural_attf.tasks_generator
     gen_mapd_tasks,
 )
 from path_planning.utils.util import points_to_roadmap_frame, set_global_seed
-from run_neural_attf import _make_map_mapd, _solve_and_save
+from run_neural_attf import _make_map_mapd, _map_tag, _map_yaml_from_argv, _solve_and_save
 
 
 def _run_random(
@@ -62,7 +62,7 @@ def _run_random(
     are ignored).
     """
     mode = "discrete" if use_discrete_space else "continuous"
-    tag = f"random_{mode}"
+    tag = f"random_{mode}{_map_tag(map_yaml)}"
     print(f"\n=== Neural-ATTF (random MAPD) | {os.path.basename(map_yaml)} | mode={mode} ===")
 
     rng = random.Random(seed)
@@ -132,8 +132,9 @@ def _run_random(
 
 def main():
     set_global_seed(42)
+    # CLI: `python run_neural_attf_random.py [--map path/to/mapd.yaml]`
     _run_random(
-        map_yaml="path_planning/maps/2d/2d_mapd.yaml",
+        map_yaml=_map_yaml_from_argv(),
         use_discrete_space=True,
         horizon=2000,
         seed=42,

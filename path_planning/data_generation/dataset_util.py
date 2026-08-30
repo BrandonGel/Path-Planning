@@ -70,6 +70,25 @@ def get_graph_file_path(base_path: Path,graph_file_name:str =None):
     graph_file = base_path / graph_file_name
     return graph_file
 
+def get_graph_runtime_file_path(base_path: Path, graph_file_name: str = "graph_map.pkl"):
+    """Sidecar recording how long the roadmap in ``graph_file_name`` took to build:
+    ``<pickle stem>_runtime.yaml`` in the same directory as the pickle."""
+    return Path(base_path) / f"{Path(graph_file_name).stem}_runtime.yaml"
+
+
+def write_runtime_yaml(path: Path, payload: dict):
+    """Write a roadmap-generation runtime record (see get_graph_runtime_file_path)."""
+    import yaml
+    from datetime import datetime
+    from path_planning.utils.util import _to_native_yaml
+
+    payload = dict(payload)
+    payload.setdefault("generated_at", datetime.now().isoformat(timespec="seconds"))
+    with open(path, "w") as f:
+        yaml.safe_dump(_to_native_yaml(payload), f, sort_keys=False)
+    return Path(path)
+
+
 def get_graph_gnn_file_path(base_path: Path):
     graph_gnn_file = base_path / "graph.npz"
     return graph_gnn_file
@@ -164,7 +183,40 @@ def create_path_parameter_directory(base_path: Path, config: Dict,dump_config: b
         "resolution": resolution,
         "agent_radius": agent_radius,
     }
+    gen_cfg = normalize_gen_config(config.get("gen", None))
+    if gen_cfg["type"] != "uniform":
+        base_config["gen"] = gen_cfg  # record non-default start/goal generation in the dataset root config
     if dump_config:
         with open(get_config_file_path(map_path), "w") as f:
             yaml.safe_dump(_to_native_yaml(base_config), f)
     return map_path
+
+
+# ---------------------------------------------------------------- start/goal generation config (gen.yaml)
+GEN_TYPES = ("uniform", "gaussian")
+DEFAULT_GEN_CONFIG = {"type": "uniform", "std_scale": 0.1, "max_attempts": 100, "separate_means": True}
+
+
+def normalize_gen_config(gen_cfg) -> dict:
+    """Flatten a gen.yaml dict ``{type, gaussian: {std_scale, max_attempts, separate_means}}`` (or an
+    already-flat dict, e.g. read back from input.yaml) into one dict with defaults filled in.
+    ``None`` / empty -> uniform (today's behaviour)."""
+    cfg = dict(DEFAULT_GEN_CONFIG)
+    if isinstance(gen_cfg, dict):
+        cfg["type"] = str(gen_cfg.get("type", cfg["type"]) or cfg["type"]).lower()
+        src = gen_cfg.get("gaussian") or gen_cfg
+        cfg["std_scale"] = float(src.get("std_scale", cfg["std_scale"]))
+        cfg["max_attempts"] = int(src.get("max_attempts", cfg["max_attempts"]))
+        cfg["separate_means"] = bool(src.get("separate_means", cfg["separate_means"]))
+    assert cfg["type"] in GEN_TYPES, f"gen type must be one of {GEN_TYPES}, got {cfg['type']!r}"
+    assert cfg["std_scale"] > 0, "gen.gaussian.std_scale must be > 0"
+    assert cfg["max_attempts"] > 0, "gen.gaussian.max_attempts must be > 0"
+    return cfg
+
+
+def read_gen_config_from_yaml(gen_config_yaml) -> dict:
+    """Read config/gen.yaml (start/goal placement distribution); mirrors
+    path_planning.gnn.dataset_prune.read_prune_mechanism_from_yaml."""
+    with open(gen_config_yaml, "r") as f:
+        raw = yaml.load(f, Loader=yaml.FullLoader)
+    return normalize_gen_config(raw)

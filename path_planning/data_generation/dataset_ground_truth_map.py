@@ -21,6 +21,7 @@ from path_planning.multi_agent_planner.mapf_solver import solve_mapf
 from path_planning.common.environment.map.graph_sampler import GraphSampler
 from path_planning.utils.util import set_global_seed
 import math
+import time
 from tqdm import tqdm
 from multiprocessing import Pool, cpu_count
 import shutil
@@ -36,6 +37,70 @@ from path_planning.data_generation.dataset_util import *
 from path_planning.common.environment.map.graph_sampler import validate_roadmap_type
 
 KEYS = ["bounds", "resolution", "time_limit", "max_iterations", "road_map_type", "use_discrete_space", "sample_num", "num_neighbors", "min_edge_len", "max_edge_len", "agent_radius", "nb_obstacles", "nb_agents", "obs_size"]
+
+
+def _make_position_sampler(mean_cells, std_cells, dimensions, uniform_fallback, max_attempts, stats, key):
+    """Gaussian cell sampler with the signature of ``get_random_position(exclude_set, max_attempts)``.
+
+    Draws ``round(N(mean_cells, std_cells))`` until the cell is inside the map and not excluded;
+    after ``max_attempts`` rejections it counts a fallback in ``stats[key]`` and delegates to the
+    uniform sampler so placement can never fail more often than today.
+    """
+    num_dims = len(dimensions)
+    mean_cells = np.asarray(mean_cells, dtype=float)
+    std_cells = np.asarray(std_cells, dtype=float)
+
+    def sample(exclude_set: set, max_attempts_uniform: int = 1000):
+        for _ in range(max_attempts):
+            pos = tuple(int(v) for v in np.rint(np.random.normal(mean_cells, std_cells)))
+            if all(0 <= pos[d] < dimensions[d] for d in range(num_dims)) and pos not in exclude_set:
+                return pos
+        stats[key] += 1
+        return uniform_fallback(exclude_set, max_attempts_uniform)
+
+    return sample
+
+
+def _make_gaussian_role_samplers(gen_cfg: dict, map_: GraphSampler, dimensions, bounds, resolution, uniform_sampler):
+    """Build the start and goal samplers for ``gen.type == "gaussian"``.
+
+    Starts are drawn around one mean and goals around a second one (or the same one when
+    ``separate_means`` is false); each mean is uniform over the whole map (world coordinates) and
+    ``std = std_scale * map side length`` per axis. Returns ``(start_sampler, goal_sampler, record)``
+    where ``record`` is written to input.yaml (``fallback`` is the live counter dict).
+    """
+    num_dims = len(dimensions)
+    bounds_arr = np.asarray(bounds, dtype=float)
+    std_world = [float(gen_cfg["std_scale"] * (bounds_arr[d, 1] - bounds_arr[d, 0])) for d in range(num_dims)]
+    std_cells = [s / float(resolution) for s in std_world]
+
+    def draw_mean():
+        mean_world = [float(np.random.uniform(bounds_arr[d, 0], bounds_arr[d, 1])) for d in range(num_dims)]
+        mean_cells = [float(v) for v in np.asarray(map_.world_to_map(tuple(mean_world), discrete=False)).reshape(-1)]
+        return mean_world, mean_cells
+
+    start_mean_world, start_mean_cells = draw_mean()
+    if gen_cfg["separate_means"]:
+        goal_mean_world, goal_mean_cells = draw_mean()
+    else:
+        goal_mean_world, goal_mean_cells = list(start_mean_world), list(start_mean_cells)
+
+    stats = {"n_fallback_start": 0, "n_fallback_goal": 0}
+    start_sampler = _make_position_sampler(start_mean_cells, std_cells, dimensions, uniform_sampler, gen_cfg["max_attempts"], stats, "n_fallback_start")
+    goal_sampler = _make_position_sampler(goal_mean_cells, std_cells, dimensions, uniform_sampler, gen_cfg["max_attempts"], stats, "n_fallback_goal")
+    record = {
+        "type": "gaussian",
+        "std_scale": float(gen_cfg["std_scale"]),
+        "max_attempts": int(gen_cfg["max_attempts"]),
+        "separate_means": bool(gen_cfg["separate_means"]),
+        "std_world": std_world,
+        "start_mean_world": start_mean_world,
+        "goal_mean_world": goal_mean_world,
+        "fallback": stats,
+    }
+    return start_sampler, goal_sampler, record
+
+
 class InputFile:   
     def __init__(self, input_file: Path, case_id: int = 0):
         self.input_file = input_file
@@ -100,6 +165,7 @@ class InputFile:
         nb_agents = kwargs.get("nb_agents", 4)
         obs_size = kwargs.get("obs_size", 0.5) # size of the obstacle in pixels
         sampling_dist_dict = kwargs.get("sampling_dist_dict", {})
+        gen_cfg = normalize_gen_config(kwargs.get("gen", None))  # start/goal placement (config/gen.yaml)
         map_ = GraphSampler(bounds=bounds, resolution=resolution, start=[], goal=[], sampling_dist_dict=sampling_dist_dict)
         dimensions = list(map_.shape)
         input_dict = {
@@ -203,10 +269,20 @@ class InputFile:
                 
 
 
+        # Start/goal samplers. Uniform keeps the original closure (identical RNG consumption, so
+        # existing datasets reproduce); gaussian biases starts and goals around random means and
+        # records the drawn parameters under input_dict["gen"].
+        if gen_cfg["type"] == "gaussian":
+            start_sampler, goal_sampler, input_dict["gen"] = _make_gaussian_role_samplers(
+                gen_cfg, map_, dimensions, bounds, resolution, get_random_position
+            )
+        else:
+            start_sampler = goal_sampler = get_random_position
+
         # Place agents
         for agent_id in range(nb_agents):
             # Get start position
-            start_pos = get_random_position(occupied_positions)
+            start_pos = start_sampler(occupied_positions)
             if start_pos is None:
                 assert False, f"Failed to place agent {agent_id} start position"
             occupied_positions.add(start_pos)
@@ -217,7 +293,7 @@ class InputFile:
                     occupied_positions.add(inflated_obs_pos)
 
             # Get goal position (can overlap with other goals but not starts/obstacles)
-            goal_pos = get_random_position(occupied_positions)
+            goal_pos = goal_sampler(occupied_positions)
             if goal_pos is None:
                 assert False, f"Failed to place agent {agent_id} goal position"
             occupied_positions.add(goal_pos)
@@ -265,6 +341,9 @@ def create_map(param: Dict, generate_new_graph: bool = False,graph_file: Path =N
         map_ = GraphSampler(bounds=bounds, resolution=resolution, start=[], goal=[], sampling_dist_dict=sampling_dist_dict)
         map_.load_graph_sampler(graph_file,args)
     else:
+        # Roadmap generation is timed stage by stage and recorded next to the pickle
+        # (<stem>_runtime.yaml) so its cost can be compared with the GNN reconstruction.
+        t_start = time.perf_counter()
         obstacles_world = np.array(param["map"]["obstacles"])
         obs_size = param.get("obs_size", param.get("map", {}).get("obs_size", 0.5))
         agents = param["agents"]
@@ -303,15 +382,34 @@ def create_map(param: Dict, generate_new_graph: bool = False,graph_file: Path =N
         goal = [a["goal"] for a in agents_rt]
         map_.set_start(start)
         map_.set_goal(goal)
+        t_setup = time.perf_counter()
 
         if road_map_type == 'grid':
             nodes = map_.generateRandomNodes(generate_grid_nodes=True)
         else:
             nodes = map_.generateRandomNodes()
+        t_sample = time.perf_counter()
         map_.generate_map(road_map_type,nodes)
+        t_build = time.perf_counter()
         map_.save_graph_sampler(graph_file)
+        t_save = time.perf_counter()
+        write_runtime_yaml(
+            get_graph_runtime_file_path(Path(graph_file).parent, Path(graph_file).name),
+            {
+                "road_map_type": road_map_type,
+                "runtime": t_save - t_start,
+                "runtime_breakdown": {
+                    "setup": t_setup - t_start,
+                    "sample_nodes": t_sample - t_setup,
+                    "build_roadmap": t_build - t_sample,
+                    "save": t_save - t_build,
+                },
+                "num_nodes": len(map_.nodes),
+                "num_edges": len(map_.edges),
+            },
+        )
         if verbose:
-            print(f"Generated and saved graph to {graph_file}")
+            print(f"Generated and saved graph to {graph_file} ({t_save - t_start:.2f}s)")
     return map_
 
 def generate_permutation(inpt: Dict, config: Dict, case_path: Path, generate_new_graph: bool = False, verbose: bool = True):

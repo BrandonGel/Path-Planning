@@ -37,7 +37,7 @@ from path_planning.utils.util import set_map_config
 from path_planning.gnn.dataset_prune import read_prune_mechanism_from_yaml
 from path_planning.data_generation.dataset_visualize_graph import collect_graph_tasks
 from path_planning.gnn.dataset_prune import create_gnn_map_tasks
-from path_planning.data_generation.dataset_util import get_graph_file_path, generate_gnn_sampler_path, generate_base_case_path
+from path_planning.data_generation.dataset_util import get_graph_file_path, generate_gnn_sampler_path, generate_base_case_path, get_prediction_file_path, read_gen_config_from_yaml
 
 if __name__ == "__main__":
     """Main entry point for dataset generation."""
@@ -57,11 +57,12 @@ if __name__ == "__main__":
     parser.add_argument("-mapf","--mapf_solver_names",type=str, nargs='+', default=["sipp"], choices=["cbs", "icbs", "lacam", "lacam_random", "sipp"], help="MAPF solver to use")
     parser.add_argument("-c","--num_cases",type=int, default=25, help="number of cases to generate")
     parser.add_argument("-t","--time_limit",type=int, default=60, help="time_limit for the solver in seconds")
-    parser.add_argument("-m","--max_iterations",type=int, default=10000000, help="max iterations for the solver")
+    parser.add_argument("-m","--max_iterations",type=int, default=10000, help="max iterations for the solver")
     parser.add_argument("-ds","--use_discrete_space",action="store_true",help="use discrete space",)
     parser.add_argument("-dp","--delete_failed_path",action="store_true", help="delete failed path")
 
     parser.add_argument("-prune_config","--prune_config",type=str, default='config/prune_config.yaml', help="prune config")
+    parser.add_argument("-gen_config","--gen_config",type=str, default='config/gen.yaml', help="start/goal placement config used when the dataset was generated (recorded in the dataset config.yaml)")
     parser.add_argument("-rf","--run_folder",type=str, default="logs/gatv2_compile/wandb/run-20260409_022405-dgaev32o", help="run folder")
     parser.add_argument("-cp_path","--checkpoint_path",type=str, default=None, help="checkpoint path")
     parser.add_argument("-train","--train_config",type=str, default='config/train.yaml', help="train config file")
@@ -69,11 +70,13 @@ if __name__ == "__main__":
     parser.add_argument("-gng","--generate_new_graph",action="store_true", help="generate new graph")
     parser.add_argument("-cfg","--config",type=str, default='config/map.yaml', help="config file")
     parser.add_argument("-w","--num_workers",type=int, default=None, help="number of parallel workers for cases (default: auto-detect CPU cores)")
+    parser.add_argument("-heurs","--heuristic_types",type=str, default='',choices=['manhattan', 'euclidean','dijkstra'], help="heuristic type")
     args = parser.parse_args()
 
     with open(args.config, 'r') as f:
         map_config = yaml.load(f,Loader=yaml.FullLoader)
     map_config = set_map_config(map_config=map_config,args=args)
+    map_config['gen'] = read_gen_config_from_yaml(args.gen_config)
     num_workers=map_config['num_workers']
     base_path = map_config['path']
 
@@ -90,7 +93,7 @@ if __name__ == "__main__":
             'num_neighbors': 4.0,
             'min_edge_len': 0.1,
             'max_edge_len': 1.1,
-            'heuristic_type': 'manhattan',
+            'heuristic_type': 'manhattan' if args.heuristic_types == '' else args.heuristic_types,
     }
     continuous_config = {
             'use_discrete_space': False,
@@ -98,7 +101,7 @@ if __name__ == "__main__":
             'num_neighbors': 13.0,
             'min_edge_len': 0.1,
             'max_edge_len': 5.1,
-            'heuristic_type': 'euclidean',
+            'heuristic_type': 'euclidean' if args.heuristic_types == '' else args.heuristic_types,
     }
     _, _, _, gnn_folder_name = get_gnn_paths(
         run_folder=args.run_folder,
@@ -125,10 +128,28 @@ if __name__ == "__main__":
 
             # Graph files to use for MAPF solving.
             graph_files = []
+            missing = []
             for case_id in range(args.num_cases):
                 _,map_path = generate_base_case_path(path,case_id,road_map_type)
                 gnn_dir = generate_gnn_sampler_path(map_path, gnn_folder_name)
-                graph_files.append(get_graph_file_path(gnn_dir, pruned_graph_name))
+                graph_file = get_graph_file_path(gnn_dir, pruned_graph_name)
+                graph_files.append(graph_file)
+                # A pruned graph is only valid together with the prediction mask the
+                # prune pipeline writes next to it. Without both, create_map would
+                # silently *generate a fresh roadmap* (of the type recorded in the
+                # case's input.yaml) and save it under the pruned name -- which is
+                # how unpruned RRG copies ended up as "k0"/"gnn" graphs before.
+                mask_file = get_prediction_file_path(gnn_dir, prune_name) if len(prune_name) > 0 else None
+                if not graph_file.exists() or (mask_file is not None and not mask_file.exists()):
+                    missing.append((graph_file, mask_file))
+            if missing:
+                raise FileNotFoundError(
+                    f"{len(missing)}/{args.num_cases} pruned graphs for road_map_type={road_map_type}, "
+                    f"agent_radius={agent_radius} are missing or lack their prediction mask "
+                    f"(e.g. {missing[0][0]}). Run scripts/test/run_create_gnn_maps.py with the same "
+                    f"-rf/-prune_config for this dataset first; refusing to fall back to a freshly "
+                    f"generated roadmap."
+                )
 
             # Phase 2: run each solver on the saved maps
             for solver in mapf_solver_names:

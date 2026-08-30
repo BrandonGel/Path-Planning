@@ -7,7 +7,7 @@ from path_planning.multi_agent_planner.centralized.ccbs.ccbs import CCBS
 from path_planning.multi_agent_planner.centralized.ccbs.iccbs import ICCBS
 from path_planning.multi_agent_planner.centralized.ccbs.graph_generation import Environment as CCBS_Environment
 from path_planning.multi_agent_planner.centralized.lacam.utility import set_starts_goals_config, is_valid_mapf_solution
-from typing import Tuple
+from typing import List, Tuple
 import numpy as np
 import time
 from path_planning.utils.checker import check_collision
@@ -47,6 +47,22 @@ def _snap_agents_to_nodes(map_, agents_rt):
     return out
 
 
+def _agents_off_nodes(map_, agents_rt) -> List[str]:
+    """Return a description of every agent start/goal that is not an exact roadmap node."""
+    from path_planning.common.environment.node import Node
+
+    nidx = getattr(map_, "node_index_dict", {}) or {}
+    off = []
+    for a in agents_rt:
+        s = tuple(float(x) for x in a["start"])
+        g = tuple(float(x) for x in a["goal"])
+        if Node(s) not in nidx:
+            off.append(f"{a.get('name', 'agent')} start {s}")
+        if Node(g) not in nidx:
+            off.append(f"{a.get('name', 'agent')} goal {g}")
+    return off
+
+
 def solve_mapf(map_, agents,mapf_solver_config:dict) -> Tuple[dict, float]:
     mapf_solver_name = mapf_solver_config['mapf_solver_name'].lower()
     agent_radius = mapf_solver_config['agent_radius']
@@ -62,10 +78,29 @@ def solve_mapf(map_, agents,mapf_solver_config:dict) -> Tuple[dict, float]:
     # coords through unchanged; those don't match the integer-index grid nodes, so
     # SIPP KeyErrored on sipp_graph[start] and CBS/ICBS silently failed instantly.)
     agents_rt = agents_yaml_to_roadmap_frame(map_, agents)
-    # cdt/rrg/prm roadmaps may not include the exact start/goal as nodes; snap to the
-    # nearest node so every solver (esp. SIPP, which indexes nodes by coordinate) has
-    # an on-node start/goal. No-op for grid/halton where they already are nodes.
-    agents_rt = _snap_agents_to_nodes(map_, agents_rt)
+    if mapf_solver_name == 'sipp':
+        # SIPP runs on the instance's true start/goal nodes only. Snapping to the nearest
+        # node silently changes the instance, and on pruned roadmaps it can land on an
+        # isolated node or merge two agents onto one node, so an off-node start/goal is
+        # reported as a failure (with the reason) instead of being patched over. Roadmaps
+        # generated from the instance embed every start/goal as a node, so this only
+        # triggers when the roadmap and the instance are out of sync.
+        off_nodes = _agents_off_nodes(map_, agents_rt)
+        if off_nodes:
+            solution_info = {
+                "success": False,
+                "runtime": 0.0,
+                "total_iterations": 0,
+                "low_level_iterations": 0,
+                "failure_reason": "start/goal not a roadmap node: " + "; ".join(off_nodes),
+            }
+            solution_info = check_solution_collision({}, agent_radius, solution_info)
+            return summarize_solution({}, solution_info, mapf_solver_config, map_)
+    else:
+        # cdt/rrg/prm roadmaps may not include the exact start/goal as nodes; snap to the
+        # nearest node so CBS/ICBS/LaCAM/CCBS have an on-node start/goal. No-op for
+        # grid/halton where they already are nodes.
+        agents_rt = _snap_agents_to_nodes(map_, agents_rt)
     # Low-level A* (inside CBS/ICBS) may need a larger budget than the high-level CBS iteration cap,
     # especially once constraints are introduced (time-expanded state space).
     try:

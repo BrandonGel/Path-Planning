@@ -24,6 +24,7 @@ import random
 import numpy as np
 from math import sqrt   
 from path_planning.utils.util import set_map_config
+from path_planning.data_generation.dataset_util import read_gen_config_from_yaml
 # Set seeding so that randomness is deterministic
 random.seed(0)
 np.random.seed(0)
@@ -47,37 +48,41 @@ if __name__ == "__main__":
     parser.add_argument("-mapf","--mapf_solver_names",type=str, nargs='+', default=["cbs", "icbs", "sipp"], choices=["cbs", "icbs", "lacam", "lacam_random", "sipp"], help="MAPF solver to use")
     parser.add_argument("-c","--num_cases",type=int, default=25, help="number of cases to generate")
     parser.add_argument("-t","--time_limit",type=int, default=60, help="time_limit for the solver in seconds")
-    parser.add_argument("-m","--max_iterations",type=int, default=1000000, help="max iterations for the solver")
+    parser.add_argument("-m","--max_iterations",type=int, default=10000, help="max iterations for the solver")
     parser.add_argument("-ds","--use_discrete_space",action="store_true",help="use discrete space",)
     parser.add_argument("-dp","--delete_failed_path",action="store_true", help="delete failed path")
     parser.add_argument("-gng","--generate_new_graph",action="store_true", help="generate new graph")
     parser.add_argument("-rs","--resolve_solution",dest="resolve_solution",action="store_true", help="resolve solution")
     parser.add_argument("-cfg","--config",type=str, default='config/map.yaml', help="config file")
+    parser.add_argument("-gen_config","--gen_config",type=str, default='config/gen.yaml', help="start/goal placement config (uniform | gaussian), see config/gen.yaml")
     parser.add_argument("-w","--num_workers",type=int, default=None, help="number of parallel workers for cases (default: auto-detect CPU cores)")
+    parser.add_argument("-heurs","--heuristic_types",type=str, default='',choices=['manhattan', 'euclidean','dijkstra'], help="heuristic type")
+    parser.add_argument("-sample_num","--sample_num",type=int, default=0, help="number of samples to generate")
     args = parser.parse_args()
 
 
     with open(args.config, 'r') as f:
         map_config = yaml.load(f,Loader=yaml.FullLoader)
     map_config = set_map_config(map_config=map_config,args=args)
+    map_config['gen'] = read_gen_config_from_yaml(args.gen_config)
     num_workers=map_config['num_workers']
     base_path = map_config['path']
 
     discrete_config = {
             'use_discrete_space': True,
-            'sample_num': 0,
+            'sample_num': 0 if args.sample_num == 0 else args.sample_num,
             'num_neighbors': 4.0,
             'min_edge_len': 0.1,
             'max_edge_len': 1.1,
-            'heuristic_type': 'manhattan',
+            'heuristic_type': 'manhattan' if args.heuristic_types == '' else args.heuristic_types,
     }
     continuous_config = {
             'use_discrete_space': False,
-            'sample_num': 2000,
+            'sample_num': 2000 if args.sample_num == 0 else args.sample_num,
             'num_neighbors': 15.0,
             'min_edge_len': 0.1,
             'max_edge_len': 5.1,
-            'heuristic_type': 'euclidean',
+            'heuristic_type': 'euclidean' if args.heuristic_types == '' else args.heuristic_types,
     }
     agent_radii=args.agent_radii
     road_map_types=args.road_map_types

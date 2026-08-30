@@ -43,7 +43,7 @@ import yaml
 import os
 from path_planning.gnn.model import get_model
 from torch_geometric.data import HeteroData, Batch
-from path_planning.data_generation.dataset_util import generate_base_case_path, generate_roadmap_path, generate_ground_truth_path, get_graph_file_path, generate_gnn_sampler_path,get_prediction_file_path
+from path_planning.data_generation.dataset_util import generate_base_case_path, generate_roadmap_path, generate_ground_truth_path, get_graph_file_path, generate_gnn_sampler_path,get_prediction_file_path, get_graph_runtime_file_path, write_runtime_yaml
 from torch_geometric.utils import unbatch
 
 # example: 
@@ -642,10 +642,14 @@ def process_single_case_gnn_task(
 
     bounds = config.get("bounds", [[0, 32.0], [0, 32.0]])
     resolution = config.get("resolution", 1.0)
+    t0 = time.perf_counter()
     map_ = GraphSampler(bounds=bounds, resolution=resolution, start=[], goal=[])
     map_.load_graph_sampler(str(graph_file), args={"use_constraint_sweep": False})
+    t_load = time.perf_counter() - t0  # unpickle the source roadmap
+    t0 = time.perf_counter()
     data = normalize_data(map_)
-    return graph_file,data,map_
+    t_normalize = time.perf_counter() - t0  # GraphSampler -> HeteroData features
+    return graph_file, data, map_, (t_load, t_normalize)
 
 def process_gnn_task_batch(
     graph_file_list: List[Path],
@@ -655,16 +659,27 @@ def process_gnn_task_batch(
     device: torch.device,
     gnn_folder_name: str,
     prune_mechanism: Optional[dict] = None,
+    load_time_list: Optional[List[Tuple[float, float]]] = None,
     ):
+    """Run GNN inference on a batch of graphs and save predictions / pruned roadmaps.
 
+    ``load_time_list`` (per graph, ``(load_seconds, normalize_seconds)`` measured in
+    process_single_case_gnn_task) feeds the ``<pruned pickle stem>_runtime.yaml`` sidecar
+    written next to every pruned roadmap. Batched forward passes are attributed to the
+    graphs as an even share of the batch time (``batch_size`` is recorded so it can be undone).
+    """
+    n_graphs = len(data_list)
     data = Batch.from_data_list(data_list)
     data = data.to(device)
     edge_attr_dict = data.edge_attr_dict
+    t0 = time.perf_counter()
     with torch.no_grad():
         try:
             out = model(data.x_dict, data.edge_index_dict, edge_attr_dict)
         except TypeError:
             out = model(data.x_dict, data.edge_index_dict)
+    t_infer = time.perf_counter() - t0
+    t_thr = 0.0
 
     if isinstance(out, dict):
         pred = out["node"].cpu().numpy()
@@ -674,11 +689,13 @@ def process_gnn_task_batch(
     prune_gnn = prune_mechanism.get('prune_gnn', False)
     threshold_values = None
     if prune_gnn:
+        t0 = time.perf_counter()
         x_dict = get_threshold_x_dict(data.x_dict,out)  
         with torch.no_grad():
             threshold = prune_gnn(x_dict, data.edge_index_dict,data.edge_attr_dict,data.batch_dict)
         # threshold = normalize_threshold(threshold, data.batch_dict, out, 'node')
         threshold_values = threshold.cpu().numpy()
+        t_thr = time.perf_counter() - t0
 
     unbatched_indices = []
     unbatched_max_ind = 0
@@ -700,18 +717,50 @@ def process_gnn_task_batch(
             # Get the prune function & value -> save as npy file
             prune_name = get_prune_mechanism_folder(prune_mechanism)
             if prune_name == "":
-                return
+                continue  # (was `return`, which silently skipped the rest of the batch)
             prune_fn = get_prune_function(prune_mechanism)
             k_hop = prune_mechanism.get('k_hop', 0)
             threshold_value = threshold_values[ii] if threshold_values is not None else 0
 
+            t0 = time.perf_counter()
             prune_value = prune_fn(unbatched_pred, threshold_value)
+            map_pruned, kept_indices = prune_map(map_, prune_value, k_hop)
+            t_prune = time.perf_counter() - t0
+
+            t0 = time.perf_counter()
             prediction_file = get_prediction_file_path(gnn_sampler_path, prune_name)
             np.save(prediction_file, prune_value)
+            pruned_graph_name = f"graph_sampler_{prune_name}.pkl"
+            pruned_graph_file = get_graph_file_path(gnn_sampler_path, pruned_graph_name)
+            map_pruned.save_graph_sampler(pruned_graph_file)
+            t_save = time.perf_counter() - t0
 
-            map_pruned, kept_indices = prune_map(map_, prune_value, k_hop)
-            graph_file = get_graph_file_path(gnn_sampler_path, f"graph_sampler_{prune_name}.pkl")
-            map_pruned.save_graph_sampler(graph_file)
+            t_load, t_normalize = (
+                (float(load_time_list[ii][0]), float(load_time_list[ii][1]))
+                if load_time_list is not None else (0.0, 0.0)
+            )
+            breakdown = {
+                "load": t_load,
+                "normalize": t_normalize,
+                "inference": t_infer / n_graphs,
+                "threshold": t_thr / n_graphs,
+                "prune": t_prune,
+                "save": t_save,
+            }
+            write_runtime_yaml(
+                get_graph_runtime_file_path(gnn_sampler_path, pruned_graph_name),
+                {
+                    "prune_name": prune_name,
+                    "source_graph": graph_file.name,
+                    "runtime": sum(breakdown.values()),
+                    "runtime_breakdown": breakdown,
+                    "batch_size": n_graphs,
+                    "device": str(device),
+                    "num_nodes": len(map_pruned.nodes),
+                    "num_edges": len(map_pruned.edges),
+                    "source_num_nodes": len(map_.nodes),
+                },
+            )
 
 def create_gnn_map_tasks(
         tasks,
@@ -794,16 +843,19 @@ def create_gnn_map_tasks(
     data_list = []
     map_list = []
     graph_file_list = []
+    load_time_list = []
     for task in tqdm(tasks, desc="GNN tasks", disable=not verbose):
-        graph_file, data, map_ = process_single_case_gnn_task(task, merged_config)
+        graph_file, data, map_, t_load_norm = process_single_case_gnn_task(task, merged_config)
         data_list.append(data)
         graph_file_list.append(graph_file)
         map_list.append(map_)
+        load_time_list.append(t_load_norm)
         if len(data_list) >= batch_size or task == tasks[-1]:
-            process_gnn_task_batch(graph_file_list, data_list, map_list, model, device, gnn_folder_name, prune_mechanism)
+            process_gnn_task_batch(graph_file_list, data_list, map_list, model, device, gnn_folder_name, prune_mechanism, load_time_list=load_time_list)
             data_list = []
             map_list = []
             graph_file_list = []
+            load_time_list = []
 
     if verbose:
         print(f"GNN evaluation complete: {len(tasks)} tasks saved under */{gnn_folder_name}/")
