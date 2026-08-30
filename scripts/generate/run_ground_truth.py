@@ -38,6 +38,7 @@ from path_planning.data_generation.dataset_ground_truth_map import create_maps
 import argparse
 import yaml
 from path_planning.utils.util import set_map_config
+from path_planning.data_generation.dataset_util import read_gen_config_from_yaml
 
 if __name__ == "__main__":
     """Main entry point for dataset generation."""
@@ -60,6 +61,7 @@ if __name__ == "__main__":
     parser.add_argument("-w","--num_workers",type=int, default=1, help="number of parallel workers for cases (default: auto-detect CPU cores)")
     parser.add_argument("-verbose","--verbose",dest="verbose",action="store_true", help="verbose")
     parser.add_argument("-cfg","--config",type=str, default='config/map.yaml', help="config file")
+    parser.add_argument("-gen_config","--gen_config",type=str, default='config/gen.yaml', help="start/goal placement config (uniform | gaussian), see config/gen.yaml")
 
     args = parser.parse_args()
     
@@ -75,6 +77,7 @@ if __name__ == "__main__":
     map_config['max_edge_len'] = 1.1
     map_config['heuristic_type'] = "manhattan"
     map_config = set_map_config(map_config=map_config,args=args)
+    map_config['gen'] = read_gen_config_from_yaml(args.gen_config)
 
     base_path = map_config['path']
     nb_agents = map_config['nb_agents']

@@ -50,6 +50,7 @@ from path_planning.data_generation.dataset_label import label_dataset
 from path_planning.data_generation.dataset_generate import generate_graph_samples
 from path_planning.utils.util import set_map_config
 from path_planning.data_generation.dataset_ground_truth_map import create_maps
+from path_planning.data_generation.dataset_util import read_gen_config_from_yaml
 
 if __name__ == "__main__":
     """Main entry point for dataset generation."""
@@ -85,6 +86,7 @@ if __name__ == "__main__":
     parser.add_argument("-spfr","--samp_from_prob_map_ratio",type=float, default=0.2, help="sample from prob map ratio")
     parser.add_argument("-num_hops","--num_hops",type=int, default=10, help="number of hops")
     parser.add_argument("-cfg","--config",type=str, default='config/map.yaml', help="config file")
+    parser.add_argument("-gen_config","--gen_config",type=str, default='config/gen.yaml', help="start/goal placement config (uniform | gaussian), see config/gen.yaml")
     parser.add_argument("-w","--num_workers",type=int, default=None, help="number of parallel workers for cases (default: auto-detect CPU cores)")
     parser.add_argument("-verbose","--verbose",action="store_true", help="verbose")
     parser.set_defaults(is_start_goal_discrete=True)
@@ -94,6 +96,7 @@ if __name__ == "__main__":
     with open(args.config, 'r') as f:
         map_config = yaml.load(f,Loader=yaml.FullLoader)
     map_config = set_map_config(map_config=map_config,args=args)
+    map_config['gen'] = read_gen_config_from_yaml(args.gen_config)
     map_config['agent_velocity'] = 0.0
     map_config['road_map_type'] = "grid"
     map_config['use_discrete_space'] = True
