@@ -1,0 +1,8 @@
+# Gaussian-biased start/goal placement (see config/gen.yaml for the field reference).
+# Use a separate -s root for datasets generated with this config, e.g.
+#   -s /home/bho36/Dropbox/Team_Path_Planning/brandon_graph_data/test_gaussian
+type: gaussian
+gaussian:
+  std_scale: 0.1         # std = 0.1 * 64 = 6.4 world units on the 64x64 map
+  max_attempts: 100
+  separate_means: true   # starts cluster around one random mean, goals around another

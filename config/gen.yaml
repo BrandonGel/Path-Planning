@@ -1,0 +1,9 @@
+# Start/goal placement distribution for instance generation (InputFile.gen_input).
+# Pass with -gen_config to run_all_solvers.py / generate/run_all.py / generate/run_ground_truth.py.
+# Paths do not encode the mode: generate gaussian datasets into a separate -s root
+# (e.g. .../brandon_graph_data/test_gaussian) so they never mix with uniform ones.
+type: uniform            # uniform (default, today's behaviour) | gaussian
+gaussian:
+  std_scale: 0.1         # std = std_scale * map side length, per axis (world units)
+  max_attempts: 100      # gaussian draws per position before falling back to a uniform draw
+  separate_means: true   # true: starts and goals get independent random means; false: shared mean
