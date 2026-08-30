@@ -645,9 +645,11 @@ def process_single_case_gnn_task(
     t0 = time.perf_counter()
     map_ = GraphSampler(bounds=bounds, resolution=resolution, start=[], goal=[])
     map_.load_graph_sampler(str(graph_file), args={"use_constraint_sweep": False})
+    t_load = time.perf_counter() - t0  # unpickle the source roadmap
+    t0 = time.perf_counter()
     data = normalize_data(map_)
-    t_load = time.perf_counter() - t0  # load + normalise: part of the reconstruction cost
-    return graph_file,data,map_,t_load
+    t_normalize = time.perf_counter() - t0  # GraphSampler -> HeteroData features
+    return graph_file, data, map_, (t_load, t_normalize)
 
 def process_gnn_task_batch(
     graph_file_list: List[Path],
@@ -657,11 +659,11 @@ def process_gnn_task_batch(
     device: torch.device,
     gnn_folder_name: str,
     prune_mechanism: Optional[dict] = None,
-    load_time_list: Optional[List[float]] = None,
+    load_time_list: Optional[List[Tuple[float, float]]] = None,
     ):
     """Run GNN inference on a batch of graphs and save predictions / pruned roadmaps.
 
-    ``load_time_list`` (per graph, seconds spent loading + normalising in
+    ``load_time_list`` (per graph, ``(load_seconds, normalize_seconds)`` measured in
     process_single_case_gnn_task) feeds the ``<pruned pickle stem>_runtime.yaml`` sidecar
     written next to every pruned roadmap. Batched forward passes are attributed to the
     graphs as an even share of the batch time (``batch_size`` is recorded so it can be undone).
@@ -733,9 +735,13 @@ def process_gnn_task_batch(
             map_pruned.save_graph_sampler(pruned_graph_file)
             t_save = time.perf_counter() - t0
 
-            t_load = float(load_time_list[ii]) if load_time_list is not None else 0.0
+            t_load, t_normalize = (
+                (float(load_time_list[ii][0]), float(load_time_list[ii][1]))
+                if load_time_list is not None else (0.0, 0.0)
+            )
             breakdown = {
-                "load_normalize": t_load,
+                "load": t_load,
+                "normalize": t_normalize,
                 "inference": t_infer / n_graphs,
                 "threshold": t_thr / n_graphs,
                 "prune": t_prune,
@@ -839,11 +845,11 @@ def create_gnn_map_tasks(
     graph_file_list = []
     load_time_list = []
     for task in tqdm(tasks, desc="GNN tasks", disable=not verbose):
-        graph_file, data, map_, t_load = process_single_case_gnn_task(task, merged_config)
+        graph_file, data, map_, t_load_norm = process_single_case_gnn_task(task, merged_config)
         data_list.append(data)
         graph_file_list.append(graph_file)
         map_list.append(map_)
-        load_time_list.append(t_load)
+        load_time_list.append(t_load_norm)
         if len(data_list) >= batch_size or task == tasks[-1]:
             process_gnn_task_batch(graph_file_list, data_list, map_list, model, device, gnn_folder_name, prune_mechanism, load_time_list=load_time_list)
             data_list = []
