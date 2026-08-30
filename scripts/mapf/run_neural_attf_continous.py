@@ -14,7 +14,7 @@ registered as graph nodes up front (``register_task_endpoints=True``) so A* can
 reach them at their exact coordinates.
 
 Usage:
-    python scripts/mapf/run_neural_attf_continous.py
+    python scripts/mapf/run_neural_attf_continous.py [roadmap_type] [sweep_backend] [--map path/to/mapd.yaml]
 
 Outputs:
     figs/neural_attf/neural_attf_continuous.png
@@ -41,7 +41,7 @@ from path_planning.multi_agent_planner.decentralized.neural_attf.tasks_generator
     gen_mapd_tasks,
 )
 from path_planning.utils.util import points_to_roadmap_frame, set_global_seed
-from run_neural_attf import _make_map_mapd, _solve_and_save
+from run_neural_attf import _make_map_mapd, _map_tag, _map_yaml_from_argv, _solve_and_save
 
 
 def _run_continuous(
@@ -63,7 +63,7 @@ def _run_continuous(
     MAPD endpoints, ``prm``/``halton`` keep them reachable (KNN connection);
     topology-defining types (cdt/voronoi/rrg) may not route through them.
     """
-    tag = f"continuous_{roadmap_type}"
+    tag = f"continuous_{roadmap_type}{_map_tag(map_yaml)}"
     print(f"\n=== Neural-ATTF (continuous {roadmap_type}) | {os.path.basename(map_yaml)} | radius={agent_radius} ===")
 
     rng = random.Random(seed)
@@ -136,14 +136,15 @@ def _run_continuous(
 
 
 def main():
-    # CLI: `python run_neural_attf_continous.py [roadmap_type] [sweep_backend]`
+    # CLI: `python run_neural_attf_continous.py [roadmap_type] [sweep_backend] [--map path/to/mapd.yaml]`
     # roadmap_type: prm (default), rrg, cdt, voronoi, halton, midpoints, centroids, dt
     # sweep_backend: auto (default; shapely in 2D, cgal in 3D+), or force cgal/shapely
+    map_yaml = _map_yaml_from_argv()  # strip --map first so positionals keep their slots
     roadmap_type = sys.argv[1] if len(sys.argv) > 1 else "halton"
     sweep_backend = sys.argv[2] if len(sys.argv) > 2 else "auto"
     set_global_seed(42)
     _run_continuous(
-        map_yaml="path_planning/maps/2d/2d_mapd.yaml",
+        map_yaml=map_yaml,
         horizon=2000,
         seed=42,
         agent_radius=0.5,
