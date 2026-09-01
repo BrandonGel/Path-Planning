@@ -149,21 +149,7 @@ class CTopPRM:
     # Public API
     # ------------------------------------------------------------------
 
-    def find_distinct_paths(
-        self, pairs: List[Tuple[Endpoint, Endpoint]]
-    ) -> Dict[PairKey, List[np.ndarray]]:
-        """Plan topologically distinct paths for every requested pair.
-
-        Args:
-            pairs: (start, goal) pairs; each endpoint is a node index or a
-                coordinate in the roadmap-node frame (resolved exactly via
-                ``node_index_dict``, else snapped to the nearest node).
-
-        Returns:
-            ``{(start_idx, goal_idx): [path, ...]}`` with paths as
-            ``np.ndarray (M, dim)`` waypoint polylines sorted by length
-            (shortest first); an unreachable pair maps to ``[]``.
-        """
+    def set_up_distinct_paths(self, pairs: List[Tuple[Endpoint, Endpoint]]) -> None:
         resolved = [
             (self.resolve_endpoint(s), self.resolve_endpoint(g)) for s, g in pairs
         ]
@@ -204,6 +190,24 @@ class CTopPRM:
         self._collect_cluster_connections()
         self._refine_clusters()
         self._find_min_cluster_tours()
+        return resolved, budgets
+
+    def find_distinct_paths(
+        self, pairs: List[Tuple[Endpoint, Endpoint]]
+    ) -> Dict[PairKey, List[np.ndarray]]:
+        """Plan topologically distinct paths for every requested pair.
+
+        Args:
+            pairs: (start, goal) pairs; each endpoint is a node index or a
+                coordinate in the roadmap-node frame (resolved exactly via
+                ``node_index_dict``, else snapped to the nearest node).
+
+        Returns:
+            ``{(start_idx, goal_idx): [path, ...]}`` with paths as
+            ``np.ndarray (M, dim)`` waypoint polylines sorted by length
+            (shortest first); an unreachable pair maps to ``[]``.
+        """
+        resolved,budgets = self.set_up_distinct_paths(pairs)
 
         results: Dict[PairKey, List[np.ndarray]] = {}
         for s, g in resolved:
