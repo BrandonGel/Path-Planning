@@ -141,6 +141,9 @@ class CTopPRM:
         self._connections: Dict[PairKey, List[Connection]] = {}
         self._pair_deform: Dict[PairKey, Tuple[tuple, bool]] = {}
         self._min_cluster_paths: Dict[PairKey, Tuple[np.ndarray, float]] = {}
+        # Geometry-keyed memo for path-vs-path deformability verdicts; with
+        # unshortened paths the same polylines recur across pairs and passes.
+        self._deform_cache: Dict[tuple, bool] = {}
 
     # ------------------------------------------------------------------
     # Public API
@@ -206,6 +209,13 @@ class CTopPRM:
         for s, g in resolved:
             key = (s, g)
             if key in results:
+                continue
+            # The problem is symmetric (undirected roadmap, symmetric budgets
+            # and cluster tours), so a pair whose reverse was already planned
+            # is answered by reversing those paths instead of recomputing.
+            reverse = results.get((g, s))
+            if reverse is not None:
+                results[key] = [np.ascontiguousarray(p[::-1]) for p in reverse]
                 continue
             if not math.isfinite(budgets[key]):
                 logger.warning("pair %s: goal unreachable on the roadmap", key)
@@ -616,12 +626,22 @@ class CTopPRM:
             paths, endpoints_dist, self.cutoff_distance_ratio_to_shortest
         )
         paths.sort(key=path_length)
-        paths = remove_equivalent_paths(self.map, paths, self.geometry)
-        paths = [
-            self._shorten(self._shorten(p, forward=False), forward=True) for p in paths
-        ]
+        paths = remove_equivalent_paths(
+            self.map, paths, self.geometry, cache=self._deform_cache
+        )
+        if self.shortening_mode != "none":
+            paths = [
+                self._shorten(self._shorten(p, forward=False), forward=True)
+                for p in paths
+            ]
+        # The second dedup pass is NOT redundant even with unchanged paths:
+        # a pass compares against the original slot path, not the shorter
+        # representative that replaces it, so it can prune further. The
+        # cache makes its repeated comparisons free.
         paths.sort(key=path_length)
-        paths = remove_equivalent_paths(self.map, paths, self.geometry)
+        paths = remove_equivalent_paths(
+            self.map, paths, self.geometry, cache=self._deform_cache
+        )
         paths.sort(key=path_length)
         if self.max_paths_per_pair is not None:
             paths = paths[: self.max_paths_per_pair]

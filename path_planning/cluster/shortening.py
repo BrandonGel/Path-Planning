@@ -133,9 +133,22 @@ def points_free(map_, pts: np.ndarray, cfg: GeometryConfig) -> np.ndarray:
     in_bounds = np.all((idx >= 0) & (idx < shape), axis=1)
     free = np.zeros(len(pts), dtype=bool)
     if np.any(in_bounds):
-        vals = map_.type_map[tuple(idx[in_bounds].T)]
-        free[in_bounds] = (vals != TYPES.OBSTACLE) & (vals != TYPES.INFLATION)
+        free[in_bounds] = _get_free_grid(map_)[tuple(idx[in_bounds].T)]
     return free
+
+
+def _get_free_grid(map_) -> np.ndarray:
+    """Boolean not-OBSTACLE/not-INFLATION grid, cached on the map object.
+
+    Like the cached ESDF gradients, this goes stale if obstacles change
+    after the first query; delete ``map_._ctopprm_free_grid`` to refresh.
+    """
+    grid = getattr(map_, "_ctopprm_free_grid", None)
+    if grid is None:
+        data = np.asarray(map_.type_map.data)
+        grid = (data != TYPES.OBSTACLE) & (data != TYPES.INFLATION)
+        map_._ctopprm_free_grid = grid
+    return grid
 
 
 def segment_free(map_, p1: np.ndarray, p2: np.ndarray, cfg: GeometryConfig) -> bool:
@@ -422,12 +435,20 @@ def is_deformable(map_, path1: np.ndarray, path2: np.ndarray, cfg: GeometryConfi
     # straight connection at `collision_distance_check` (like the sampled
     # C++ predicate) instead of n per-segment DDA calls — this test only
     # steers clustering/dedup, the exact DDA stays in path construction.
+    # Each connection is sampled by its OWN gap (ragged batch), not the max
+    # gap: near the shared endpoints gaps shrink to zero and a uniform grid
+    # would waste most of its points there.
     gaps = np.linalg.norm(s2 - s1, axis=1)
-    m = int(math.ceil(gaps.max() / cfg.collision_distance_check)) + 1
-    m = min(max(m, 2), 512)
-    t = np.linspace(0.0, 1.0, m)[:, None, None]
-    pts = s1[None, :, :] * (1.0 - t) + s2[None, :, :] * t
-    return bool(np.all(points_free(map_, pts.reshape(-1, s1.shape[1]), cfg)))
+    counts = np.clip(
+        np.ceil(gaps / cfg.collision_distance_check).astype(int) + 1, 2, 512
+    )
+    total = int(counts.sum())
+    seg = np.repeat(np.arange(n), counts)
+    offsets = np.concatenate([[0], np.cumsum(counts)[:-1]])
+    within = np.arange(total) - np.repeat(offsets, counts)
+    t = (within / (counts[seg] - 1))[:, None]
+    pts = s1[seg] * (1.0 - t) + s2[seg] * t
+    return bool(np.all(points_free(map_, pts, cfg)))
 
 
 def remove_too_long_paths(
@@ -451,14 +472,44 @@ def remove_too_long_paths(
     ]
 
 
+def deformability_key(path1: np.ndarray, path2: np.ndarray) -> tuple:
+    """Canonical cache key for ``is_deformable`` on a pair of polylines.
+
+    The test is symmetric under swapping the two paths and under reversing
+    both together (same correspondence segments either way), so both
+    variants collapse to one key.
+    """
+    fwd = tuple(sorted((path1.tobytes(), path2.tobytes())))
+    rev = tuple(sorted((path1[::-1].tobytes(), path2[::-1].tobytes())))
+    return min(fwd, rev)
+
+
+def is_deformable_cached(
+    map_, path1: np.ndarray, path2: np.ndarray, cfg: GeometryConfig,
+    cache: Optional[dict],
+) -> bool:
+    """``is_deformable`` memoized in ``cache`` (keyed on path geometry)."""
+    if cache is None:
+        return is_deformable(map_, path1, path2, cfg)
+    key = deformability_key(path1, path2)
+    hit = cache.get(key)
+    if hit is None:
+        hit = is_deformable(map_, path1, path2, cfg)
+        cache[key] = hit
+    return hit
+
+
 def remove_equivalent_paths(
-    map_, paths: List[np.ndarray], cfg: GeometryConfig
+    map_, paths: List[np.ndarray], cfg: GeometryConfig,
+    cache: Optional[dict] = None,
 ) -> List[np.ndarray]:
     """Port of C++ ``removeEquivalentPaths`` (:1957).
 
     Greedy grouping by pairwise deformability, keeping the shortest
     representative of each group. Order-dependent by design (deformability
     is not transitive); callers pass length-sorted input for determinism.
+    ``cache`` (optional dict) memoizes deformability verdicts across calls —
+    with unshortened paths the same geometry recurs across pairs and passes.
     """
     paths = list(paths)
     i = 0
@@ -467,7 +518,7 @@ def remove_equivalent_paths(
         keep_len = path_length(keep)
         remaining = []
         for j in range(i + 1, len(paths)):
-            if is_deformable(map_, paths[i], paths[j], cfg):
+            if is_deformable_cached(map_, paths[i], paths[j], cfg, cache):
                 l_j = path_length(paths[j])
                 if l_j < keep_len:
                     keep, keep_len = paths[j], l_j
