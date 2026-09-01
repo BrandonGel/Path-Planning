@@ -1131,6 +1131,13 @@ class NeuralATTF:
                 rest_forever=True,
             )
         if not path:
+            if self.low_level == "sipp" and self._blocks_pending_task(tuple(agent_pos)):
+                # A squatter stuck on a cell some task still needs: publish its escape
+                # corridor like a failed task leg's, so idle agents resting on it are
+                # nudged aside (step 5) and others stop resting on it (footprints).
+                esc = self._static_route(tuple(agent_pos), tuple(target))
+                if esc:
+                    self.token["blocked_routes"][agent_name] = esc
             print(f"Solution to non-task endpoint not found for {agent_name}; trying deadlock recovery.")
             self.deadlock_recovery(agent_name, agent_pos, all_idle_agents, all_delayed_agents, self.deadlock_radius)
             return False
@@ -1220,6 +1227,80 @@ class NeuralATTF:
             candidates.append((d, cand))
         candidates.sort(key=lambda x: x[0])
         return [c for _, c in candidates]
+
+    def _hold_off_squatted_goal(self, name, pos, all_idle_agents, all_delayed_agents) -> bool:
+        """Handle a task-leg failure whose target is squatted by an idle agent.
+
+        The hot-cell standoff: a just-finished agent rests on a delivery cell it
+        cannot leave, while the carriers queuing for that cell rest on the cell's
+        only exit corridors — the squatter is sealed by the very agents waiting on
+        it, and deadlock recovery just ejects the waiters far away. Instead:
+
+        - if the squatter can still statically drain to a free parking endpoint,
+          the waiter simply stays where it is (no recovery ejection);
+        - if it is sealed, but clearing the waiters' resting footprints opens a
+          drain, this waiter relocates to a nearby non-interfering rest spot that
+          is also OFF its own failed leg's corridor (its assignment is kept — a
+          repair pair re-plans the leg once the cell frees);
+        - if it is sealed by agents that are not waiters, there is nothing this
+          agent can do; it waits in place (the squatter's own escape route is
+          published via blocked_routes, so the step-5 re-router works on them).
+
+        Returns True when the failure is a squat (handled here: relocated or
+        deliberately waiting), False when it is not — the caller then falls back
+        to plain deadlock recovery.
+        """
+        route = self.token["blocked_routes"].get(name)
+        if not route:
+            return False
+        wp = tuple(route[-1])
+        clearance = 2.0 * self.agent_radius if self.agent_radius > 0 else 1e-9
+        squatter = next(
+            (a for a, p in self.token["agents"].items()
+             if a != name and len(p) == 1 and math.dist(tuple(p[0]), wp) <= clearance),
+            None,
+        )
+        if squatter is None:
+            return False
+        exits = self._free_parking_endpoints_sorted(wp, exclude=wp)[:3]
+        if not exits:
+            return True  # nowhere for the squatter to drain to anyway; just wait
+        blocked_all = self._idle_blocked_nodes(squatter, wp)
+        if any(self._static_route(wp, e, frozenset(blocked_all)) for e in exits):
+            return True  # squatter can leave on its own; wait instead of recovering away
+        # Sealed. Would clearing the waiters (this tick's blocked-route owners,
+        # this agent included) open a drain?
+        yielders = {name, squatter} | set(self.token["blocked_routes"])
+        open_blocked: set = set()
+        for a, p in self.token["agents"].items():
+            if a in yielders or len(p) != 1:
+                continue
+            q = tuple(p[0])
+            if math.dist(q, wp) <= clearance:
+                continue
+            open_blocked |= self._covered_nodes(q, q)
+        if not any(self._static_route(wp, e, frozenset(open_blocked)) for e in exits):
+            return True  # sealed by non-waiters; nothing this agent can fix by moving
+        # This waiter's rest is (part of) the seal: step aside, off its own corridor.
+        for target in self._close_non_interfering_nodes(pos, name, self.deadlock_radius):
+            if any(math.dist(target, q) <= clearance for q in route):
+                continue
+            if not self._statically_reachable(name, pos, target):
+                continue
+            path = self.plan(
+                name, pos, target, all_idle_agents, all_delayed_agents, None, 0, rest_forever=True
+            )
+            if not path:
+                continue
+            self.update_ends(pos, name)
+            self.token["agents"][name] = [_wp(s.location.point) for s in path[name]]
+            self.token["n_replans"] += 1
+            print(
+                f"[NeuralATTF] {name} yields the corridor to {tuple(round(c, 1) for c in wp)} "
+                f"(squatter {squatter}); waits at {tuple(round(c, 1) for c in target)}"
+            )
+            return True
+        return True  # could not step aside; wait rather than recovery-eject
 
     def deadlock_recovery(self, agent_name, agent_pos, all_idle_agents, all_delayed_agents, r: float):
         self.token["deadlock_count_per_agent"][agent_name] += 1
@@ -1447,6 +1528,10 @@ class NeuralATTF:
                 if joined is None:
                     if self.low_level == "sipp":
                         self._note_blocked_route(agent_name, agent_pos, waypoints, legs_tried)
+                        if self._hold_off_squatted_goal(
+                            agent_name, agent_pos, all_idle_agents, all_delayed_agents
+                        ):
+                            continue
                     if len(self.token["delayed_agents"]) == 0:
                         self.deadlock_recovery(
                             agent_name, agent_pos, all_idle_agents, all_delayed_agents, self.deadlock_radius
@@ -1459,11 +1544,16 @@ class NeuralATTF:
                 if closest_task_name not in self.token["assigned_tasks_times"]:
                     self.token["assigned_tasks_times"][closest_task_name] = t
                 self.token["assigned_tasks_agent"][closest_task_name] = agent_name
-                if agent_name not in self.token["agents_to_tasks"]:
-                    self.token["tasks"].pop(closest_task_name, None)
-                    task = available_tasks.pop(closest_task_name, closest_task)
-                else:
-                    task = closest_task
+                # Always retire the task from the pending pool. An agent that is
+                # parked (or driving to parking) carries a "safe_idle" entry in
+                # agents_to_tasks, so gating the pop on membership leaked every task
+                # assigned to such an agent: it stayed "pending" forever, and by the
+                # drain phase dozens of long-finished deliveries still counted as
+                # active goals — parking clearance, safe-idle checks and interference
+                # footprints then walled off the whole delivery strip. For a repair
+                # pair (agent resuming its own in-progress task) both pops are no-ops.
+                self.token["tasks"].pop(closest_task_name, None)
+                task = available_tasks.pop(closest_task_name, closest_task)
                 if agent_name in self.token["delayed_agents_to_reach_task_start"]:
                     self.token["delayed_agents_to_reach_task_start"].remove(agent_name)
                 self.update_ends(agent_pos, agent_name)
