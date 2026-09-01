@@ -1131,13 +1131,22 @@ class NeuralATTF:
                 rest_forever=True,
             )
         if not path:
-            if self.low_level == "sipp" and self._blocks_pending_task(tuple(agent_pos)):
-                # A squatter stuck on a cell some task still needs: publish its escape
-                # corridor like a failed task leg's, so idle agents resting on it are
-                # nudged aside (step 5) and others stop resting on it (footprints).
-                esc = self._static_route(tuple(agent_pos), tuple(target))
-                if esc:
-                    self.token["blocked_routes"][agent_name] = esc
+            if self.low_level == "sipp":
+                if self._blocks_pending_task(tuple(agent_pos)):
+                    # A squatter stuck on a cell some task still needs: publish its
+                    # escape corridor like a failed task leg's, so idle agents resting
+                    # on it are nudged aside (step 5) and others stop resting on it
+                    # (footprints).
+                    esc = self._static_route(tuple(agent_pos), tuple(target))
+                    if esc:
+                        self.token["blocked_routes"][agent_name] = esc
+                else:
+                    # Not blocking any task cell: rest where it is (back-off retries
+                    # parking later). Recovery-hopping unparkable agents around a
+                    # congested drain region reseals random corridors every few ticks
+                    # and keeps the region from ever settling; if this agent does
+                    # block a mover or a corridor, the step-5 re-router moves it.
+                    return False
             print(f"Solution to non-task endpoint not found for {agent_name}; trying deadlock recovery.")
             self.deadlock_recovery(agent_name, agent_pos, all_idle_agents, all_delayed_agents, self.deadlock_radius)
             return False
@@ -1246,22 +1255,42 @@ class NeuralATTF:
           agent can do; it waits in place (the squatter's own escape route is
           published via blocked_routes, so the step-5 re-router works on them).
 
-        Returns True when the failure is a squat (handled here: relocated or
-        deliberately waiting), False when it is not — the caller then falls back
-        to plain deadlock recovery.
+        The same holding logic applies when the corridor is sealed MID-route by
+        resting agents while the goal itself is free: recovery ejection would move
+        this agent (and its recorded route, and with it the nudge pressure) every
+        tick, so it holds position and lets the re-router work the resters off
+        the published route instead.
+
+        Returns True when the failure is rester-caused (handled here: relocated
+        or deliberately waiting), False when it is not — the caller then falls
+        back to plain deadlock recovery.
         """
         route = self.token["blocked_routes"].get(name)
         if not route:
             return False
         wp = tuple(route[-1])
         clearance = 2.0 * self.agent_radius if self.agent_radius > 0 else 1e-9
+        # Idle agents resting on the failed leg's corridor. If there are none, the
+        # failure is not rester-caused (moving congestion, SIPP timing): fall back
+        # to plain deadlock recovery.
+        blockers = [
+            a for a, p in self.token["agents"].items()
+            if a != name and len(p) == 1
+            and any(math.dist(tuple(p[0]), tuple(q)) <= clearance for q in route)
+        ]
+        if not blockers:
+            return False
         squatter = next(
-            (a for a, p in self.token["agents"].items()
-             if a != name and len(p) == 1 and math.dist(tuple(p[0]), wp) <= clearance),
+            (a for a in blockers if math.dist(tuple(self.token["agents"][a][0]), wp) <= clearance),
             None,
         )
         if squatter is None:
-            return False
+            # Corridor sealed mid-route while the goal itself is free. Recovery
+            # ejection would move this agent every tick, so its recorded route (and
+            # with it the step-5 nudge pressure) would never stay on one corridor.
+            # Hold position instead: the route is published via blocked_routes and
+            # the re-router works the resters off it tick by tick.
+            return True
         exits = self._free_parking_endpoints_sorted(wp, exclude=wp)[:3]
         if not exits:
             return True  # nowhere for the squatter to drain to anyway; just wait
@@ -1282,8 +1311,11 @@ class NeuralATTF:
         if not any(self._static_route(wp, e, frozenset(open_blocked)) for e in exits):
             return True  # sealed by non-waiters; nothing this agent can fix by moving
         # This waiter's rest is (part of) the seal: step aside, off its own corridor.
+        # The corridor stand-off gets an extra half-clearance pad: parallel twin
+        # lanes sit barely one clearance apart, and a rest that clears the corridor
+        # by centimetres leaves the squatter no margin to actually drive it.
         for target in self._close_non_interfering_nodes(pos, name, self.deadlock_radius):
-            if any(math.dist(target, q) <= clearance for q in route):
+            if any(math.dist(target, q) <= 1.5 * clearance for q in route):
                 continue
             if not self._statically_reachable(name, pos, target):
                 continue
@@ -1636,6 +1668,12 @@ class NeuralATTF:
         # leg unplannable in the first place, so it must be nudged off it too, or
         # the leg (and the task) never gets a path at all.
         moving_cover: dict = {}
+        # Owners with a COMMITTED path over each node, kept separate from mere
+        # blocked-route owners: an immovable blocker invalidates only committed
+        # motion. Re-planning a blocked-route owner would cancel whatever it just
+        # committed instead (e.g. its yield sidestep off a squatted goal's
+        # corridor) and freeze it in place tick after tick.
+        path_owner: dict = {}
         for name, path in self.token["agents"].items():
             if len(path) <= 1:
                 continue
@@ -1643,6 +1681,7 @@ class NeuralATTF:
                 prev = path[i - 1] if i >= 1 else path[i]
                 for c in self._covered_nodes(prev, path[i]):
                     moving_cover.setdefault(tuple(c), set()).add(name)
+                    path_owner.setdefault(tuple(c), set()).add(name)
         for name, route in self.token.get("blocked_routes", {}).items():
             for i in range(len(route)):
                 prev = route[i - 1] if i >= 1 else route[i]
@@ -1686,6 +1725,12 @@ class NeuralATTF:
             ]
             committed = False
             for target in parking:
+                if has_task and self.admissible_heuristic(target, pos) > self.deadlock_radius:
+                    # A nudged task owner stays local: shipping the last carrier to a
+                    # far endpoint costs the whole drain another round trip. Nearby
+                    # endpoints only; otherwise the close-node fallback below keeps
+                    # it beside its goal.
+                    continue
                 if not self._statically_reachable(name, pos, target):
                     continue
                 new_path = self.plan(
@@ -1731,6 +1776,13 @@ class NeuralATTF:
             # their committed paths are invalid: re-plan each of them against the
             # blocker's (now permanent) footprint before they drive into it. (The grid
             # low level already treats idle agents as static obstacles when planning.)
-            for mover in sorted(movers):
+            # Only owners whose COMMITTED path covers the blocker qualify — a
+            # blocked-route owner's committed motion (its yield sidestep) is
+            # elsewhere and must not be cancelled.
+            path_movers = set()
+            for h in hits:
+                path_movers |= path_owner.get(cover_pts[h], set())
+            path_movers.discard(name)
+            for mover in sorted(path_movers):
                 if len(self.token["agents"].get(mover, [])) > 1:
                     self._replan_mover(mover)
