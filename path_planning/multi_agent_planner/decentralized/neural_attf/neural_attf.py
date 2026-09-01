@@ -1285,12 +1285,17 @@ class NeuralATTF:
             None,
         )
         if squatter is None:
-            # Corridor sealed mid-route while the goal itself is free. Recovery
-            # ejection would move this agent every tick, so its recorded route (and
-            # with it the step-5 nudge pressure) would never stay on one corridor.
-            # Hold position instead: the route is published via blocked_routes and
-            # the re-router works the resters off it tick by tick.
-            return True
+            # Corridor sealed mid-route while the goal itself is free. Holding
+            # position is QUEUE behaviour and only earns its keep at the jam
+            # itself: recovery ejection there would move this agent (and its
+            # recorded route, and with it the step-5 nudge pressure) every tick.
+            # An agent far from every blocking rester is not queuing — freezing
+            # it across the plant starves its task, so it keeps the old recovery
+            # behaviour instead.
+            near_jam = min(
+                math.dist(tuple(pos), tuple(self.token["agents"][a][0])) for a in blockers
+            ) <= self.deadlock_radius
+            return near_jam
         exits = self._free_parking_endpoints_sorted(wp, exclude=wp)[:3]
         if not exits:
             return True  # nowhere for the squatter to drain to anyway; just wait
