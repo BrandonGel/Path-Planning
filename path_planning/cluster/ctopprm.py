@@ -246,6 +246,52 @@ class CTopPRM:
         _, nn = self._kd_tree.query(np.asarray(coord, dtype=float))
         return int(nn)
 
+    def used_node_indices(
+        self, results: Dict[PairKey, List[np.ndarray]]
+    ) -> np.ndarray:
+        """Roadmap node indices appearing as waypoints in planned paths.
+
+        Waypoints are matched to nodes by exact coordinates. With
+        ``shortening_mode="none"`` every waypoint is a roadmap node, so the
+        match is complete; shortened paths contain free continuous points
+        that belong to no node — those are skipped with a warning.
+
+        Args:
+            results: Output of :meth:`find_distinct_paths` (or any subset /
+                filtered version of it).
+
+        Returns:
+            Sorted unique node indices (np.ndarray of int).
+        """
+        coord_to_idx = {pt.tobytes(): i for i, pt in enumerate(self._points)}
+        used: set = set()
+        missed = 0
+        for paths in results.values():
+            for path in paths:
+                for pt in np.ascontiguousarray(np.asarray(path, dtype=float)):
+                    idx = coord_to_idx.get(pt.tobytes())
+                    if idx is None:
+                        missed += 1
+                    else:
+                        used.add(idx)
+        if missed:
+            logger.warning(
+                "%d waypoints are not roadmap nodes and were skipped "
+                "(shortened paths contain free continuous points; use "
+                "shortening_mode='none' for node-only paths)", missed
+            )
+        return np.array(sorted(used), dtype=int)
+
+    def create_pruned_graph(self, results: Dict[PairKey, List[np.ndarray]]):
+        """GraphSampler copy keeping only the nodes used by these paths.
+
+        Wraps ``GraphSampler.create_pruned_copy`` with the node indices from
+        :meth:`used_node_indices`. With ``shortening_mode="none"`` every
+        consecutive waypoint pair is a roadmap edge, so all planned paths
+        stay traversable in the pruned copy.
+        """
+        return self.map.create_pruned_copy(self.used_node_indices(results))
+
     # ------------------------------------------------------------------
     # Roadmap plumbing
     # ------------------------------------------------------------------
@@ -492,18 +538,23 @@ class CTopPRM:
                 continue
             self._min_cluster_paths[pair] = (path, length)
 
-    def _shortest_cluster_tour(self, start_cl: int, goal_cl: int) -> float:
-        """Dijkstra over the cluster graph weighted by min-tour lengths."""
-        dist: Dict[int, float] = {start_cl: 0.0}
-        heap = [(0.0, start_cl)]
+    def _cluster_adjacency(self) -> Dict[int, List[Tuple[int, float]]]:
+        """Cluster-graph adjacency weighted by min-tour lengths."""
         adjacency: Dict[int, List[Tuple[int, float]]] = {}
         for (a, b), (_, length) in self._min_cluster_paths.items():
             adjacency.setdefault(a, []).append((b, length))
             adjacency.setdefault(b, []).append((a, length))
+        for nbrs in adjacency.values():
+            nbrs.sort()
+        return adjacency
+
+    def _cluster_distances(self, source_cl: int) -> Dict[int, float]:
+        """Dijkstra distances from one cluster over the cluster graph."""
+        adjacency = self._cluster_adjacency()
+        dist: Dict[int, float] = {source_cl: 0.0}
+        heap = [(0.0, source_cl)]
         while heap:
             d, u = heapq.heappop(heap)
-            if u == goal_cl:
-                return d
             if d > dist.get(u, np.inf):
                 continue
             for v, w in adjacency.get(u, []):
@@ -511,7 +562,11 @@ class CTopPRM:
                 if nd < dist.get(v, np.inf):
                     dist[v] = nd
                     heapq.heappush(heap, (nd, v))
-        return float("inf")
+        return dist
+
+    def _shortest_cluster_tour(self, start_cl: int, goal_cl: int) -> float:
+        """Shortest cluster-tour length between two clusters."""
+        return self._cluster_distances(start_cl).get(goal_cl, float("inf"))
 
     def _cluster_dfs(
         self, start_cl: int, goal_cl: int, budget: float
@@ -522,50 +577,59 @@ class CTopPRM:
         deliberate corrections: an over-budget neighbor is skipped
         (``continue``) instead of aborting the whole neighbor loop (the C++
         ``return`` at :638 truncates enumeration nondeterministically), and
-        no result-length state is shared across calls. Neighbors are visited
-        in sorted order for determinism. Enumeration is bounded by a hard
-        cap; the ``max_sequences_per_pair`` best sequences by accumulated
-        min-cluster-path length are returned, so a hit cap cannot drop the
-        shortest route the way a first-N truncation would.
+        no result-length state is shared across calls.
+
+        The enumeration itself is best-first (A* over the cluster graph,
+        heuristic = exact shortest cluster-tour distance to the goal), so
+        completed sequences pop in non-decreasing length order and the search
+        stops after the ``max_sequences_per_pair`` shortest — the same set
+        the exhaustive DFS + sort returned, without enumerating everything.
+        As in the DFS, the interior of a sequence must stay within budget
+        while the final hop into the goal cluster is unchecked (over-budget
+        completions are filtered later by ``remove_too_long_paths``), and
+        ties break lexicographically on the cluster sequence. A hard cap on
+        expansions remains as a safety valve; because expansion is best-first,
+        even a capped run returns the shortest sequences found so far.
         """
-        adjacency: Dict[int, List[int]] = {}
-        for (a, b) in self._min_cluster_paths:
-            adjacency.setdefault(a, []).append(b)
-            adjacency.setdefault(b, []).append(a)
-        for nbrs in adjacency.values():
-            nbrs.sort()
+        adjacency = self._cluster_adjacency()
+        # Admissible heuristic: true shortest tour distance to the goal.
+        h = self._cluster_distances(goal_cl)
+        if h.get(start_cl, np.inf) == np.inf:
+            return []
 
-        hard_cap = 50 * self.max_sequences_per_pair
-        sequences: List[Tuple[float, List[int]]] = []
-
-        def seg_len(a: int, b: int) -> float:
-            return self._min_cluster_paths[(a, b) if a < b else (b, a)][1]
-
-        def recurse(path: List[int], visited: set, current_length: float) -> None:
-            if len(sequences) >= hard_cap:
-                return
-            last = path[-1]
-            for nb in adjacency.get(last, []):
+        max_expansions = 50 * self.max_sequences_per_pair
+        sequences: List[List[int]] = []
+        expansions = 0
+        # Heap entries: (f, sequence, g). Complete sequences end at goal_cl
+        # and carry f == g == true total length; interior ones f = g + h.
+        heap: List[Tuple[float, List[int], float]] = [
+            (h[start_cl], [start_cl], 0.0)
+        ]
+        while heap and len(sequences) < self.max_sequences_per_pair:
+            _, seq, g = heapq.heappop(heap)
+            last = seq[-1]
+            if last == goal_cl:
+                sequences.append(seq)
+                continue
+            expansions += 1
+            if expansions > max_expansions:
+                logger.warning(
+                    "cluster search %d->%d hit the expansion cap (%d); "
+                    "returning the %d shortest sequences found",
+                    start_cl, goal_cl, max_expansions, len(sequences),
+                )
+                break
+            for nb, w in adjacency.get(last, []):
                 if nb == goal_cl:
-                    sequences.append((current_length + seg_len(last, nb), path + [nb]))
-                    if len(sequences) >= hard_cap:
-                        return
-                elif nb not in visited:
-                    d = current_length + seg_len(last, nb)
-                    if d > budget:
+                    total = g + w
+                    heapq.heappush(heap, (total, seq + [nb], total))
+                elif nb not in seq:
+                    g2 = g + w
+                    hn = h.get(nb, np.inf)
+                    if g2 > budget or hn == np.inf:
                         continue
-                    visited.add(nb)
-                    recurse(path + [nb], visited, d)
-                    visited.remove(nb)
-
-        recurse([start_cl], {start_cl}, 0.0)
-        if len(sequences) >= hard_cap:
-            logger.warning(
-                "cluster DFS %d->%d hit the enumeration cap (%d); "
-                "results may be incomplete", start_cl, goal_cl, hard_cap
-            )
-        sequences.sort(key=lambda item: item[0])
-        return [seq for _, seq in sequences[: self.max_sequences_per_pair]]
+                    heapq.heappush(heap, (g2 + hn, seq + [nb], g2))
+        return sequences
 
     def _assemble_path(self, cluster_seq: List[int]) -> np.ndarray:
         """Concatenate cached min inter-cluster paths along a cluster sequence."""
