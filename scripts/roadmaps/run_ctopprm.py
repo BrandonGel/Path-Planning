@@ -61,7 +61,8 @@ if __name__ == "__main__":
     # classes that the C++ defaults (1.8 / 1.5) would filter on this map.
     planner = CTopPRM(map_, max_path_length_ratio=2.2,
                       cutoff_distance_ratio_to_shortest=2.0,
-                      min_clusters=1000,
+                      min_clusters=100,
+                      force_min_clusters=True
                       )
     # All ordered start/goal pairs from agent starts and goals.
     starts_goals = starts + goals
