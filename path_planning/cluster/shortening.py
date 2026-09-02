@@ -19,6 +19,7 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass
+from itertools import product
 from typing import List, Optional, Tuple
 
 import numpy as np
@@ -111,29 +112,54 @@ def _segment_samples(p1: np.ndarray, p2: np.ndarray, step: float) -> np.ndarray:
 
 def point_free(map_, point: np.ndarray, cfg: GeometryConfig) -> bool:
     """Whether a single point satisfies the configured clearance."""
-    if cfg.min_clearance <= 0.0:
-        return not map_.in_collision_point(tuple(point))
-    return float(map_.min_wall_distance(np.asarray(point, dtype=float))) >= cfg.min_clearance
+    return bool(points_free(map_, np.asarray(point, dtype=float)[None, :], cfg)[0])
 
 
 def points_free(map_, pts: np.ndarray, cfg: GeometryConfig) -> np.ndarray:
-    """Vectorized ``point_free`` over an (N, dim) batch.
+    """Vectorized free-point check over an (N, dim) batch.
 
-    The inflation-mode branch replicates ``in_collision_point``
-    (``world_to_map`` rounding + OBSTACLE/INFLATION type-map lookup) in one
-    numpy pass; out-of-bounds points count as not free.
+    The inflation-mode branch does the ``in_collision_point``-style
+    OBSTACLE/INFLATION type-map lookup in one numpy pass, but is
+    **boundary-inclusive**: a point lying exactly on a cell boundary touches
+    up to ``2^dim`` cells and counts as free if ANY of them is free.
+    ``generate_planar_map`` (CDT) places roadmap nodes exactly on the
+    free/blocked cell boundary (e.g. corner vertices like (49.0, 2.0)), and
+    plain ``in_collision_point`` rounding drops them into the blocked cell —
+    while the map's DDA edge checks accept them. Out-of-bounds points count
+    as not free.
     """
     pts = np.atleast_2d(np.asarray(pts, dtype=float))
     if cfg.min_clearance > 0.0:
         return np.asarray(map_.min_wall_distance(pts)) >= cfg.min_clearance
     bounds_lo = np.asarray(map_.bounds, dtype=float)[:, 0]
     shape = np.asarray(map_.shape, dtype=int)
+    grid = _get_free_grid(map_)
+
+    def cells_free(idx: np.ndarray) -> np.ndarray:
+        ok = np.all((idx >= 0) & (idx < shape), axis=1)
+        out = np.zeros(len(idx), dtype=bool)
+        if np.any(ok):
+            out[ok] = grid[tuple(idx[ok].T)]
+        return out
+
     idx_f = (pts - bounds_lo) / float(map_.resolution) - 0.5
-    idx = np.round(idx_f + 1e-10).astype(int)
-    in_bounds = np.all((idx >= 0) & (idx < shape), axis=1)
-    free = np.zeros(len(pts), dtype=bool)
-    if np.any(in_bounds):
-        free[in_bounds] = _get_free_grid(map_)[tuple(idx[in_bounds].T)]
+    eps = 1e-9
+    idx_lo = np.round(idx_f - eps).astype(int)
+    idx_hi = np.round(idx_f + eps).astype(int)
+    free = cells_free(idx_lo)
+    # Boundary points (idx_lo != idx_hi in some dim): OR over the touching
+    # cells' verdicts. Non-boundary points are already fully decided above.
+    bnd = np.nonzero(np.any(idx_hi != idx_lo, axis=1) & ~free)[0]
+    if len(bnd):
+        dim = pts.shape[1]
+        for combo in product((0, 1), repeat=dim):
+            if not any(combo):
+                continue  # all-lo case already checked
+            idx = idx_lo[bnd].copy()
+            for d, use_hi in enumerate(combo):
+                if use_hi:
+                    idx[:, d] = idx_hi[bnd, d]
+            free[bnd] |= cells_free(idx)
     return free
 
 
@@ -172,7 +198,8 @@ def _segment_free_sampled(map_, p1: np.ndarray, p2: np.ndarray, cfg: GeometryCon
     construction code that relies on it must validate the final polyline
     with ``polyline_free_exact`` before accepting it.
     """
-    return bool(np.all(points_free(map_, _segment_samples(p1, p2, cfg.collision_distance_check), cfg)))
+    pts = _segment_samples(p1, p2, cfg.collision_distance_check)
+    return bool(np.all(points_free(map_, pts, cfg)))
 
 
 def polyline_free_exact(map_, path: np.ndarray, cfg: GeometryConfig) -> bool:

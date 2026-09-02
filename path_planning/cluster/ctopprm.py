@@ -61,9 +61,10 @@ class CTopPRM:
         graph_map: ``GraphSampler`` with a generated roadmap (``nodes`` and
             ``road_map`` populated). Node coordinates are used as-is for all
             geometry, matching how the repo's MAPF solvers consume them.
-        min_clusters: Force-grow clusters until strictly more than this many
-            exist even if all class pairs are deformable. Default:
-            ``num_seeds + 2`` (C++ default 4 for 2 seeds).
+        min_clusters: With ``force_min_clusters=True``, force-grow clusters
+            until strictly more than this many exist even if all class pairs
+            are deformable. Default: ``num_seeds + 2`` (C++ default 4 for
+            2 seeds). Ignored when ``force_min_clusters=False``.
         max_clusters: Hard cap on cluster count. Default: ``num_seeds + 7``
             (C++ default 9 for 2 seeds), clamped to at least ``min_clusters``.
         max_path_length_ratio: Per-pair DFS length budget as a multiple of
@@ -79,6 +80,11 @@ class CTopPRM:
             ``"none"``.
         max_paths_per_pair: Optional truncation of each pair's result list.
         max_sequences_per_pair: Safety cap on DFS-emitted cluster sequences.
+        force_min_clusters: When False (default), refinement breaks as soon
+            as no cluster pair separates into a new homotopy class — extra
+            clusters past that point only partition deformable regions and
+            add DFS work. True restores the C++ behavior of force-splitting
+            the largest-cost pair until ``min_clusters`` is exceeded.
     """
 
     def __init__(
@@ -94,6 +100,7 @@ class CTopPRM:
         shortening_mode: str = "gradient",
         max_paths_per_pair: Optional[int] = None,
         max_sequences_per_pair: int = 200,
+        force_min_clusters: bool = False,
     ) -> None:
         if shortening_mode not in _SHORTENING_MODES:
             raise ValueError(
@@ -113,6 +120,7 @@ class CTopPRM:
         self.shortening_mode = shortening_mode
         self.max_paths_per_pair = max_paths_per_pair
         self.max_sequences_per_pair = int(max_sequences_per_pair)
+        self.force_min_clusters = bool(force_min_clusters)
 
         step = (
             float(collision_distance_check)
@@ -413,10 +421,12 @@ class CTopPRM:
         While below ``max_clusters``: scan cluster pairs by descending
         max/min connection-cost ratio; split the first pair whose min- and
         max-connection paths are NOT deformable into each other (an obstacle
-        separates them). If every pair is deformable, stop — unless still at
-        or below ``min_clusters``, then force-split the pair with the
-        largest max-connection cost. The new centroid is the max-connection
-        endpoint with the smaller distance-from-seed (C++ :988).
+        separates them). If every pair is deformable, no new homotopy class
+        exists and the loop breaks — unless ``force_min_clusters`` is set
+        and the count is still at or below ``min_clusters``, then the pair
+        with the largest max-connection cost is force-split (C++ behavior).
+        The new centroid is the max-connection endpoint with the smaller
+        distance-from-seed (C++ :988), never an existing seed.
         """
         while len(self.seed_indices) < self.max_clusters:
             pair_stats = []
@@ -430,6 +440,12 @@ class CTopPRM:
             split = None
             forced_best = None  # (max_cost, pair, cmin, cmax)
             for _, pair, cmin, cmax in pair_stats:
+                # A pair is only splittable if its max connection offers a
+                # non-seed endpoint: existing seeds (dist == 0) would win the
+                # smaller-dist tie-break forever, appending the same node as
+                # a duplicate seed and spawning empty clusters.
+                if self._new_seed_from(cmax) is None:
+                    continue
                 if self._pair_is_deformable(pair, cmin, cmax):
                     if forced_best is None or cmax[0] > forced_best[0]:
                         forced_best = (cmax[0], pair, cmin, cmax)
@@ -438,16 +454,31 @@ class CTopPRM:
                     break
 
             if split is None:
-                if len(self.seed_indices) > self.min_clusters or forced_best is None:
-                    break  # all classes deformable (or nothing to split)
+                # No pair separates into a new homotopy class. Stop here
+                # unless the caller insists on min_clusters via force-splits.
+                if (
+                    not self.force_min_clusters
+                    or len(self.seed_indices) > self.min_clusters
+                    or forced_best is None
+                ):
+                    break
                 _, pair, cmin, cmax = forced_best
                 split = (pair, cmin, cmax)
 
-            _, _, (_, u, v) = split
-            new_seed = v if self.dist[u] > self.dist[v] else u
-            self.seed_indices.append(int(new_seed))
-            self._add_centroid(int(new_seed))
+            new_seed = self._new_seed_from(split[2])
+            self.seed_indices.append(new_seed)
+            self._add_centroid(new_seed)
             self._collect_cluster_connections()
+
+    def _new_seed_from(self, conn: Connection) -> Optional[int]:
+        """Centroid candidate from a connection: the endpoint nearer its seed
+        (C++ :988), excluding nodes that already are seeds. None if both are.
+        """
+        _, u, v = conn
+        cands = [n for n in (u, v) if self.dist[n] > 0.0]
+        if not cands:
+            return None
+        return int(min(cands, key=lambda n: self.dist[n]))
 
     def _pair_is_deformable(
         self, pair: PairKey, cmin: Connection, cmax: Connection
