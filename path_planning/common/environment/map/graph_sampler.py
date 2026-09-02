@@ -350,6 +350,19 @@ class GraphSampler(Grid):
         """
         return not self.is_expandable(self.world_to_map(point,discrete=True))
 
+    def point_expandable(self, point: Tuple[float, ...]) -> bool:
+        """
+        Check if the point is expandable.
+        """
+        inv_res = 1.0 / float(self.resolution)
+        eps = 1e-9
+        cands = []
+        for d in range(self.dim):
+            c = (float(point[d]) - float(self.bounds[d, 0])) * inv_res - 0.5
+            lo, hi = int(round(c - eps)), int(round(c + eps))
+            cands.append((lo,) if lo == hi else (lo, hi))
+        return any(self.is_expandable(idx) for idx in product(*cands))
+
     def in_collision(self, p1: Tuple[float, ...], p2 : Tuple[float, ...] = None) -> bool:
         """
         Check if the line of sight between two continuous (world) points is in collision
@@ -991,14 +1004,16 @@ class GraphSampler(Grid):
     def generate_custom_nodes(self,points: List[int]):
         num_nodes = 0
         nodes = []
+        points = np.array(points)
         for ii in range(len(points)):
             pos = points[ii]
             if self.use_discrete_space:
-                pixel = tuple(self.map_to_world(self.world_to_map(pos,discrete=True))) # Convert to discrete space but not into int
+                # Snap to cell center in world coords.
+                current = tuple(self.map_to_world(pos, discrete=True))
             else:
-                pixel = tuple(pos)
-            node = Node(pos,None,0,0)
-            if self.is_expandable(tuple(pixel)):
+                current = tuple(points[ii])
+            node = Node(current,None,0,0)
+            if self.point_expandable(tuple(pos)):
                 nodes.append(node)
                 self.node_index_dict[node] = len(nodes) - 1
                 num_nodes += 1

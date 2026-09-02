@@ -758,3 +758,42 @@ class CTopPRM:
             # second pass, kept so call sites stay mode-agnostic.
             return greedy_shorten_path(self.map, path, self.geometry)
         return shorten_path(self.map, path, self.geometry, forward=forward, grads=self._grads)
+
+
+    # ------------------------------------------------------------------
+    # Generate Roadmap
+    # ------------------------------------------------------------------
+    def get_roadmap(self) -> Tuple[np.ndarray, List[Tuple[int, int]]]:
+        """Roadmap distilled from the min cluster tours.
+
+        Returns:
+            (points, edges): ``points (K, dim)`` are the cluster seeds
+            (first ``len(seed_indices)`` rows, in cluster order) followed by
+            every interior tour waypoint in discovery order; ``edges`` are
+            undirected index pairs (lo, hi) linking consecutive waypoints
+            along each tour, deduplicated. Tour endpoints are exact rows of
+            ``self._points`` so seed lookups match exactly.
+        """
+        points_list = [tuple(p) for p in self._points[self.seed_indices]]
+        points_hash = {p: i for i, p in enumerate(points_list)}
+        edge_set = set()
+
+        def index_of(pt: np.ndarray) -> int:
+            key = tuple(pt)
+            idx = points_hash.get(key)
+            if idx is None:
+                idx = len(points_list)
+                points_list.append(key)
+                points_hash[key] = idx
+            return idx
+
+        for tour, _length in self._min_cluster_paths.values():
+            prev = index_of(tour[0])  # the low cluster's seed
+            for pt in tour[1:]:
+                cur = index_of(pt)
+                if cur != prev:
+                    edge_set.add((min(prev, cur), max(prev, cur)))
+                prev = cur
+        return np.asarray(points_list, dtype=float), sorted(edge_set)
+
+        
