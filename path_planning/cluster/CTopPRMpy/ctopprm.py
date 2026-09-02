@@ -31,7 +31,7 @@ from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
-from path_planning.cluster.shortening import (
+from path_planning.cluster.CTopPRMpy.shortening import (
     GeometryConfig,
     get_esdf_gradients,
     greedy_shorten_path,
