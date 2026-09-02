@@ -126,6 +126,34 @@ class TestCTopPRM(unittest.TestCase):
         for path in paths:
             self.assertTrue(polyline_free_sampled(map_, path, planner.geometry))
 
+    def test_pruned_graph_from_paths(self):
+        set_global_seed(42)
+        map_ = _build_block_map([START], [GOAL])
+        planner = CTopPRM(map_, shortening_mode="none")
+        results = planner.find_distinct_paths([(START, GOAL)])
+
+        used = planner.used_node_indices(results)
+        pruned = planner.create_pruned_graph(results)
+        # The copy holds exactly the used waypoints (as coordinate sets).
+        used_pts = {tuple(p) for p in np.asarray([map_.nodes[i].current for i in used])}
+        pruned_pts = {tuple(np.asarray(n.current, dtype=float)) for n in pruned.nodes}
+        self.assertEqual(pruned_pts, used_pts)
+        self.assertLess(len(pruned.nodes), len(map_.nodes))
+        # Every planned path stays traversable edge-by-edge in the copy.
+        pruned_idx = {
+            tuple(np.asarray(n.current, dtype=float)): i
+            for i, n in enumerate(pruned.nodes)
+        }
+        # k-NN road_maps store edges directionally, and the planner works on
+        # the symmetrized view — so accept the edge in either direction.
+        for paths in results.values():
+            for path in paths:
+                for a, b in zip(path[:-1], path[1:]):
+                    ia, ib = pruned_idx[tuple(a)], pruned_idx[tuple(b)]
+                    self.assertTrue(
+                        ib in pruned.road_map[ia] or ia in pruned.road_map[ib]
+                    )
+
     def test_endpoint_resolution(self):
         # Exact node coordinate and index forms resolve identically; a nearby
         # off-node coordinate snaps to the nearest node.
