@@ -1,0 +1,424 @@
+"""Graph-distance EM clustering over a ``GraphSampler`` roadmap.
+
+Soft (mixture-model) counterpart of ``GraphKMeans``: each component k is an
+isotropic Gaussian over GRAPH distance — anchor node ``a_k``, weight
+``pi_k`` and variance ``sigma_k^2`` — so responsibilities
+``r_nk \\propto pi_k * exp(-d_graph(a_k, n)^2 / (2 sigma_k^2)) / sigma_k``
+never leak through walls the way a Euclidean GMM would. Two kinds of
+components:
+
+- FIXED components: caller-supplied seed points (e.g. agent starts/goals)
+  whose anchors never move — every fixed seed keeps its own component, like
+  CTopPRM's endpoint seeds. Their pi/sigma are still learned.
+- FREE components: additional clusters whose center tracks the
+  responsibility-weighted mean of the node coordinates. The continuous
+  centroid is kept when it lies in free space (boundary-inclusive
+  ``GraphSampler.point_expandable``); otherwise the center falls back to
+  the member node nearest the mean, so a center never sits inside an
+  obstacle.
+
+Because Dijkstra needs graph sources, every component is anchored to a
+roadmap node (``center_node_indices``); the continuous ``centers`` are
+reporting/consumer-facing positions. After :meth:`fit`, one final
+multi-source Dijkstra from the anchors fills ``cluster_labels`` / ``dist``
+/ ``prev`` — exactly the wavefront state CTopPRM's ``_wavefront_fill``
+produces for ``center_node_indices`` — so the result can seed the CTopPRM
+pipeline directly (``CTopPRM(..., clustering="em")``); the soft
+assignments stay available as ``responsibilities``.
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import List, Optional, Sequence, Tuple, Union
+
+import numpy as np
+
+from path_planning.cluster.kmeans.graph_kmeans import (
+    build_symmetric_adjacency,
+    multi_source_dijkstra,
+)
+from path_planning.common.environment.node import Node
+
+logger = logging.getLogger(__name__)
+
+Endpoint = Union[int, Sequence[float]]
+
+_INIT_MODES = ("kpp", "farthest")
+
+_LOG_2PI = float(np.log(2.0 * np.pi))
+
+
+class GraphEM:
+    """EM mixture over graph distances with fixed anchor components.
+
+    Args:
+        graph_map: ``GraphSampler`` with a generated roadmap (``nodes`` and
+            ``road_map`` populated).
+        n_clusters: Total component count INCLUDING the fixed seeds passed
+            to :meth:`fit` (must be >= their number). May be reduced when
+            the roadmap has fewer reachable nodes than requested clusters.
+        max_iters: Cap on EM iterations.
+        tol: Convergence threshold on the per-node log-likelihood change;
+            convergence additionally requires the anchor set to reach a
+            fixed point (anchor jumps are discrete, so the log-likelihood
+            is not strictly monotone across them).
+        min_sigma: Floor on every component's sigma, preventing variance
+            collapse onto a single node (default: the map resolution).
+        init: Top-up seeding for the free components — ``"kpp"`` samples
+            nodes with probability proportional to squared graph distance
+            from the current anchors (k-means++ style, reproducible via the
+            global numpy seed), ``"farthest"`` picks the deterministic
+            argmax.
+
+    Attributes (after :meth:`fit`):
+        cluster_labels: int32 (n,) hard cluster id per node from the final
+            wavefront fill, -1 = unreachable.
+        dist: float64 (n,) graph distance to the node's own anchor node.
+        prev: int32 (n,) shortest-path forest parent (-1 at anchor nodes).
+        centers: float (K, dim) center positions — the responsibility-
+            weighted centroid for free components whose mean lies in free
+            space, node coordinates otherwise (and always for fixed rows).
+        center_node_indices: node index anchoring each component on the
+            graph; fixed seeds first (label ``k`` == cluster of
+            ``center_node_indices[k]`` — same contract as CTopPRM's
+            ``seed_indices``).
+        center_is_fixed: bool (K,) True for the fixed-seed rows.
+        center_snapped: bool (K,) True where a free centroid fell back to a
+            graph node (mean not in free space or empty-component re-seed);
+            False for fixed rows.
+        responsibilities: float (n, K) soft assignments; rows sum to 1 on
+            reachable nodes and are all-zero on unreachable ones.
+        weights_: float (K,) mixture weights pi_k (sum to 1).
+        sigmas_: float (K,) per-component graph-distance std deviations
+            (each >= ``min_sigma``).
+        log_likelihood_history: total log-likelihood per EM iteration.
+        n_iter_: EM iterations run.
+    """
+
+    def __init__(
+        self,
+        graph_map,
+        n_clusters: int,
+        *,
+        max_iters: int = 50,
+        tol: float = 1e-6,
+        min_sigma: Optional[float] = None,
+        init: str = "kpp",
+    ) -> None:
+        if init not in _INIT_MODES:
+            raise ValueError(f"init must be one of {_INIT_MODES}, got {init!r}")
+        if not getattr(graph_map, "nodes", None) or not getattr(graph_map, "road_map", None):
+            raise ValueError(
+                "graph_map has no roadmap; generate one first "
+                "(e.g. generateRandomNodes + generate_roadmap)"
+            )
+        if n_clusters < 1:
+            raise ValueError(f"n_clusters must be >= 1, got {n_clusters}")
+        self.map = graph_map
+        self.n_clusters = int(n_clusters)
+        self.max_iters = int(max_iters)
+        self.tol = float(tol)
+        self.min_sigma = (
+            float(min_sigma)
+            if min_sigma is not None
+            else float(getattr(graph_map, "resolution", 1.0))
+        )
+        if self.min_sigma <= 0.0:
+            raise ValueError(f"min_sigma must be > 0, got {self.min_sigma}")
+        self.init = init
+
+        self._points = np.asarray([n.current for n in graph_map.nodes], dtype=float)
+        self._adj = build_symmetric_adjacency(
+            self._points,
+            graph_map.road_map,
+            getattr(graph_map, "road_map_edge_weights", None),
+        )
+        self._kd_tree = None
+
+        n = len(self._points)
+        self.cluster_labels = np.full(n, -1, dtype=np.int32)
+        self.dist = np.full(n, np.inf, dtype=np.float64)
+        self.prev = np.full(n, -1, dtype=np.int32)
+        self.centers = np.empty((0, self._points.shape[1]))
+        self.center_node_indices: List[int] = []
+        self.center_is_fixed = np.empty(0, dtype=bool)
+        self.center_snapped = np.empty(0, dtype=bool)
+        self.responsibilities = np.zeros((n, 0))
+        self.weights_ = np.empty(0)
+        self.sigmas_ = np.empty(0)
+        self.log_likelihood_history: List[float] = []
+        self.n_iter_ = 0
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def fit(self, fixed_seeds: Sequence[Endpoint]) -> "GraphEM":
+        """Fit the mixture around the fixed seeds plus free components.
+
+        Args:
+            fixed_seeds: Node indices or node-frame coordinates that become
+                the first ``len(fixed_seeds)`` components' immovable
+                anchors.
+
+        Returns:
+            self, with the fitted attributes populated.
+        """
+        fixed = [self.resolve_endpoint(e) for e in fixed_seeds]
+        if len(set(fixed)) != len(fixed):
+            raise ValueError(f"duplicate fixed seeds after resolution: {fixed}")
+        if self.n_clusters < len(fixed):
+            raise ValueError(
+                f"n_clusters={self.n_clusters} < {len(fixed)} fixed seeds"
+            )
+
+        sources = self._init_sources(fixed)
+        k_total = len(sources)
+        centers = self._points[sources].copy()
+        is_fixed = np.arange(k_total) < len(fixed)
+        snapped = np.zeros(k_total, dtype=bool)
+        weights, sigmas = self._init_params(sources)
+        self.log_likelihood_history = []
+
+        # Discrete anchor moves can enter a limit cycle (two anchor sets
+        # alternating forever), so alongside the fixed-point test we detect
+        # revisited anchor sets and always report the best-likelihood state
+        # visited (each snapshot is self-consistent: resp/ll computed from
+        # exactly these sources/params).
+        best = None
+        seen = set()
+        prev_ll = -np.inf
+        for it in range(1, self.max_iters + 1):
+            self.n_iter_ = it
+            D = self._distance_matrix(sources)
+            resp, reachable, ll = self._e_step(D, weights, sigmas)
+            self.log_likelihood_history.append(ll)
+            if best is None or ll > best[0]:
+                best = (ll, list(sources), weights.copy(), sigmas.copy(),
+                        centers.copy(), snapped.copy(), resp)
+            if tuple(sources) in seen:
+                logger.debug(
+                    "GraphEM anchor limit cycle after %d iterations", it
+                )
+                break
+            seen.add(tuple(sources))
+
+            weights, sigmas, new_sources = self._m_step(
+                sources, D, resp, reachable, centers, snapped, len(fixed)
+            )
+            n_reach = max(int(reachable.sum()), 1)
+            if new_sources == sources and abs(ll - prev_ll) <= self.tol * n_reach:
+                break
+            prev_ll = ll
+            sources = new_sources
+        else:
+            logger.warning(
+                "GraphEM did not converge in %d iterations", self.max_iters
+            )
+        _, sources, weights, sigmas, centers, snapped, resp = best
+
+        # Hard state: wavefront fill from the final anchors (the exact
+        # invariants CTopPRM expects: dist==0 at anchors, positional labels).
+        labels, dist, prev = multi_source_dijkstra(self._adj, sources)
+        self.cluster_labels, self.dist, self.prev = labels, dist, prev
+        self.centers = centers
+        self.center_node_indices = list(sources)
+        self.center_is_fixed = is_fixed
+        self.center_snapped = snapped
+        self.responsibilities = resp.T.copy()
+        self.weights_ = weights
+        self.sigmas_ = sigmas
+        return self
+
+    def resolve_endpoint(self, endpoint: Endpoint) -> int:
+        """Resolve a node index or node-frame coordinate to a node index."""
+        if isinstance(endpoint, (int, np.integer)):
+            idx = int(endpoint)
+            if not 0 <= idx < len(self._points):
+                raise IndexError(f"endpoint node index {idx} out of range")
+            return idx
+        coord = tuple(endpoint)
+        node = Node(coord, None, 0, 0)
+        idx = self.map.node_index_dict.get(node)
+        if idx is not None:
+            return int(idx)
+        if self._kd_tree is None:
+            tree = getattr(self.map, "sample_kd_tree", None)
+            if tree is None:
+                from scipy.spatial import cKDTree
+
+                tree = cKDTree(self._points)
+            self._kd_tree = tree
+        _, nn = self._kd_tree.query(np.asarray(coord, dtype=float))
+        return int(nn)
+
+    # ------------------------------------------------------------------
+    # Initialization
+    # ------------------------------------------------------------------
+
+    def _init_sources(self, fixed: List[int]) -> List[int]:
+        """Fixed seeds topped up to ``n_clusters`` anchor nodes.
+
+        Each extra anchor is drawn from the current graph-Voronoi residual:
+        squared graph distance to the nearest existing anchor, sampled
+        (``"kpp"``) or maximized (``"farthest"``). A drawn node has positive
+        distance, so it can never duplicate an existing anchor.
+        """
+        sources = list(fixed)
+        while len(sources) < self.n_clusters:
+            _, dist, _ = multi_source_dijkstra(self._adj, sources)
+            w = np.where(np.isfinite(dist), dist, 0.0) ** 2
+            total = float(w.sum())
+            if total <= 0.0:
+                logger.warning(
+                    "only %d distinct reachable clusters possible; "
+                    "reducing n_clusters from %d",
+                    len(sources), self.n_clusters,
+                )
+                self.n_clusters = len(sources)
+                break
+            if self.init == "kpp":
+                nxt = int(np.random.choice(len(w), p=w / total))
+            else:
+                nxt = int(np.argmax(w))
+            sources.append(nxt)
+        return sources
+
+    def _init_params(self, sources: List[int]) -> Tuple[np.ndarray, np.ndarray]:
+        """Uniform weights; sigmas from the initial wavefront partition.
+
+        sigma_k starts at the RMS member distance of component k's hard
+        cluster (global RMS for empty clusters), floored at ``min_sigma``.
+        """
+        k_total = len(sources)
+        weights = np.full(k_total, 1.0 / k_total)
+        labels, dist, _ = multi_source_dijkstra(self._adj, sources)
+        finite = np.isfinite(dist)
+        global_rms = (
+            float(np.sqrt(np.mean(dist[finite] ** 2))) if finite.any() else 0.0
+        )
+        sigmas = np.empty(k_total)
+        for k in range(k_total):
+            members = finite & (labels == k)
+            sigmas[k] = (
+                float(np.sqrt(np.mean(dist[members] ** 2)))
+                if members.any()
+                else global_rms
+            )
+        return weights, np.maximum(sigmas, self.min_sigma)
+
+    # ------------------------------------------------------------------
+    # EM steps
+    # ------------------------------------------------------------------
+
+    def _distance_matrix(self, sources: List[int]) -> np.ndarray:
+        """(K, n) graph distances: one single-source Dijkstra per anchor."""
+        D = np.empty((len(sources), len(self._points)))
+        for k, s in enumerate(sources):
+            _, d, _ = multi_source_dijkstra(self._adj, [s])
+            D[k] = d
+        return D
+
+    def _e_step(
+        self, D: np.ndarray, weights: np.ndarray, sigmas: np.ndarray
+    ) -> Tuple[np.ndarray, np.ndarray, float]:
+        """Responsibilities (K, n), reachable mask (n,), total log-likelihood.
+
+        Log-domain with the log-sum-exp trick; a node unreachable from every
+        component gets an all-zero column and is excluded from the
+        likelihood.
+        """
+        z = D / sigmas[:, None]  # inf stays inf where unreachable
+        logp = (
+            np.log(weights)[:, None]
+            - np.log(sigmas)[:, None]
+            - 0.5 * _LOG_2PI
+            - 0.5 * np.square(z)
+        )
+        m = np.max(logp, axis=0)
+        reachable = np.isfinite(m)
+        resp = np.zeros_like(logp)
+        lse = m[reachable] + np.log(
+            np.sum(np.exp(logp[:, reachable] - m[reachable]), axis=0)
+        )
+        resp[:, reachable] = np.exp(logp[:, reachable] - lse)
+        ll = float(np.sum(lse))
+        return resp, reachable, ll
+
+    def _m_step(
+        self,
+        sources: List[int],
+        D: np.ndarray,
+        resp: np.ndarray,
+        reachable: np.ndarray,
+        centers: np.ndarray,
+        snapped: np.ndarray,
+        num_fixed: int,
+    ) -> Tuple[np.ndarray, np.ndarray, List[int]]:
+        """Update pi/sigma for all components and anchors/centers for free
+        ones (``centers``/``snapped`` in place); return (weights, sigmas,
+        new sources).
+
+        Free anchors snap to the hard-member (argmax-responsibility) node
+        nearest the weighted mean — hard members belong to exactly one
+        component, so anchors can never collide across components.
+        """
+        n_reach = max(int(reachable.sum()), 1)
+        r = resp[:, reachable]
+        mass = r.sum(axis=1)  # (K,) column-stochastic resp -> sums to n_reach
+        # resp is 0 wherever D is inf, so mask the inf before multiplying.
+        d_sq = np.square(np.where(np.isfinite(D[:, reachable]), D[:, reachable], 0.0))
+        safe_mass = np.maximum(mass, np.finfo(float).tiny)
+        sigmas = np.maximum(np.sqrt((r * d_sq).sum(axis=1) / safe_mass), self.min_sigma)
+        weights = np.maximum(mass / n_reach, 1e-12)
+
+        hard = np.full(len(reachable), -1, dtype=np.int64)
+        hard[reachable] = np.argmax(resp[:, reachable], axis=0)
+        new_sources = list(sources)
+        taken = set(sources[:num_fixed])
+        min_dist = np.min(D, axis=0)
+        global_rms = float(np.sqrt(np.mean(np.square(min_dist[reachable]))))
+        for k in range(num_fixed, len(sources)):
+            members = np.flatnonzero(hard == k)
+            if members.size == 0:
+                cand = self._reseed_node(min_dist, taken)
+                if cand is None:
+                    logger.warning("component %d is empty and cannot be re-seeded", k)
+                    taken.add(new_sources[k])
+                    continue
+                new_sources[k] = cand
+                centers[k] = self._points[cand]
+                snapped[k] = True
+                taken.add(cand)
+                # Give the re-seeded component a fresh chance in the next
+                # E-step instead of the starved parameters it converged to.
+                weights[k] = 1.0 / len(sources)
+                sigmas[k] = max(global_rms, self.min_sigma)
+                continue
+            w_members = resp[k, members]
+            mean = (
+                (w_members[:, None] * self._points[members]).sum(axis=0)
+                / max(float(w_members.sum()), np.finfo(float).tiny)
+            )
+            nearest = int(
+                members[np.argmin(np.linalg.norm(self._points[members] - mean, axis=1))]
+            )
+            new_sources[k] = nearest
+            taken.add(nearest)
+            if self.map.point_expandable(tuple(mean)):
+                centers[k] = mean
+                snapped[k] = False
+            else:
+                centers[k] = self._points[nearest]
+                snapped[k] = True
+        return weights / weights.sum(), sigmas, new_sources
+
+    def _reseed_node(self, min_dist: np.ndarray, taken: set) -> Optional[int]:
+        """Reachable node farthest from every anchor, not already an anchor."""
+        order = np.argsort(min_dist)[::-1]
+        for idx in order:
+            idx = int(idx)
+            if np.isfinite(min_dist[idx]) and min_dist[idx] > 0.0 and idx not in taken:
+                return idx
+        return None

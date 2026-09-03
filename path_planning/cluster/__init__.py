@@ -1,1 +1,2 @@
-"""Topological path clustering: Python CTopPRM over GraphSampler roadmaps."""
+"""Roadmap clustering: Python CTopPRM (CTopPRMpy/), graph-aware k-means
+(kmeans/) and graph-distance EM (em/) over GraphSampler roadmaps."""

@@ -53,7 +53,7 @@ Connection = Tuple[float, int, int]
 
 _SHORTENING_MODES = ("gradient", "greedy", "none")
 
-_CLUSTERING_MODES = ("wavefront", "kmeans")
+_CLUSTERING_MODES = ("wavefront", "kmeans", "em")
 
 
 class CTopPRM:
@@ -88,10 +88,14 @@ class CTopPRM:
             add DFS work. True restores the C++ behavior of force-splitting
             the largest-cost pair until ``min_clusters`` is exceeded.
         clustering: ``"wavefront"`` (default, graph-Voronoi from the
-            endpoint seeds) or ``"kmeans"`` — run
-            ``path_planning.cluster.kmeans.GraphKMeans`` with the endpoints
-            as fixed centers to pick the seed set before the wavefront fill.
+            endpoint seeds), ``"kmeans"`` (run
+            ``path_planning.cluster.kmeans.GraphKMeans``) or ``"em"`` (run
+            ``path_planning.cluster.em.GraphEM``) — the latter two use the
+            endpoints as fixed centers to pick the seed set before the
+            wavefront fill.
         kmeans_clusters: Total cluster count for ``clustering="kmeans"``
+            (defaults to the resolved ``min_clusters``); ignored otherwise.
+        em_clusters: Total component count for ``clustering="em"``
             (defaults to the resolved ``min_clusters``); ignored otherwise.
     """
 
@@ -111,6 +115,7 @@ class CTopPRM:
         force_min_clusters: bool = False,
         clustering: str = "wavefront",
         kmeans_clusters: Optional[int] = None,
+        em_clusters: Optional[int] = None,
     ) -> None:
         if shortening_mode not in _SHORTENING_MODES:
             raise ValueError(
@@ -137,6 +142,7 @@ class CTopPRM:
         self.force_min_clusters = bool(force_min_clusters)
         self.clustering = clustering
         self.kmeans_clusters = kmeans_clusters
+        self.em_clusters = em_clusters
 
         step = (
             float(collision_distance_check)
@@ -226,6 +232,21 @@ class CTopPRM:
 
                 km = GraphKMeans(self.map, target_k).fit(seeds)
                 seeds = list(km.center_node_indices)
+                self.max_clusters = max(self.max_clusters, len(seeds))
+        elif self.clustering == "em":
+            # Same shape as the kmeans branch: EM places the extra anchors
+            # (endpoints stay fixed) and the wavefront fill below
+            # regenerates all downstream state.
+            target_k = (
+                int(self.em_clusters)
+                if self.em_clusters is not None
+                else self.min_clusters
+            )
+            if target_k > num_seeds:
+                from path_planning.cluster.em.graph_em import GraphEM
+
+                em = GraphEM(self.map, target_k).fit(seeds)
+                seeds = list(em.center_node_indices)
                 self.max_clusters = max(self.max_clusters, len(seeds))
 
         self._wavefront_fill(seeds)
