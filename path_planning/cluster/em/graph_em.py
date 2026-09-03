@@ -19,10 +19,12 @@ components:
 
 EM has no repulsion between components — co-located duplicates are a
 stationary point of the likelihood — so free anchors additionally keep a
-minimum Euclidean spacing ``dup_radius``: a free component whose updated
-anchor would land within that radius of an already-placed anchor is
-treated as a duplicate and re-seeded at the node farthest from every
-anchor (the same rescue empty components get).
+minimum Euclidean spacing of ``max(dup_radius, median free-component
+sigma)``, recomputed every M-step: components packed closer than their
+own typical width overlap almost entirely and are duplicates whatever
+the map resolution. A free anchor that would violate the spacing is
+re-seeded at the farthest spacing-respecting node — the same rescue
+empty components get.
 
 Because Dijkstra needs graph sources, every component is anchored to a
 roadmap node (``center_node_indices``); the continuous ``centers`` are
@@ -72,11 +74,13 @@ class GraphEM:
             is not strictly monotone across them).
         min_sigma: Floor on every component's sigma, preventing variance
             collapse onto a single node (default: the map resolution).
-        dup_radius: Minimum Euclidean spacing between anchors. A free
-            component whose updated anchor would land within this distance
-            of an already-placed anchor is re-seeded at the node farthest
-            from every anchor instead of duplicating it (default: the map
-            resolution; 0 disables the guard).
+        dup_radius: Floor on the Euclidean spacing between anchors. The
+            effective spacing each M-step is ``max(dup_radius, median
+            free-component sigma)`` — components must stay about one
+            component-width apart — and a free anchor that would land
+            inside it is re-seeded at the farthest spacing-respecting
+            node instead of duplicating an existing component (default
+            floor: the map resolution; 0 disables the guard entirely).
         init: Top-up seeding for the free components — ``"kpp"`` samples
             nodes with probability proportional to squared graph distance
             from the current anchors (k-means++ style, reproducible via the
@@ -397,9 +401,11 @@ class GraphEM:
         Free anchors snap to the hard-member (argmax-responsibility) node
         nearest the weighted mean — hard members belong to exactly one
         component, so anchors can never collide across components. An
-        anchor that would still land within ``dup_radius`` of an
-        already-placed one is a duplicate (EM never separates co-located
-        components) and is re-seeded like an empty component.
+        anchor that would still land within the spacing radius
+        ``max(dup_radius, median free sigma)`` of an already-placed one
+        is a duplicate (EM never separates components that overlap by
+        more than their width) and is re-seeded like an empty component;
+        re-seeds honor the same spacing while a candidate exists.
         """
         n_reach = max(int(reachable.sum()), 1)
         r = resp[:, reachable]
@@ -417,9 +423,18 @@ class GraphEM:
         placed = [self._points[s] for s in sources[:num_fixed]]
         min_dist = np.min(D, axis=0)
         global_rms = float(np.sqrt(np.mean(np.square(min_dist[reachable]))))
+        # Adaptive spacing: about one typical component width, floored at
+        # dup_radius (0 keeps the guard disabled).
+        spacing = 0.0
+        if self.dup_radius > 0.0:
+            free_sigmas = sigmas[num_fixed:]
+            spacing = max(
+                self.dup_radius,
+                float(np.median(free_sigmas)) if free_sigmas.size else 0.0,
+            )
 
         def reseed(k: int, reason: str) -> None:
-            cand = self._reseed_node(min_dist, taken, placed)
+            cand = self._reseed_node(min_dist, taken, placed, spacing)
             if cand is None:
                 logger.warning(
                     "component %d is %s and cannot be re-seeded", k, reason
@@ -450,7 +465,7 @@ class GraphEM:
             nearest = int(
                 members[np.argmin(np.linalg.norm(self._points[members] - mean, axis=1))]
             )
-            if self._too_close(self._points[nearest], placed):
+            if self._too_close(self._points[nearest], placed, spacing):
                 reseed(k, "a duplicate")
                 continue
             new_sources[k] = nearest
@@ -464,21 +479,28 @@ class GraphEM:
                 snapped[k] = True
         return weights / weights.sum(), sigmas, new_sources
 
-    def _too_close(self, pos: np.ndarray, placed: List[np.ndarray]) -> bool:
-        """True if ``pos`` is within ``dup_radius`` of a placed anchor."""
-        if self.dup_radius <= 0.0 or not placed:
+    @staticmethod
+    def _too_close(
+        pos: np.ndarray, placed: List[np.ndarray], spacing: float
+    ) -> bool:
+        """True if ``pos`` is within ``spacing`` of a placed anchor."""
+        if spacing <= 0.0 or not placed:
             return False
         d = np.linalg.norm(np.asarray(placed) - pos, axis=1)
-        return bool(np.min(d) < self.dup_radius)
+        return bool(np.min(d) < spacing)
 
     def _reseed_node(
-        self, min_dist: np.ndarray, taken: set, placed: List[np.ndarray]
+        self,
+        min_dist: np.ndarray,
+        taken: set,
+        placed: List[np.ndarray],
+        spacing: float,
     ) -> Optional[int]:
         """Reachable node farthest from every anchor, not already an anchor.
 
-        Candidates within ``dup_radius`` of a placed anchor are skipped
-        while a spaced alternative exists; if none does, the farthest
-        non-anchor node is returned regardless.
+        Candidates within ``spacing`` of a placed anchor are skipped while
+        a spaced alternative exists; if none does, the farthest non-anchor
+        node is returned regardless.
         """
         order = np.argsort(min_dist)[::-1]
         fallback = None
@@ -488,6 +510,6 @@ class GraphEM:
                 continue
             if fallback is None:
                 fallback = idx
-            if not self._too_close(self._points[idx], placed):
+            if not self._too_close(self._points[idx], placed, spacing):
                 return idx
         return fallback
