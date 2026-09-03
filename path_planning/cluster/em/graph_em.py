@@ -17,6 +17,13 @@ components:
   the member node nearest the mean, so a center never sits inside an
   obstacle.
 
+EM has no repulsion between components — co-located duplicates are a
+stationary point of the likelihood — so free anchors additionally keep a
+minimum Euclidean spacing ``dup_radius``: a free component whose updated
+anchor would land within that radius of an already-placed anchor is
+treated as a duplicate and re-seeded at the node farthest from every
+anchor (the same rescue empty components get).
+
 Because Dijkstra needs graph sources, every component is anchored to a
 roadmap node (``center_node_indices``); the continuous ``centers`` are
 reporting/consumer-facing positions. After :meth:`fit`, one final
@@ -65,6 +72,11 @@ class GraphEM:
             is not strictly monotone across them).
         min_sigma: Floor on every component's sigma, preventing variance
             collapse onto a single node (default: the map resolution).
+        dup_radius: Minimum Euclidean spacing between anchors. A free
+            component whose updated anchor would land within this distance
+            of an already-placed anchor is re-seeded at the node farthest
+            from every anchor instead of duplicating it (default: the map
+            resolution; 0 disables the guard).
         init: Top-up seeding for the free components — ``"kpp"`` samples
             nodes with probability proportional to squared graph distance
             from the current anchors (k-means++ style, reproducible via the
@@ -104,6 +116,7 @@ class GraphEM:
         max_iters: int = 50,
         tol: float = 1e-6,
         min_sigma: Optional[float] = None,
+        dup_radius: Optional[float] = None,
         init: str = "kpp",
     ) -> None:
         if init not in _INIT_MODES:
@@ -126,6 +139,13 @@ class GraphEM:
         )
         if self.min_sigma <= 0.0:
             raise ValueError(f"min_sigma must be > 0, got {self.min_sigma}")
+        self.dup_radius = (
+            float(dup_radius)
+            if dup_radius is not None
+            else float(getattr(graph_map, "resolution", 1.0))
+        )
+        if self.dup_radius < 0.0:
+            raise ValueError(f"dup_radius must be >= 0, got {self.dup_radius}")
         self.init = init
 
         self._points = np.asarray([n.current for n in graph_map.nodes], dtype=float)
@@ -263,9 +283,16 @@ class GraphEM:
         Each extra anchor is drawn from the current graph-Voronoi residual:
         squared graph distance to the nearest existing anchor, sampled
         (``"kpp"``) or maximized (``"farthest"``). A drawn node has positive
-        distance, so it can never duplicate an existing anchor.
+        distance, so it can never duplicate an existing anchor; nodes
+        within ``dup_radius`` of one are also excluded while any other
+        candidate remains.
         """
         sources = list(fixed)
+        min_euclid = np.full(len(self._points), np.inf)
+        for s in sources:
+            min_euclid = np.minimum(
+                min_euclid, np.linalg.norm(self._points - self._points[s], axis=1)
+            )
         while len(sources) < self.n_clusters:
             _, dist, _ = multi_source_dijkstra(self._adj, sources)
             w = np.where(np.isfinite(dist), dist, 0.0) ** 2
@@ -278,11 +305,18 @@ class GraphEM:
                 )
                 self.n_clusters = len(sources)
                 break
+            spaced = np.where(min_euclid >= self.dup_radius, w, 0.0)
+            spaced_total = float(spaced.sum())
+            if spaced_total > 0.0:
+                w, total = spaced, spaced_total
             if self.init == "kpp":
                 nxt = int(np.random.choice(len(w), p=w / total))
             else:
                 nxt = int(np.argmax(w))
             sources.append(nxt)
+            min_euclid = np.minimum(
+                min_euclid, np.linalg.norm(self._points - self._points[nxt], axis=1)
+            )
         return sources
 
     def _init_params(self, sources: List[int]) -> Tuple[np.ndarray, np.ndarray]:
@@ -362,7 +396,10 @@ class GraphEM:
 
         Free anchors snap to the hard-member (argmax-responsibility) node
         nearest the weighted mean — hard members belong to exactly one
-        component, so anchors can never collide across components.
+        component, so anchors can never collide across components. An
+        anchor that would still land within ``dup_radius`` of an
+        already-placed one is a duplicate (EM never separates co-located
+        components) and is re-seeded like an empty component.
         """
         n_reach = max(int(reachable.sum()), 1)
         r = resp[:, reachable]
@@ -377,24 +414,33 @@ class GraphEM:
         hard[reachable] = np.argmax(resp[:, reachable], axis=0)
         new_sources = list(sources)
         taken = set(sources[:num_fixed])
+        placed = [self._points[s] for s in sources[:num_fixed]]
         min_dist = np.min(D, axis=0)
         global_rms = float(np.sqrt(np.mean(np.square(min_dist[reachable]))))
+
+        def reseed(k: int, reason: str) -> None:
+            cand = self._reseed_node(min_dist, taken, placed)
+            if cand is None:
+                logger.warning(
+                    "component %d is %s and cannot be re-seeded", k, reason
+                )
+                taken.add(new_sources[k])
+                placed.append(self._points[new_sources[k]])
+                return
+            new_sources[k] = cand
+            centers[k] = self._points[cand]
+            snapped[k] = True
+            taken.add(cand)
+            placed.append(self._points[cand])
+            # Give the re-seeded component a fresh chance in the next
+            # E-step instead of the starved parameters it converged to.
+            weights[k] = 1.0 / len(sources)
+            sigmas[k] = max(global_rms, self.min_sigma)
+
         for k in range(num_fixed, len(sources)):
             members = np.flatnonzero(hard == k)
             if members.size == 0:
-                cand = self._reseed_node(min_dist, taken)
-                if cand is None:
-                    logger.warning("component %d is empty and cannot be re-seeded", k)
-                    taken.add(new_sources[k])
-                    continue
-                new_sources[k] = cand
-                centers[k] = self._points[cand]
-                snapped[k] = True
-                taken.add(cand)
-                # Give the re-seeded component a fresh chance in the next
-                # E-step instead of the starved parameters it converged to.
-                weights[k] = 1.0 / len(sources)
-                sigmas[k] = max(global_rms, self.min_sigma)
+                reseed(k, "empty")
                 continue
             w_members = resp[k, members]
             mean = (
@@ -404,8 +450,12 @@ class GraphEM:
             nearest = int(
                 members[np.argmin(np.linalg.norm(self._points[members] - mean, axis=1))]
             )
+            if self._too_close(self._points[nearest], placed):
+                reseed(k, "a duplicate")
+                continue
             new_sources[k] = nearest
             taken.add(nearest)
+            placed.append(self._points[nearest])
             if self.map.point_expandable(tuple(mean)):
                 centers[k] = mean
                 snapped[k] = False
@@ -414,11 +464,30 @@ class GraphEM:
                 snapped[k] = True
         return weights / weights.sum(), sigmas, new_sources
 
-    def _reseed_node(self, min_dist: np.ndarray, taken: set) -> Optional[int]:
-        """Reachable node farthest from every anchor, not already an anchor."""
+    def _too_close(self, pos: np.ndarray, placed: List[np.ndarray]) -> bool:
+        """True if ``pos`` is within ``dup_radius`` of a placed anchor."""
+        if self.dup_radius <= 0.0 or not placed:
+            return False
+        d = np.linalg.norm(np.asarray(placed) - pos, axis=1)
+        return bool(np.min(d) < self.dup_radius)
+
+    def _reseed_node(
+        self, min_dist: np.ndarray, taken: set, placed: List[np.ndarray]
+    ) -> Optional[int]:
+        """Reachable node farthest from every anchor, not already an anchor.
+
+        Candidates within ``dup_radius`` of a placed anchor are skipped
+        while a spaced alternative exists; if none does, the farthest
+        non-anchor node is returned regardless.
+        """
         order = np.argsort(min_dist)[::-1]
+        fallback = None
         for idx in order:
             idx = int(idx)
-            if np.isfinite(min_dist[idx]) and min_dist[idx] > 0.0 and idx not in taken:
+            if not np.isfinite(min_dist[idx]) or min_dist[idx] <= 0.0 or idx in taken:
+                continue
+            if fallback is None:
+                fallback = idx
+            if not self._too_close(self._points[idx], placed):
                 return idx
-        return None
+        return fallback

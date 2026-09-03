@@ -155,6 +155,18 @@ class TestGraphEM(unittest.TestCase):
             elif cx >= block_hi:
                 self.assertTrue(np.all(band[:, 0] > block_lo))
 
+    def test_free_anchor_spacing(self):
+        # Duplicate guard: EM never separates co-located components, so
+        # anchors must keep at least dup_radius of Euclidean spacing even
+        # at high K (without the guard most free anchors collapse into
+        # near-duplicate pairs).
+        set_global_seed(3)
+        em = GraphEM(self.map_, len(SEEDS) + 20).fit(SEEDS)
+        anchors = em._points[em.center_node_indices]
+        d = np.linalg.norm(anchors[:, None, :] - anchors[None, :, :], axis=2)
+        d[np.diag_indices_from(d)] = np.inf
+        self.assertGreaterEqual(float(d.min()), em.dup_radius)
+
     def test_reproducibility(self):
         set_global_seed(7)
         a = GraphEM(self.map_, K).fit(SEEDS)
@@ -174,6 +186,8 @@ class TestGraphEM(unittest.TestCase):
             GraphEM(self.map_, K, init="bogus")
         with self.assertRaises(ValueError):
             GraphEM(self.map_, K, min_sigma=0.0)
+        with self.assertRaises(ValueError):
+            GraphEM(self.map_, K, dup_radius=-1.0)
 
     def test_ctopprm_em_clustering(self):
         set_global_seed(42)
