@@ -1,10 +1,15 @@
 """Graph-distance EM clustering over a ``GraphSampler`` roadmap.
 
-Soft (mixture-model) counterpart of ``GraphKMeans``: each component k is an
-isotropic Gaussian over GRAPH distance — anchor node ``a_k``, weight
-``pi_k`` and variance ``sigma_k^2`` — so responsibilities
-``r_nk \\propto pi_k * exp(-d_graph(a_k, n)^2 / (2 sigma_k^2)) / sigma_k``
-never leak through walls the way a Euclidean GMM would. Two kinds of
+Soft (mixture-model) counterpart of ``GraphKMeans``: each component k is a
+full-covariance Gaussian over the graph-warped displacement — anchor node
+``a_k``, weight ``pi_k`` and covariance ``Sigma_k``. A node's Euclidean
+displacement direction from the anchor is rescaled to GRAPH-distance
+length, ``v_nk = d_graph(a_k, n) * u_nk`` with
+``u_nk = (x_n - x_a_k) / |x_n - x_a_k|``, and the component likelihood is
+``pi_k * N(v_nk; 0, Sigma_k)`` — the metric is still the roadmap
+distance, so responsibilities never leak through walls the way a
+Euclidean GMM would, while the covariance is free to stretch along
+corridors instead of being constrained isotropic. Two kinds of
 components:
 
 - FIXED components: caller-supplied seed points (e.g. agent starts/goals)
@@ -59,7 +64,8 @@ _LOG_2PI = float(np.log(2.0 * np.pi))
 
 
 class GraphEM:
-    """EM mixture over graph distances with fixed anchor components.
+    """EM mixture over graph-warped displacements with fixed anchor
+    components.
 
     Args:
         graph_map: ``GraphSampler`` with a generated roadmap (``nodes`` and
@@ -72,8 +78,10 @@ class GraphEM:
             convergence additionally requires the anchor set to reach a
             fixed point (anchor jumps are discrete, so the log-likelihood
             is not strictly monotone across them).
-        min_sigma: Floor on every component's sigma, preventing variance
-            collapse onto a single node (default: the map resolution).
+        min_sigma: Floor on the std deviation along every covariance
+            eigendirection (eigenvalues are clamped at ``min_sigma**2``),
+            preventing variance collapse onto a single node (default: the
+            map resolution).
         dup_radius: Floor on the Euclidean spacing between anchors. The
             effective spacing each M-step is ``max(dup_radius, median
             free-component sigma)`` — components must stay about one
@@ -106,8 +114,12 @@ class GraphEM:
         responsibilities: float (n, K) soft assignments; rows sum to 1 on
             reachable nodes and are all-zero on unreachable ones.
         weights_: float (K,) mixture weights pi_k (sum to 1).
-        sigmas_: float (K,) per-component graph-distance std deviations
-            (each >= ``min_sigma``).
+        covariances_: float (K, dim, dim) per-component covariances over
+            the graph-warped displacements (symmetric, eigenvalues >=
+            ``min_sigma**2``).
+        sigmas_: float (K,) effective isotropic widths
+            ``sqrt(trace(Sigma_k) / dim)`` (each >= ``min_sigma``); used
+            for the anchor spacing guard and reporting.
         log_likelihood_history: total log-likelihood per EM iteration.
         n_iter_: EM iterations run.
     """
@@ -170,6 +182,7 @@ class GraphEM:
         self.center_snapped = np.empty(0, dtype=bool)
         self.responsibilities = np.zeros((n, 0))
         self.weights_ = np.empty(0)
+        self.covariances_ = np.empty((0, self._points.shape[1], self._points.shape[1]))
         self.sigmas_ = np.empty(0)
         self.log_likelihood_history: List[float] = []
         self.n_iter_ = 0
@@ -202,7 +215,7 @@ class GraphEM:
         centers = self._points[sources].copy()
         is_fixed = np.arange(k_total) < len(fixed)
         snapped = np.zeros(k_total, dtype=bool)
-        weights, sigmas = self._init_params(sources)
+        weights, covs = self._init_params(sources)
         self.log_likelihood_history = []
 
         # Discrete anchor moves can enter a limit cycle (two anchor sets
@@ -216,10 +229,11 @@ class GraphEM:
         for it in range(1, self.max_iters + 1):
             self.n_iter_ = it
             D = self._distance_matrix(sources)
-            resp, reachable, ll = self._e_step(D, weights, sigmas)
+            U = self._directions(sources)
+            resp, reachable, ll = self._e_step(D, U, weights, covs)
             self.log_likelihood_history.append(ll)
             if best is None or ll > best[0]:
-                best = (ll, list(sources), weights.copy(), sigmas.copy(),
+                best = (ll, list(sources), weights.copy(), covs.copy(),
                         centers.copy(), snapped.copy(), resp)
             if tuple(sources) in seen:
                 logger.debug(
@@ -228,8 +242,8 @@ class GraphEM:
                 break
             seen.add(tuple(sources))
 
-            weights, sigmas, new_sources = self._m_step(
-                sources, D, resp, reachable, centers, snapped, len(fixed)
+            weights, covs, new_sources = self._m_step(
+                sources, D, U, resp, reachable, centers, snapped, len(fixed)
             )
             n_reach = max(int(reachable.sum()), 1)
             if new_sources == sources and abs(ll - prev_ll) <= self.tol * n_reach:
@@ -240,7 +254,7 @@ class GraphEM:
             logger.warning(
                 "GraphEM did not converge in %d iterations", self.max_iters
             )
-        _, sources, weights, sigmas, centers, snapped, resp = best
+        _, sources, weights, covs, centers, snapped, resp = best
 
         # Hard state: wavefront fill from the final anchors (the exact
         # invariants CTopPRM expects: dist==0 at anchors, positional labels).
@@ -252,7 +266,8 @@ class GraphEM:
         self.center_snapped = snapped
         self.responsibilities = resp.T.copy()
         self.weights_ = weights
-        self.sigmas_ = sigmas
+        self.covariances_ = covs
+        self.sigmas_ = self._effective_sigmas(covs)
         return self
 
     def resolve_endpoint(self, endpoint: Endpoint) -> int:
@@ -324,27 +339,31 @@ class GraphEM:
         return sources
 
     def _init_params(self, sources: List[int]) -> Tuple[np.ndarray, np.ndarray]:
-        """Uniform weights; sigmas from the initial wavefront partition.
+        """Uniform weights; covariances from the initial wavefront partition.
 
-        sigma_k starts at the RMS member distance of component k's hard
-        cluster (global RMS for empty clusters), floored at ``min_sigma``.
+        Sigma_k starts isotropic at ``rms_k**2 * I`` where ``rms_k`` is the
+        RMS member distance of component k's hard cluster (global RMS for
+        empty clusters), floored at ``min_sigma``; anisotropy is learned by
+        the M-step.
         """
         k_total = len(sources)
+        dim = self._points.shape[1]
         weights = np.full(k_total, 1.0 / k_total)
         labels, dist, _ = multi_source_dijkstra(self._adj, sources)
         finite = np.isfinite(dist)
         global_rms = (
             float(np.sqrt(np.mean(dist[finite] ** 2))) if finite.any() else 0.0
         )
-        sigmas = np.empty(k_total)
+        covs = np.empty((k_total, dim, dim))
         for k in range(k_total):
             members = finite & (labels == k)
-            sigmas[k] = (
+            rms = (
                 float(np.sqrt(np.mean(dist[members] ** 2)))
                 if members.any()
                 else global_rms
             )
-        return weights, np.maximum(sigmas, self.min_sigma)
+            covs[k] = max(rms, self.min_sigma) ** 2 * np.eye(dim)
+        return weights, covs
 
     # ------------------------------------------------------------------
     # EM steps
@@ -359,21 +378,32 @@ class GraphEM:
         return D
 
     def _e_step(
-        self, D: np.ndarray, weights: np.ndarray, sigmas: np.ndarray
+        self,
+        D: np.ndarray,
+        U: np.ndarray,
+        weights: np.ndarray,
+        covs: np.ndarray,
     ) -> Tuple[np.ndarray, np.ndarray, float]:
         """Responsibilities (K, n), reachable mask (n,), total log-likelihood.
 
+        Component k's log density of node n is the multivariate normal of
+        the graph-warped displacement ``v = D_kn * u_nk``:
+        ``-0.5 * (log|2 pi Sigma_k| + D_kn**2 * u^T Sigma_k^{-1} u)``.
         Log-domain with the log-sum-exp trick; a node unreachable from every
         component gets an all-zero column and is excluded from the
         likelihood.
         """
-        z = D / sigmas[:, None]  # inf stays inf where unreachable
-        logp = (
-            np.log(weights)[:, None]
-            - np.log(sigmas)[:, None]
-            - 0.5 * _LOG_2PI
-            - 0.5 * np.square(z)
-        )
+        dim = self._points.shape[1]
+        logp = np.empty_like(D)
+        for k in range(len(covs)):
+            prec = np.linalg.inv(covs[k])
+            _, logdet = np.linalg.slogdet(covs[k])
+            quad = np.einsum("nd,de,ne->n", U[k], prec, U[k])
+            # inf distance -> -inf log density (inf * 0 at a zero direction
+            # would be NaN, so mask explicitly).
+            with np.errstate(invalid="ignore"):
+                z2 = np.where(np.isfinite(D[k]), np.square(D[k]) * quad, np.inf)
+            logp[k] = np.log(weights[k]) - 0.5 * (dim * _LOG_2PI + logdet + z2)
         m = np.max(logp, axis=0)
         reachable = np.isfinite(m)
         resp = np.zeros_like(logp)
@@ -388,15 +418,16 @@ class GraphEM:
         self,
         sources: List[int],
         D: np.ndarray,
+        U: np.ndarray,
         resp: np.ndarray,
         reachable: np.ndarray,
         centers: np.ndarray,
         snapped: np.ndarray,
         num_fixed: int,
     ) -> Tuple[np.ndarray, np.ndarray, List[int]]:
-        """Update pi/sigma for all components and anchors/centers for free
-        ones (``centers``/``snapped`` in place); return (weights, sigmas,
-        new sources).
+        """Update pi/Sigma for all components and anchors/centers for free
+        ones (``centers``/``snapped`` in place); return (weights,
+        covariances, new sources).
 
         Free anchors snap to the hard-member (argmax-responsibility) node
         nearest the weighted mean — hard members belong to exactly one
@@ -408,13 +439,19 @@ class GraphEM:
         re-seeds honor the same spacing while a candidate exists.
         """
         n_reach = max(int(reachable.sum()), 1)
+        dim = self._points.shape[1]
         r = resp[:, reachable]
         mass = r.sum(axis=1)  # (K,) column-stochastic resp -> sums to n_reach
-        # resp is 0 wherever D is inf, so mask the inf before multiplying.
-        d_sq = np.square(np.where(np.isfinite(D[:, reachable]), D[:, reachable], 0.0))
         safe_mass = np.maximum(mass, np.finfo(float).tiny)
-        sigmas = np.maximum(np.sqrt((r * d_sq).sum(axis=1) / safe_mass), self.min_sigma)
         weights = np.maximum(mass / n_reach, 1e-12)
+        # Covariance = responsibility-weighted scatter of the graph-warped
+        # displacements v = D * u; resp is 0 wherever D is inf, so mask the
+        # inf before multiplying.
+        d_fin = np.where(np.isfinite(D[:, reachable]), D[:, reachable], 0.0)
+        covs = np.empty((len(sources), dim, dim))
+        for k in range(len(sources)):
+            V = d_fin[k, :, None] * U[k, reachable]
+            covs[k] = self._floor_cov((r[k][:, None] * V).T @ V / safe_mass[k])
 
         hard = np.full(len(reachable), -1, dtype=np.int64)
         hard[reachable] = np.argmax(resp[:, reachable], axis=0)
@@ -427,10 +464,10 @@ class GraphEM:
         # dup_radius (0 keeps the guard disabled).
         spacing = 0.0
         if self.dup_radius > 0.0:
-            free_sigmas = sigmas[num_fixed:]
+            free_widths = self._effective_sigmas(covs[num_fixed:])
             spacing = max(
                 self.dup_radius,
-                float(np.median(free_sigmas)) if free_sigmas.size else 0.0,
+                float(np.median(free_widths)) if free_widths.size else 0.0,
             )
 
         def reseed(k: int, reason: str) -> None:
@@ -450,7 +487,7 @@ class GraphEM:
             # Give the re-seeded component a fresh chance in the next
             # E-step instead of the starved parameters it converged to.
             weights[k] = 1.0 / len(sources)
-            sigmas[k] = max(global_rms, self.min_sigma)
+            covs[k] = max(global_rms, self.min_sigma) ** 2 * np.eye(dim)
 
         for k in range(num_fixed, len(sources)):
             members = np.flatnonzero(hard == k)
@@ -477,7 +514,33 @@ class GraphEM:
             else:
                 centers[k] = self._points[nearest]
                 snapped[k] = True
-        return weights / weights.sum(), sigmas, new_sources
+        return weights / weights.sum(), covs, new_sources
+
+    def _directions(self, sources: List[int]) -> np.ndarray:
+        """(K, n, dim) unit Euclidean displacement direction from each
+        anchor to every node (zero vector at the anchor itself)."""
+        U = np.zeros((len(sources), len(self._points), self._points.shape[1]))
+        for k, s in enumerate(sources):
+            disp = self._points - self._points[s]
+            norm = np.linalg.norm(disp, axis=1)
+            nz = norm > 0.0
+            U[k, nz] = disp[nz] / norm[nz, None]
+        return U
+
+    def _floor_cov(self, cov: np.ndarray) -> np.ndarray:
+        """Symmetrize and clamp the eigenvalues at ``min_sigma**2``."""
+        cov = 0.5 * (cov + cov.T)
+        vals, vecs = np.linalg.eigh(cov)
+        vals = np.maximum(vals, self.min_sigma ** 2)
+        return (vecs * vals) @ vecs.T
+
+    @staticmethod
+    def _effective_sigmas(covs: np.ndarray) -> np.ndarray:
+        """Effective isotropic width per component: sqrt(trace/dim)."""
+        if len(covs) == 0:
+            return np.empty(0)
+        dim = covs.shape[-1]
+        return np.sqrt(np.trace(covs, axis1=-2, axis2=-1) / dim)
 
     @staticmethod
     def _too_close(

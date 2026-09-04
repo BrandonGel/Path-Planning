@@ -28,7 +28,8 @@ import heapq
 import logging
 import math
 from typing import Dict, List, Optional, Sequence, Tuple, Union
-
+from path_planning.cluster.kmeans.graph_kmeans import GraphKMeans
+from path_planning.cluster.em.graph_em import GraphEM
 import numpy as np
 
 from path_planning.cluster.CTopPRMpy.shortening import (
@@ -93,10 +94,6 @@ class CTopPRM:
             ``path_planning.cluster.em.GraphEM``) — the latter two use the
             endpoints as fixed centers to pick the seed set before the
             wavefront fill.
-        kmeans_clusters: Total cluster count for ``clustering="kmeans"``
-            (defaults to the resolved ``min_clusters``); ignored otherwise.
-        em_clusters: Total component count for ``clustering="em"``
-            (defaults to the resolved ``min_clusters``); ignored otherwise.
     """
 
     def __init__(
@@ -114,8 +111,6 @@ class CTopPRM:
         max_sequences_per_pair: int = 200,
         force_min_clusters: bool = False,
         clustering: str = "wavefront",
-        kmeans_clusters: Optional[int] = None,
-        em_clusters: Optional[int] = None,
     ) -> None:
         if shortening_mode not in _SHORTENING_MODES:
             raise ValueError(
@@ -141,8 +136,7 @@ class CTopPRM:
         self.max_sequences_per_pair = int(max_sequences_per_pair)
         self.force_min_clusters = bool(force_min_clusters)
         self.clustering = clustering
-        self.kmeans_clusters = kmeans_clusters
-        self.em_clusters = em_clusters
+        self.cluster_model = None
 
         step = (
             float(collision_distance_check)
@@ -222,32 +216,18 @@ class CTopPRM:
             # wavefront fill below regenerates labels/dist/prev so every
             # downstream invariant (dist==0 at seeds, prev forest,
             # positional labels) holds exactly.
-            target_k = (
-                int(self.kmeans_clusters)
-                if self.kmeans_clusters is not None
-                else self.min_clusters
-            )
-            if target_k > num_seeds:
-                from path_planning.cluster.kmeans.graph_kmeans import GraphKMeans
-
-                km = GraphKMeans(self.map, target_k).fit(seeds)
-                seeds = list(km.center_node_indices)
-                self.max_clusters = max(self.max_clusters, len(seeds))
+            target_k = max(self.min_clusters, num_seeds)
+            self.cluster_model = GraphKMeans(self.map, target_k).fit(seeds)
+            seeds = list(self.cluster_model.center_node_indices)
+            self.max_clusters = max(self.max_clusters, len(seeds))
         elif self.clustering == "em":
             # Same shape as the kmeans branch: EM places the extra anchors
             # (endpoints stay fixed) and the wavefront fill below
             # regenerates all downstream state.
-            target_k = (
-                int(self.em_clusters)
-                if self.em_clusters is not None
-                else self.min_clusters
-            )
-            if target_k > num_seeds:
-                from path_planning.cluster.em.graph_em import GraphEM
-
-                em = GraphEM(self.map, target_k).fit(seeds)
-                seeds = list(em.center_node_indices)
-                self.max_clusters = max(self.max_clusters, len(seeds))
+            target_k = max(self.min_clusters, num_seeds)
+            self.cluster_model = GraphEM(self.map, target_k).fit(seeds)
+            seeds = list(self.cluster_model.center_node_indices)
+            self.max_clusters = max(self.max_clusters, len(seeds))
 
         self._wavefront_fill(seeds)
         self._collect_cluster_connections()
