@@ -1001,19 +1001,28 @@ class GraphSampler(Grid):
         self.edges, self.edge_indices_dict,self.edge_weights  = self.calculate_edges(road_map,edge_weights)
         return road_map
 
-    def generate_custom_nodes(self,points: List[int]):
+    def generate_custom_nodes(self,points: List[int],filter_points: bool = True):
+        # filter_points=False keeps every point (preserving the caller's edge
+        # indexing) -- for points taken from an already-validated roadmap,
+        # which may legally contain nodes point_expandable rejects (e.g. RRG
+        # nodes slightly outside the bounds); load_graph_sampler never
+        # filters such nodes either.
         num_nodes = 0
         nodes = []
         points = np.array(points)
         for ii in range(len(points)):
             pos = points[ii]
             if self.use_discrete_space:
-                # Snap to cell center in world coords.
-                current = tuple(self.map_to_world(pos, discrete=True))
+                # Snap to the corner lattice bounds[d,0] + resolution*i that
+                # grid nodes are generated on (map_to_world is center-based
+                # and would shift every node by resolution/2).
+                b = np.asarray(self.bounds, dtype=float)[:, 0]
+                idx = np.round((np.asarray(pos, dtype=float) - b) / self.resolution)
+                current = tuple(b + self.resolution * idx)
             else:
                 current = tuple(points[ii])
             node = Node(current,None,0,0)
-            if self.point_expandable(tuple(pos)):
+            if not filter_points or self.point_expandable(tuple(pos)):
                 nodes.append(node)
                 self.node_index_dict[node] = len(nodes) - 1
                 num_nodes += 1

@@ -56,6 +56,11 @@ def generate_gnn_sampler_path(base_path: Path, gnn_folder_name: str):
     gnn_path.mkdir(parents=True, exist_ok=True)
     return gnn_path
 
+def generate_cluster_path(base_path: Path):
+    cluster_path = base_path / "cluster"
+    cluster_path.mkdir(parents=True, exist_ok=True)
+    return cluster_path
+
 def get_input_file_path(base_path: Path):
     input_file = base_path / "input.yaml"
     return input_file
