@@ -28,7 +28,8 @@ import heapq
 import logging
 import math
 from typing import Dict, List, Optional, Sequence, Tuple, Union
-
+from path_planning.cluster.kmeans.graph_kmeans import GraphKMeans
+from path_planning.cluster.em.graph_em import GraphEM
 import numpy as np
 
 from path_planning.cluster.CTopPRMpy.shortening import (
@@ -52,6 +53,8 @@ PairKey = Tuple[int, int]
 Connection = Tuple[float, int, int]
 
 _SHORTENING_MODES = ("gradient", "greedy", "none")
+
+_CLUSTERING_MODES = ("wavefront", "kmeans", "em")
 
 
 class CTopPRM:
@@ -85,6 +88,12 @@ class CTopPRM:
             clusters past that point only partition deformable regions and
             add DFS work. True restores the C++ behavior of force-splitting
             the largest-cost pair until ``min_clusters`` is exceeded.
+        clustering: ``"wavefront"`` (default, graph-Voronoi from the
+            endpoint seeds), ``"kmeans"`` (run
+            ``path_planning.cluster.kmeans.GraphKMeans``) or ``"em"`` (run
+            ``path_planning.cluster.em.GraphEM``) — the latter two use the
+            endpoints as fixed centers to pick the seed set before the
+            wavefront fill.
     """
 
     def __init__(
@@ -101,10 +110,15 @@ class CTopPRM:
         max_paths_per_pair: Optional[int] = None,
         max_sequences_per_pair: int = 200,
         force_min_clusters: bool = False,
+        clustering: str = "wavefront",
     ) -> None:
         if shortening_mode not in _SHORTENING_MODES:
             raise ValueError(
                 f"shortening_mode must be one of {_SHORTENING_MODES}, got {shortening_mode!r}"
+            )
+        if clustering not in _CLUSTERING_MODES:
+            raise ValueError(
+                f"clustering must be one of {_CLUSTERING_MODES}, got {clustering!r}"
             )
         if not getattr(graph_map, "nodes", None) or not getattr(graph_map, "road_map", None):
             raise ValueError(
@@ -121,6 +135,8 @@ class CTopPRM:
         self.max_paths_per_pair = max_paths_per_pair
         self.max_sequences_per_pair = int(max_sequences_per_pair)
         self.force_min_clusters = bool(force_min_clusters)
+        self.clustering = clustering
+        self.cluster_model = None
 
         step = (
             float(collision_distance_check)
@@ -193,6 +209,25 @@ class CTopPRM:
         for s, g in resolved:
             shortest = float(start_dists[s][g])
             budgets[(s, g)] = shortest * self.max_path_length_ratio
+
+        if self.clustering == "kmeans":
+            # Graph k-means picks extra centers (endpoints stay fixed);
+            # its final anchor nodes become the seed list, and the single
+            # wavefront fill below regenerates labels/dist/prev so every
+            # downstream invariant (dist==0 at seeds, prev forest,
+            # positional labels) holds exactly.
+            target_k = max(self.min_clusters, num_seeds)
+            self.cluster_model = GraphKMeans(self.map, target_k).fit(seeds)
+            seeds = list(self.cluster_model.center_node_indices)
+            self.max_clusters = max(self.max_clusters, len(seeds))
+        elif self.clustering == "em":
+            # Same shape as the kmeans branch: EM places the extra anchors
+            # (endpoints stay fixed) and the wavefront fill below
+            # regenerates all downstream state.
+            target_k = max(self.min_clusters, num_seeds)
+            self.cluster_model = GraphEM(self.map, target_k).fit(seeds)
+            seeds = list(self.cluster_model.center_node_indices)
+            self.max_clusters = max(self.max_clusters, len(seeds))
 
         self._wavefront_fill(seeds)
         self._collect_cluster_connections()

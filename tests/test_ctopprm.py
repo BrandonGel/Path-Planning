@@ -1,5 +1,5 @@
 """
-Tests for the Python CTopPRM (path_planning/cluster/).
+Tests for the Python CTopPRM (path_planning/cluster/CTopPRMpy/).
 python -m unittest tests.test_ctopprm -v
 """
 
@@ -9,8 +9,8 @@ import numpy as np
 
 try:
     from path_planning.common.environment.map.graph_sampler import GraphSampler
-    from path_planning.cluster.ctopprm import CTopPRM
-    from path_planning.cluster.shortening import path_length, polyline_free_sampled
+    from path_planning.cluster.CTopPRMpy.ctopprm import CTopPRM
+    from path_planning.cluster.CTopPRMpy.shortening import path_length, polyline_free_sampled
     from path_planning.utils.util import obstacles_world_to_grid, set_global_seed
 
     _IMPORTS_OK = True
