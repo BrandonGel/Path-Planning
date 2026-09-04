@@ -105,6 +105,20 @@ class TestGraphEM(unittest.TestCase):
         self.assertAlmostEqual(float(em.weights_.sum()), 1.0, places=9)
         self.assertTrue(np.all(em.weights_ > 0.0))
         self.assertTrue(np.all(em.sigmas_ >= em.min_sigma))
+        # full covariances: symmetric, eigenvalue-floored, and sigmas_ is
+        # the effective width sqrt(trace/dim)
+        covs = em.covariances_
+        dim = em._points.shape[1]
+        self.assertEqual(covs.shape, (em.n_clusters, dim, dim))
+        for k in range(em.n_clusters):
+            np.testing.assert_allclose(covs[k], covs[k].T)
+            self.assertGreaterEqual(
+                float(np.linalg.eigvalsh(covs[k]).min()),
+                em.min_sigma ** 2 - 1e-9,
+            )
+        np.testing.assert_allclose(
+            em.sigmas_, np.sqrt(np.trace(covs, axis1=1, axis2=2) / dim)
+        )
 
     def test_hard_state_matches_wavefront(self):
         # Finalization contract: cluster_labels/dist/prev are the wavefront
@@ -176,6 +190,7 @@ class TestGraphEM(unittest.TestCase):
         np.testing.assert_array_equal(a.cluster_labels, b.cluster_labels)
         np.testing.assert_allclose(a.centers, b.centers)
         np.testing.assert_allclose(a.responsibilities, b.responsibilities)
+        np.testing.assert_allclose(a.covariances_, b.covariances_)
 
     def test_validation(self):
         with self.assertRaises(ValueError):

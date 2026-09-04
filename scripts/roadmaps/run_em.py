@@ -15,6 +15,8 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 import matplotlib.pyplot as plt
+import numpy as np
+from matplotlib.patches import Ellipse
 
 from path_planning.cluster.CTopPRMpy.ctopprm import CTopPRM
 from path_planning.common.visualizer.visualizer_2d import Visualizer2D
@@ -54,7 +56,7 @@ if __name__ == "__main__":
     # components whose anchors follow the responsibility-weighted centroids.
     num_endpoint_seeds = len(dict.fromkeys(starts + goals))
     k = num_endpoint_seeds + 84
-    planner = CTopPRM(map_, clustering="em", em_clusters=k)
+    planner = CTopPRM(map_, clustering="em", min_clusters=k)
     pairs = list(zip(starts, goals))
 
     st = time.time()
@@ -62,12 +64,34 @@ if __name__ == "__main__":
     print(f"CTopPRM (em): {time.time() - st:.2f}s, seeds "
           f"{num_endpoint_seeds} -> {len(planner.seed_indices)} clusters")
 
-    # --- clusters figure: nodes colored by cluster, seeds marked ---
+    # --- clusters figure: nodes colored by cluster, seeds marked, and the
+    # fitted mixture drawn as 1/2-sigma covariance ellipses per component ---
     vis = Visualizer2D()
     vis.plot_grid_map(map_)
     vis.plot_road_map(map_, map_.nodes, map_.road_map,
                       node_value=planner.cluster_labels,
                       cmap=plt.get_cmap('tab20'), edge_alpha=0.15)
+    em = planner.cluster_model
+    if em is not None:
+        # Keep the big 2-sigma ellipses from expanding the autoscaled
+        # axes limits; they get clipped at the map bounds instead.
+        xlim, ylim = vis.ax.get_xlim(), vis.ax.get_ylim()
+        for k, (idx, cov) in enumerate(
+            zip(em.center_node_indices, em.covariances_)
+        ):
+            vals, vecs = np.linalg.eigh(cov)
+            angle = float(np.degrees(np.arctan2(vecs[1, -1], vecs[0, -1])))
+            for n_std, style in ((1.0, '-'), (2.0, '--')):
+                vis.ax.add_patch(Ellipse(
+                    xy=em._points[idx],
+                    width=2.0 * n_std * float(np.sqrt(vals[-1])),
+                    height=2.0 * n_std * float(np.sqrt(vals[0])),
+                    angle=angle, fill=False, edgecolor='black',
+                    linestyle=style, linewidth=0.9, alpha=0.45, zorder=55,
+                    label=f'components $\\pm{int(n_std)}\\sigma$' if k == 0 else None,
+                ))
+        vis.ax.set_xlim(xlim)
+        vis.ax.set_ylim(ylim)
     seed_pts = planner._points[planner.seed_indices]
     fixed_pts = seed_pts[:num_endpoint_seeds]
     free_pts = seed_pts[num_endpoint_seeds:]
@@ -76,7 +100,11 @@ if __name__ == "__main__":
     if len(free_pts):
         vis.ax.scatter(free_pts[:, 0], free_pts[:, 1], c='black', marker='^',
                        s=120, zorder=60, label='EM / refinement seeds')
-    vis.ax.legend(loc='upper right', fontsize=8)
+    handles, labels = vis.ax.get_legend_handles_labels()
+    keep = [(h, l) for h, l in zip(handles, labels)
+            if l.startswith(('Fixed', 'EM', 'components'))]
+    legend = vis.ax.legend(*zip(*keep), loc='upper right', fontsize=8)
+    legend.set_zorder(100)
     vis.savefig(f'{OUT_DIR}/em_2d.png')
     vis.close()
 

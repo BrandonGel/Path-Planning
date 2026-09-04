@@ -54,7 +54,7 @@ if __name__ == "__main__":
     # clusters whose centers track the member centroids.
     num_endpoint_seeds = len(dict.fromkeys(starts + goals))
     k = num_endpoint_seeds + 84
-    planner = CTopPRM(map_, clustering="kmeans", kmeans_clusters=k)
+    planner = CTopPRM(map_, clustering="kmeans", min_clusters=k)
     pairs = list(zip(starts, goals))
 
     st = time.time()
