@@ -100,7 +100,16 @@ def build_cluster_map(
     k = max(num_endpoints + 2, math.ceil(cluster_fraction * len(source_map.nodes)))
 
     t0 = time.perf_counter()
-    planner = CTopPRM(source_map, clustering=CLUSTER_METHODS[method], min_clusters=k)
+    planner = CTopPRM(
+        source_map,
+        clustering=CLUSTER_METHODS[method],
+        min_clusters=k,
+        # Wavefront refinement stops once no pair splits into a new homotopy
+        # class (~200 clusters on a 64x64 grid), so without force-splits
+        # cluster_fraction is not a floor for the ctopprm method. kmeans/em
+        # reach K on their own; keep them on the natural-stop path.
+        force_min_clusters=CLUSTER_METHODS[method] == "wavefront",
+    )
     planner.set_up_distinct_paths(list(zip(starts, goals)))
     t_cluster = time.perf_counter()
     points, edges = planner.get_roadmap()
@@ -269,3 +278,69 @@ def create_cluster_maps(
             f"{config.get('road_map_type')}:\n{detail}\n"
             f"First full traceback:\n{failures[0][2]}"
         )
+
+
+def summarize_cluster_runtimes(
+    path: Path,
+    num_cases: int,
+    config: Dict,
+    methods: List[str],
+    output_file: Optional[Path] = None,
+) -> Path:
+    """Aggregate the per-case clustering runtime sidecars
+    (``maps/<type>/cluster/graph_map_<method>_runtime.yaml``) into one
+    ``cluster_runtime.yaml`` at the dataset parameter directory ``path``,
+    keyed ``road_map_type -> method -> {total/mean/std/min/max,
+    mean_breakdown, cases}``. Re-runs merge into the existing file, so the
+    summary accumulates across road map types and partial runs."""
+    path = Path(path)
+    road_map_type = config["road_map_type"]
+    per_method: Dict[str, dict] = {}
+    for method in methods:
+        graph_name = get_cluster_graph_name(method)
+        runtimes: List[float] = []
+        breakdowns: List[dict] = []
+        cases: Dict[str, float] = {}
+        for case_id in range(num_cases):
+            _, map_path = generate_base_case_path(path, case_id, road_map_type)
+            runtime_file = get_graph_runtime_file_path(
+                generate_cluster_path(map_path), graph_name
+            )
+            if not runtime_file.exists():
+                continue
+            with open(runtime_file, "r") as f:
+                data = yaml.safe_load(f) or {}
+            if "runtime" not in data:
+                continue
+            runtime = float(data["runtime"])
+            cases[f"case_{case_id}"] = round(runtime, 6)
+            runtimes.append(runtime)
+            breakdowns.append(data.get("runtime_breakdown", {}) or {})
+        if not runtimes:
+            continue
+        arr = np.asarray(runtimes, dtype=float)
+        stage_keys = sorted({k for b in breakdowns for k in b})
+        per_method[method] = {
+            "num_cases": len(runtimes),
+            "total": round(float(arr.sum()), 6),
+            "mean": round(float(arr.mean()), 6),
+            "std": round(float(arr.std()), 6),
+            "min": round(float(arr.min()), 6),
+            "max": round(float(arr.max()), 6),
+            "mean_breakdown": {
+                k: round(float(np.mean([b.get(k, 0.0) for b in breakdowns])), 6)
+                for k in stage_keys
+            },
+            "cases": cases,
+        }
+    if output_file is None:
+        output_file = path / "cluster_runtime.yaml"
+    output_file = Path(output_file)
+    existing = {}
+    if output_file.exists():
+        with open(output_file, "r") as f:
+            existing = yaml.safe_load(f) or {}
+    existing[road_map_type] = per_method
+    with open(output_file, "w") as f:
+        yaml.safe_dump(existing, f, sort_keys=False)
+    return output_file
