@@ -10,7 +10,7 @@ from scipy.spatial.distance import cdist
 from itertools import product
 from python_motion_planning.common import TYPES
 from path_planning.utils.cgal_sweep import CGAL_Sweep
-from path_planning.common.environment.map.cdt import get_planar_graph
+from path_planning.common.environment.map.cdt import get_boundary, get_planar_graph
 from path_planning.global_planner.sample_search.rrg import RRG
 import faiss
 import pickle
@@ -32,6 +32,7 @@ class GraphSampler(Grid):
         self.start = start
         self.goal = goal
         self.grid_points = []
+        self.boundary_points = []
         self.obstacles = []
         self.obs_size = 0.5
         self.inflation_radius = 0.0
@@ -46,6 +47,7 @@ class GraphSampler(Grid):
         self.start_nodes_index = {}
         self.goal_nodes_index = {}
         self.grid_nodes_index = {}
+        self.boundary_nodes_index = {}
         self.start_to_all_edges_dict = {}
         self.goal_to_all_edges_dict = {}
         self.nodes = []
@@ -115,6 +117,29 @@ class GraphSampler(Grid):
     
     def get_grid_nodes(self) -> List[Node]:
         return [self.nodes[i] for i in self.grid_nodes_index.values()]
+
+    def get_boundary_nodes(self) -> List[Node]:
+        return [self.nodes[i] for i in self.boundary_nodes_index.values()]
+
+    def get_obstacle_boundary(self):
+        """Obstacle/inflation boundary geometry from the CDT extraction
+        (path_planning.common.environment.map.cdt.get_boundary): merged wall
+        corners/junctions plus the enclosing map rectangle.
+
+        Returns (boundary_points (N,2), boundary_segments (M,2) index pairs,
+        holes: one interior point per obstacle component)."""
+        mask = (self.type_map.data == TYPES.OBSTACLE) | (self.type_map.data == TYPES.INFLATION)
+        return get_boundary(self, mask)
+
+    def _rebuild_boundary_nodes_index(self):
+        """Re-point boundary_nodes_index at the current node registry (node
+        indices shift whenever nodes are re-registered); boundary points not
+        present as nodes are dropped from the index but kept in boundary_points."""
+        self.boundary_nodes_index = {}
+        for point in self.boundary_points:
+            node = Node(tuple(point), None, 0, 0)
+            if node in self.node_index_dict:
+                self.boundary_nodes_index[node] = self.node_index_dict[node]
 
     def get_random_nodes(self) -> List[Node]:
         if len(self.nodes) >= self.sample_num:
@@ -554,7 +579,7 @@ class GraphSampler(Grid):
 
         return float(dists[0]) if single else dists
 
-    def generateRandomNodes(self, generate_grid_nodes = False,prob_map = None,samp_from_prob_map_ratio = 0.5,roadmap_type:str=None):
+    def generateRandomNodes(self, generate_grid_nodes = False,generate_boundary_nodes = False,prob_map = None,samp_from_prob_map_ratio = 0.5,roadmap_type:str=None):
         if roadmap_type == 'rrg':
             return []
 
@@ -653,7 +678,25 @@ class GraphSampler(Grid):
                     self.node_index_dict[node] = len(nodes) - 1
                     self.grid_nodes_index[node] = len(nodes)-1
                     self.grid_points.append(grid_coords_tuple)
-        
+
+        if generate_boundary_nodes:
+            # Obstacle/map boundary vertices (merged wall corners/junctions)
+            # from the CDT boundary extraction. They lie ON the obstacle
+            # outline — same as the CDT roadmap's own boundary nodes — so no
+            # expandability filter is applied; edge-level collision checks in
+            # the roadmap builders decide connectivity.
+            bnd_pts, _, _ = self.get_obstacle_boundary()
+            for point in bnd_pts:
+                current = tuple(float(v) for v in point)
+                node = Node(current, None, 0, 0)
+                if node in self.node_index_dict:
+                    self.boundary_nodes_index[node] = self.node_index_dict[node]
+                    continue
+                nodes.append(node)
+                self.node_index_dict[node] = len(nodes) - 1
+                self.boundary_nodes_index[node] = len(nodes) - 1
+                self.boundary_points.append(current)
+
         for start in self.start:
             node = Node(tuple(start),None,0,0)
             if node in self.node_index_dict:
@@ -827,6 +870,7 @@ class GraphSampler(Grid):
         self.start_nodes_index = {}
         self.goal_nodes_index = {}
         self.grid_nodes_index = {}
+        self.boundary_nodes_index = {}
         for point in points:
             node = Node(tuple(point),None,0,0)
             if node in self.node_index_dict:
@@ -853,6 +897,7 @@ class GraphSampler(Grid):
         self.num_total_nodes = len(nodes)
         self.cost_matrix = cdist(np.array([node.current for node in nodes]), np.array([node.current for node in nodes]), metric='euclidean')
         self.nodes = nodes
+        self._rebuild_boundary_nodes_index()
 
         # Filter the CDT edges the same way PRM / 'dt' do: drop any that are in collision
         # or outside [min_edge_length, max_edge_length]. The constrained triangulation can
@@ -886,6 +931,7 @@ class GraphSampler(Grid):
         self.start_nodes_index = {}
         self.goal_nodes_index = {}
         self.grid_nodes_index = {}
+        self.boundary_nodes_index = {}
 
         # Initialize graph structure
         nodes = []
@@ -1246,6 +1292,8 @@ class GraphSampler(Grid):
         self.start_nodes_index = {}
         self.goal_nodes_index = {}
         self.grid_nodes_index = {}
+        self.boundary_points = []
+        self.boundary_nodes_index = {}
         self.cost_matrix = None
         self.obstacles = []
         self.inflation_radius = 0.0
@@ -1261,6 +1309,7 @@ class GraphSampler(Grid):
             "max_edge_length": self.max_edge_length,
             "use_discrete_space": self.use_discrete_space,
             "grid_points": self.grid_points,
+            "boundary_points": self.boundary_points,
             "nodes": self.nodes,
             # ndarray, not list-of-tuples: pickling 4.5M tuples costs ~10s / ~200MB, the array
             # milliseconds / ~70MB. set_obstacles() accepts either on load.
@@ -1304,6 +1353,7 @@ class GraphSampler(Grid):
         self.set_inflation_radius(self.inflation_radius)
         self.track_with_link = data["track_with_link"]
         self.grid_points = data["grid_points"]
+        self.boundary_points = data.get("boundary_points", [])
 
         # Set up node index dict
         self.node_index_dict = {node: i for i, node in enumerate(self.nodes)}
@@ -1311,6 +1361,7 @@ class GraphSampler(Grid):
         self.start_nodes_index = {Node(tuple(start),None,0,0):self.node_index_dict[Node(tuple(start),None,0,0)] for start in self.start}
         self.goal_nodes_index = {Node(tuple(goal),None,0,0):self.node_index_dict[Node(tuple(goal),None,0,0)] for goal in self.goal}
         self.grid_nodes_index = {Node(tuple(grid_point),None,0,0):self.node_index_dict[Node(tuple(grid_point),None,0,0)] for grid_point in self.grid_points}
+        self._rebuild_boundary_nodes_index()
 
         # Calculate edges (must happen before get_start/goal_nodes_with_all_edges)
         self.road_map = data["road_map"]
@@ -1421,6 +1472,7 @@ class GraphSampler(Grid):
         self.start = [list(transform_pos(tuple(s))) for s in self.start]
         self.goal = [list(transform_pos(tuple(g))) for g in self.goal]
         self.grid_points = [transform_pos(tuple(gp)) for gp in self.grid_points]
+        self.boundary_points = [transform_pos(tuple(bp)) for bp in self.boundary_points]
 
         if len(self.obstacles) > 0:
             obs = np.asarray(self.obstacles, dtype=int)
@@ -1456,6 +1508,7 @@ class GraphSampler(Grid):
             Node(tuple(gp), None, 0, 0): self.node_index_dict[Node(tuple(gp), None, 0, 0)]
             for gp in self.grid_points
         }
+        self._rebuild_boundary_nodes_index()
 
         # 7. Clear caches and rebuild derived structures
         self.start_to_all_edges_dict = {}
@@ -1494,6 +1547,12 @@ class GraphSampler(Grid):
             if idx in kept_set:
                 pruned_grid_points.append(grid_node.current)
 
+        # Same for boundary points
+        pruned_boundary_points = []
+        for boundary_node, idx in self.boundary_nodes_index.items():
+            if idx in kept_set:
+                pruned_boundary_points.append(boundary_node.current)
+
         # Edges and edge weights restricted to kept nodes
         pruned_road_map = []
         pruned_road_map_edge_weights = []
@@ -1528,6 +1587,7 @@ class GraphSampler(Grid):
             "max_edge_length": self.max_edge_length,
             "use_discrete_space": self.use_discrete_space,
             "grid_points": pruned_grid_points,
+            "boundary_points": pruned_boundary_points,
             "nodes": pruned_nodes,
             "obstacles": self.obstacles,
             "inflation_radius": self.inflation_radius,
