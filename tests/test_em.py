@@ -207,7 +207,7 @@ class TestGraphEM(unittest.TestCase):
     def test_ctopprm_em_clustering(self):
         set_global_seed(42)
         map_ = _build_block_map([START], [GOAL])
-        planner = CTopPRM(map_, clustering="em", em_clusters=6)
+        planner = CTopPRM(map_, clustering="em", min_clusters=6)
         results = planner.find_distinct_paths([(START, GOAL)])
         paths = next(iter(results.values()))
         self.assertGreaterEqual(len(paths), 2)
