@@ -33,6 +33,15 @@ python scripts/generate/run_ground_truth.py -s benchmark/train -mapf lacam
 python scripts/generate/run_ground_truth.py -s benchmark/train -mapf lacam_random
 '''
 
+import sys
+from pathlib import Path
+
+# Ensure we import the local `path_planning` package (this repo) instead of an
+# unrelated installed version from site-packages.
+repo_root = Path(__file__).resolve().parents[2]
+if str(repo_root) not in sys.path:
+    sys.path.insert(0, str(repo_root))
+
 from path_planning.data_generation.dataset_ground_truth_solve import create_solutions,create_path_parameter_directory
 from path_planning.data_generation.dataset_ground_truth_map import create_maps
 import argparse
@@ -58,6 +67,7 @@ if __name__ == "__main__":
     parser.add_argument("-m","--max_iterations",type=int, default=10000, help="max iterations for the solver")
     parser.add_argument("-mapf","--mapf_solver_name",type=str, default="cbs", choices=["cbs", "icbs", "lacam", "lacam_random"], help="MAPF solver to use")
     parser.add_argument("-gng","--generate_new_graph",action="store_true", help="generate new graph")
+    parser.add_argument("-gbn","--generate_boundary_nodes",action="store_true", help="also register obstacle/map boundary vertices as roadmap nodes")
     parser.add_argument("-w","--num_workers",type=int, default=1, help="number of parallel workers for cases (default: auto-detect CPU cores)")
     parser.add_argument("-verbose","--verbose",dest="verbose",action="store_true", help="verbose")
     parser.add_argument("-cfg","--config",type=str, default='config/map.yaml', help="config file")
@@ -78,6 +88,7 @@ if __name__ == "__main__":
     map_config['heuristic_type'] = "manhattan"
     map_config = set_map_config(map_config=map_config,args=args)
     map_config['gen'] = read_gen_config_from_yaml(args.gen_config)
+    map_config['generate_boundary_nodes'] = args.generate_boundary_nodes
 
     base_path = map_config['path']
     nb_agents = map_config['nb_agents']

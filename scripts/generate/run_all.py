@@ -73,6 +73,7 @@ if __name__ == "__main__":
     parser.add_argument("-v","--visualize",action='store_true', help="visualize the density map")
     parser.add_argument("-ds","--use_discrete_space",action="store_true", help="use discrete space")
     parser.add_argument("-ggn","--generate_grid_nodes",action="store_true", help="generate grid nodes")
+    parser.add_argument("-gbn","--generate_boundary_nodes",action="store_true", help="also register obstacle/map boundary vertices as roadmap nodes")
     parser.add_argument("-ns","--num_samples",type=int, default=1000, help="number of samples")
     parser.add_argument("-nn","--num_neighbors",type=float, default=15, help="number of neighbors")
     parser.add_argument("-min_el","--min_edge_len",type=float, default=1e-10, help="minimum edge length")
@@ -106,6 +107,7 @@ if __name__ == "__main__":
     map_config['min_edge_len'] = 0.1
     map_config['max_edge_len'] = 1.1
     map_config['heuristic_type'] = "manhattan"
+    map_config['generate_boundary_nodes'] = args.generate_boundary_nodes
     base_path = map_config['path']
     seed = map_config['seed']
     bounds = map_config['bounds']
@@ -149,6 +151,8 @@ if __name__ == "__main__":
                 "num_graph_samples": args.num_graph_samples,
                 "road_map_type": road_map_type,
                 "target_space": args.target_space,
+                "generate_grid_nodes": args.generate_grid_nodes,
+                "generate_boundary_nodes": args.generate_boundary_nodes,
                 "generate_new_graph": generate_new_graph,
                 "is_start_goal_discrete": args.is_start_goal_discrete,
                 "weighted_sampling": args.weighted_sampling,

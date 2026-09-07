@@ -164,6 +164,10 @@ class InputFile:
         nb_obstacles = kwargs.get("nb_obstacles", 0.1)
         nb_agents = kwargs.get("nb_agents", 4)
         obs_size = kwargs.get("obs_size", 0.5) # size of the obstacle in pixels
+        # Optional: also register obstacle/map boundary vertices as roadmap nodes
+        # (GraphSampler.generateRandomNodes(generate_boundary_nodes=...)). Not in
+        # KEYS on purpose: existing datasets' input.yaml lack it and must stay valid.
+        generate_boundary_nodes = kwargs.get("generate_boundary_nodes", False)
         sampling_dist_dict = kwargs.get("sampling_dist_dict", {})
         gen_cfg = normalize_gen_config(kwargs.get("gen", None))  # start/goal placement (config/gen.yaml)
         map_ = GraphSampler(bounds=bounds, resolution=resolution, start=[], goal=[], sampling_dist_dict=sampling_dist_dict)
@@ -188,6 +192,7 @@ class InputFile:
             "agent_radius": agent_radius,
             "resolution": resolution,
             "obs_size": obs_size,
+            "generate_boundary_nodes": generate_boundary_nodes,
             "sampling_dist_dict": sampling_dist_dict,
         }
         total_cells = int(math.prod(dimensions))
@@ -384,10 +389,11 @@ def create_map(param: Dict, generate_new_graph: bool = False,graph_file: Path =N
         map_.set_goal(goal)
         t_setup = time.perf_counter()
 
+        generate_boundary_nodes = param.get("generate_boundary_nodes", False)
         if road_map_type == 'grid':
-            nodes = map_.generateRandomNodes(generate_grid_nodes=True)
+            nodes = map_.generateRandomNodes(generate_grid_nodes=True, generate_boundary_nodes=generate_boundary_nodes)
         else:
-            nodes = map_.generateRandomNodes()
+            nodes = map_.generateRandomNodes(generate_boundary_nodes=generate_boundary_nodes)
         t_sample = time.perf_counter()
         map_.generate_map(road_map_type,nodes)
         t_build = time.perf_counter()

@@ -25,7 +25,15 @@ python scripts/generate/run_generate.py -s benchmark/train/map32.0x32.0_resoluti
 
 
 import argparse
+import sys
 from pathlib import Path
+
+# Ensure we import the local `path_planning` package (this repo) instead of an
+# unrelated installed version from site-packages.
+repo_root = Path(__file__).resolve().parents[2]
+if str(repo_root) not in sys.path:
+    sys.path.insert(0, str(repo_root))
+
 from path_planning.data_generation.dataset_generate import generate_graph_samples
 from multiprocessing import cpu_count
 
@@ -44,6 +52,7 @@ if __name__ == "__main__":
     parser.add_argument("-rmt","--road_map_type",type=str, default='prm', help="road map type")
     parser.add_argument("-rmt_gt","--road_map_type_gt",type=str, default='grid', help="road map type for ground truth")
     parser.add_argument("-ggn","--generate_grid_nodes",action="store_true", help="generate grid nodes")
+    parser.add_argument("-gbn","--generate_boundary_nodes",action="store_true", help="also register obstacle/map boundary vertices as roadmap nodes")
     parser.add_argument("-av","--agent_velocity",type=float, default=0.0, help="agent velocity")
     parser.add_argument("-ts","--target_space",type=str, default='convolution_binary', help="target space")
     parser.add_argument("-gng","--generate_new_graph",dest="generate_new_graph",action="store_true", help="generate new graph")
@@ -70,6 +79,8 @@ if __name__ == "__main__":
             "num_graph_samples": args.num_graph_samples,
             "road_map_type": args.road_map_type,
             "road_map_type_gt": args.road_map_type_gt,
+            "generate_grid_nodes": args.generate_grid_nodes,
+            "generate_boundary_nodes": args.generate_boundary_nodes,
             "agent_velocity": args.agent_velocity,
             "target_space": args.target_space,
             "generate_new_graph": args.generate_new_graph,
