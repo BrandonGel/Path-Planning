@@ -1,0 +1,72 @@
+# Self-supervised cluster-GNN encoder training (cluster.md §13 objective).
+# Model keys use the exact GNN.__init__ parameter names — get_model silently
+# drops anything it doesn't recognize.
+seed: 42
+
+encoder:
+  loss:
+    graph_reconstruction:
+      weight: 1.0
+      args:
+        num_neg_per_pos: 1
+    shortest_path:
+      weight: 1.0
+      args:
+        use_start_goal_pairs: true
+    cluster:
+      weight: 0.0    # enable only after L_graph/L_SP embeddings are verified (cluster.md §33)
+      args:
+        num_clusters: 64
+        temperature: 1.0
+        alpha: 1.0
+        sigma: 1.0
+  model:
+    type: gatv2
+    node_in_channels: -1        # LazyLinear — inferred from the 5-wide features
+    node_out_channels: 32       # embedding dimension (cluster.md §38 A6: 8/16/32/64)
+    num_mlp_start_layers: 2
+    node_mlp_start_channels: 64
+    num_gnn_blocks: 3
+    gnn_hidden_channels: 64
+    num_mlp_end_layers: 2
+    node_mlp_end_channels: 64
+    edge_in_channels: -1
+    edge_use_mlp_start: true
+    edge_mlp_start_channels: 16
+    use_edge_dim: true          # roadmap/boundary edge distances feed attention
+    num_heads: 4
+    concat: true
+    residual: true
+    dropout: 0.0
+    activation_function: leaky_relu
+    to_hetero_aggr: sum
+  optimizer:
+    type: adam
+    lr: 0.001
+    weight_decay: 0.0
+
+device:
+  compile: false
+  compile_dynamic: false
+
+train:
+  batch_size: 8
+  test_size: 0.1
+  num_epochs: 100
+  resume_epoch: 0
+  save_epoch: 10
+  verbose_epoch: 10
+  save_folder: models/cluster
+  load_folder: null
+  num_workers: 4
+
+dataset:
+  folder_path:
+    - /home/bho36/Dropbox/Team_Path_Planning/brandon_graph_data/train_cluster/map64.0x64.0_resolution1.0/agents4_obst0.025/radius0.5
+    - /home/bho36/Dropbox/Team_Path_Planning/brandon_graph_data/train_cluster/map64.0x64.0_resolution1.0/agents8_obst0.025/radius0.5
+    - /home/bho36/Dropbox/Team_Path_Planning/brandon_graph_data/train_cluster/map64.0x64.0_resolution1.0/agents12_obst0.025/radius0.5
+  load_file: null
+  save_file: null
+  config:
+    road_map_types: [prm]
+    target_space: cluster
