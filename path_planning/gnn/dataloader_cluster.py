@@ -9,14 +9,14 @@ from pathlib import Path
 from tqdm import tqdm
 from typing import List,Tuple
 from multiprocessing import Pool, cpu_count
-from path_planning.data_generation.dataset_generate import get_target_space_type_name
+from path_planning.data_generation.cluster_dataset_generate import get_target_space_type_name
 import os
 import torch
 import torch_geometric
 from torch_geometric.typing import EdgeType
 from typing import Dict, Any
 from path_planning.common.environment.map.graph_sampler import GraphSampler
-from path_planning.data_generation.dataset_util import generate_sample_base_path,generate_roadmap_path
+from path_planning.data_generation.dataset_util import generate_cluster_sample_base_path,generate_roadmap_path
 # Allowlist PyG's base storage to bypass the security check
 torch.serialization.add_safe_globals([torch_geometric.data.storage.BaseStorage])
 torch.serialization.add_safe_globals([torch_geometric.data.storage.NodeStorage])
@@ -91,6 +91,15 @@ def _load_single_graph(files: Tuple[Path, Path]) -> HeteroData:
     else:
         node_boundary_node_edges = np.zeros((2, 0), dtype=np.int64)
         node_boundary_node_edata = np.zeros((0, 1), dtype=np.float32)
+    # Shortest-path supervision pairs (L_SP, cluster.md §11); attr = graph
+    # shortest-path distance, min-max normalized like the other relations.
+    if 'sp_pair_index' in data_dict.files:
+        node_sp_node_edges = data_dict['sp_pair_index'].reshape(-1, 2).T
+        node_sp_node_edata = data_dict['sp_pair_dist'].reshape(-1, 1)
+        node_sp_node_edata = _min_max_normalize_columns(node_sp_node_edata)
+    else:
+        node_sp_node_edges = np.zeros((2, 0), dtype=np.int64)
+        node_sp_node_edata = np.zeros((0, 1), dtype=np.float32)
     binary_id = str(data_dict['binary_id'])
     # Load target
     y: np.ndarray = np.load(target_file)
@@ -105,6 +114,8 @@ def _load_single_graph(files: Tuple[Path, Path]) -> HeteroData:
         'node_approx_node_edata': node_aprox_node_edata,
         'node_boundary_node_edges': node_boundary_node_edges,
         'node_boundary_node_edata': node_boundary_node_edata,
+        'node_sp_node_edges': node_sp_node_edges,
+        'node_sp_node_edata': node_sp_node_edata,
         'y': y,
         'binary_id': binary_id
     }
@@ -192,6 +203,14 @@ class GraphDataset(InMemoryDataset):
                     data['node','boundary','node'].edge_index = torch.tensor(result_dict['node_boundary_node_edges'], dtype=torch.long)
                     data['node','boundary','node'].edge_attr = torch.tensor(result_dict['node_boundary_node_edata'], dtype=torch.float)
                     data['node','boundary','node'].edge_weight = None
+                    # Supervision-only relation: L_SP reads it, but the model
+                    # never message-passes over it — to_hetero is built from
+                    # get_dummy_sample_data().metadata(), which omits 'sp', and
+                    # extra relations in a batch are ignored by the generated
+                    # forward. PyG batching still offsets its indices.
+                    data['node','sp','node'].edge_index = torch.tensor(result_dict['node_sp_node_edges'], dtype=torch.long)
+                    data['node','sp','node'].edge_attr = torch.tensor(result_dict['node_sp_node_edata'], dtype=torch.float)
+                    data['node','sp','node'].edge_weight = None
                     # data['node','to','node'].edge_weight = 1/(1 + data['node','to','node'].edge_attr)
                     # data['node','approx','node'].edge_weight = 1/(1 + data['node','approx','node'].edge_attr)
                     if num_hops >= 0:
@@ -248,6 +267,9 @@ class GraphDataset(InMemoryDataset):
                 data['node','boundary','node'].edge_index = torch.tensor(result_dict['node_boundary_node_edges'], dtype=torch.long)
                 data['node','boundary','node'].edge_attr = torch.tensor(result_dict['node_boundary_node_edata'], dtype=torch.float)
                 data['node','boundary','node'].edge_weight = None
+                data['node','sp','node'].edge_index = torch.tensor(result_dict['node_sp_node_edges'], dtype=torch.long)
+                data['node','sp','node'].edge_attr = torch.tensor(result_dict['node_sp_node_edata'], dtype=torch.float)
+                data['node','sp','node'].edge_weight = None
 
                 if num_hops >= 0:
                     node_mask = data['node'].y > 0 
@@ -311,7 +333,7 @@ def get_graph_dataset_file_paths(paths:List[Path],config:dict, max_cases:list[in
             raise ValueError("max_graphs must be a list of the same length as paths")
 
     road_map_types = config["road_map_types"] if "road_map_types" in config else ["prm"]
-    target_space = config["target_space"].lower() if "target_space" in config else "convolution_binary"
+    target_space = config["target_space"].lower() if "target_space" in config else "cluster"
 
     #Iterate over all paths
     for road_map_type in road_map_types:
@@ -328,7 +350,7 @@ def get_graph_dataset_file_paths(paths:List[Path],config:dict, max_cases:list[in
             #Iterate over all cases
             for case_dir in cases:
                 
-                sample_base_path = generate_sample_base_path(case_dir)
+                sample_base_path = generate_cluster_sample_base_path(case_dir)
                 roadmap_dir = generate_roadmap_path(sample_base_path,road_map_type)
                 y_type_name = get_target_space_type_name(target_space)
                 if not roadmap_dir.exists():
