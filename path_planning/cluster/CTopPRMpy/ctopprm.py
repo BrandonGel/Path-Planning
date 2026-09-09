@@ -54,7 +54,7 @@ Connection = Tuple[float, int, int]
 
 _SHORTENING_MODES = ("gradient", "greedy", "none")
 
-_CLUSTERING_MODES = ("wavefront", "kmeans", "em")
+_CLUSTERING_MODES = ("wavefront", "kmeans", "em", "custom")
 
 
 class CTopPRM:
@@ -111,6 +111,7 @@ class CTopPRM:
         max_sequences_per_pair: int = 200,
         force_min_clusters: bool = False,
         clustering: str = "wavefront",
+        custom_seeds: Optional[Sequence[Endpoint]] = None,
     ) -> None:
         if shortening_mode not in _SHORTENING_MODES:
             raise ValueError(
@@ -119,6 +120,10 @@ class CTopPRM:
         if clustering not in _CLUSTERING_MODES:
             raise ValueError(
                 f"clustering must be one of {_CLUSTERING_MODES}, got {clustering!r}"
+            )
+        if (clustering == "custom") != (custom_seeds is not None):
+            raise ValueError(
+                "custom_seeds must be provided iff clustering == 'custom'"
             )
         if not getattr(graph_map, "nodes", None) or not getattr(graph_map, "road_map", None):
             raise ValueError(
@@ -136,6 +141,7 @@ class CTopPRM:
         self.max_sequences_per_pair = int(max_sequences_per_pair)
         self.force_min_clusters = bool(force_min_clusters)
         self.clustering = clustering
+        self.custom_seeds = list(custom_seeds) if custom_seeds is not None else None
         self.cluster_model = None
 
         step = (
@@ -227,6 +233,16 @@ class CTopPRM:
             target_k = max(self.min_clusters, num_seeds)
             self.cluster_model = GraphEM(self.map, target_k).fit(seeds)
             seeds = list(self.cluster_model.center_node_indices)
+            self.max_clusters = max(self.max_clusters, len(seeds))
+        elif self.clustering == "custom":
+            # Caller-supplied anchors (e.g. GNN-embedding K-means medoids).
+            # Endpoints stay first (the extract-path invariant), duplicates
+            # are dropped, and the wavefront fill below regenerates all
+            # downstream state — exactly like the kmeans/em branches.
+            for e in self.custom_seeds:
+                idx = self.resolve_endpoint(e)
+                if idx not in seeds:
+                    seeds.append(idx)
             self.max_clusters = max(self.max_clusters, len(seeds))
 
         self._wavefront_fill(seeds)
