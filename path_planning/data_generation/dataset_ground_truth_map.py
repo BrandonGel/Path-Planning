@@ -390,10 +390,13 @@ def create_map(param: Dict, generate_new_graph: bool = False,graph_file: Path =N
         t_setup = time.perf_counter()
 
         generate_boundary_nodes = param.get("generate_boundary_nodes", False)
+        # roadmap_type must be passed through: without it the adaptive Halton
+        # sampler never activates and 'halton' silently degenerates into an
+        # exact duplicate of 'cdt' (uniform samples + CDT triangulation).
         if road_map_type == 'grid':
             nodes = map_.generateRandomNodes(generate_grid_nodes=True, generate_boundary_nodes=generate_boundary_nodes)
         else:
-            nodes = map_.generateRandomNodes(generate_boundary_nodes=generate_boundary_nodes)
+            nodes = map_.generateRandomNodes(generate_boundary_nodes=generate_boundary_nodes, roadmap_type=road_map_type)
         t_sample = time.perf_counter()
         map_.generate_map(road_map_type,nodes)
         t_build = time.perf_counter()
