@@ -83,20 +83,32 @@ class Visualizer2D(BaseVisualizer2D):
         
     def _grid_map_extent(self, grid_map: Grid) -> list:
         """
-        imshow ``extent`` for a grid map. In discrete mode the extent is shifted by
-        -resolution/2 so each cell centers on its node coordinate
-        ``bounds0 + resolution*index`` (see plot_grid_map); continuous roadmaps
-        carry true world coords, so no offset is applied.
+        imshow ``extent`` for a grid map: the raw world bounds, so cell (r, c)
+        is drawn over its true world footprint ``[r, r+1] x [c, c+1]`` in both
+        discrete and continuous modes. (An earlier -resolution/2 shift in
+        discrete mode centered cells on their node coordinates instead, which
+        drew obstacles/inflation half a cell down-left of their true world
+        footprints — world obstacle centers live at half-integers — and made
+        every discrete figure look offset against the roadmap/paths.)
         """
-        off = (
-            float(getattr(grid_map, "resolution", 1.0)) / 2.0
-            if getattr(grid_map, "use_discrete_space", False)
-            else 0.0
-        )
         return [
-            grid_map.bounds[0][0] - off, grid_map.bounds[0][1] - off,
-            grid_map.bounds[1][0] - off, grid_map.bounds[1][1] - off,
+            grid_map.bounds[0][0], grid_map.bounds[0][1],
+            grid_map.bounds[1][0], grid_map.bounds[1][1],
         ]
+
+    def _overlay_offset(self, grid_map) -> float:
+        """World offset placing index-frame overlays at cell centers: a
+        discrete node k represents the whole cell [k, k+1], so drawn
+        nodes/paths/markers shift by +resolution/2. Zero for continuous."""
+        if getattr(grid_map, "use_discrete_space", False):
+            return 0.5 * float(getattr(grid_map, "resolution", 1.0))
+        return 0.0
+
+    # Note on plot_path (inherited from the base class): with map_frame=True it
+    # converts index-frame points via map_to_world, which for discrete maps
+    # already returns CELL CENTERS (k + resolution/2) — so no extra overlay
+    # offset is needed there. Callers must pass map_frame=False for paths that
+    # are already in world coordinates (converting twice shifts them +res/2).
 
     def plot_grid_map(self, grid_map: Grid, equal: bool = False,
                         show_esdf: bool = False, alpha_esdf: float = 0.5,masked_map = None) -> None:
@@ -116,13 +128,10 @@ class Visualizer2D(BaseVisualizer2D):
         self.dim = grid_map.dim
         type_data = grid_map.type_map.data.copy()
 
-        # In discrete mode, grid nodes (and every overlay drawn from them: paths,
-        # start/goal, endpoints) live at the cell *corner* coordinate
-        # ``bounds0 + resolution*index`` (e.g. 23.0), while imshow with
-        # extent=bounds centers cell ``i`` at ``i + 0.5*resolution``. That leaves
-        # obstacles half a cell off from the markers/paths that belong to them, so
-        # shift the extent by -resolution/2 to center each cell on its node coord.
-        # Continuous roadmaps carry true world coords, so no offset is applied.
+        # Cells are drawn over their true world footprint [i, i+1] in both
+        # modes (see _grid_map_extent): world obstacle centers live at
+        # half-integers, so cell i spans [i, i+1] and discrete node i sits at
+        # that cell's lower-left corner.
         extent = self._grid_map_extent(grid_map)
 
         self.ax.imshow(
@@ -178,13 +187,15 @@ class Visualizer2D(BaseVisualizer2D):
             node_alpha: Alpha of the nodes.
             edge_alpha: Alpha of the edges.
         """
-        # node.current is stored in world coordinates throughout the codebase
-        # (see GraphSampler.generateRandomNodes), so plot directly. plot_grid_map
-        # draws the underlying type_map with extent=bounds in world units, so all
-        # overlays must also be in world units. The map_frame argument is kept
-        # for signature compatibility but no longer alters the coordinates.
-        x_coords = np.array([node.current[0] for node in nodes])
-        y_coords = np.array([node.current[1] for node in nodes])
+        # node.current is stored in world coordinates. plot_grid_map draws
+        # cell (i, j) over its true world footprint [i, i+1] x [j, j+1], and a
+        # DISCRETE node i semantically occupies that whole cell — so with
+        # map_frame=True (index-frame roadmaps) overlays shift +resolution/2
+        # to the cell centers. Continuous roadmaps (map_frame=False) carry
+        # true world coordinates and are plotted directly.
+        off = self._overlay_offset(map_) if map_frame else 0.0
+        x_coords = np.array([node.current[0] for node in nodes]) + off
+        y_coords = np.array([node.current[1] for node in nodes]) + off
         if show_edge:
             for i, edges in enumerate(road_map):
                 if len(edges) == 0:
@@ -225,7 +236,7 @@ class Visualizer2D(BaseVisualizer2D):
         is_special = np.zeros(len(nodes), dtype=bool)
         for pts, _color, _marker, _size, _label in special_specs:
             for pt in pts:
-                is_special |= np.isclose(x_coords, pt[0]) & np.isclose(y_coords, pt[1])
+                is_special |= np.isclose(x_coords, pt[0] + off) & np.isclose(y_coords, pt[1] + off)
 
         keep = ~is_special
         # Plot the remaining (generic) sample nodes.
@@ -240,7 +251,7 @@ class Visualizer2D(BaseVisualizer2D):
         # Plot the special endpoints with their respective marker and color.
         for pts, color, marker, size, label in special_specs:
             for k, pt in enumerate(pts):
-                self.ax.scatter(pt[0], pt[1], c=color, marker=marker, s=size,
+                self.ax.scatter(pt[0] + off, pt[1] + off, c=color, marker=marker, s=size,
                                 alpha=1, zorder=self.zorder['expand_tree_node'],
                                 label=label if k == 0 else '')
 
@@ -287,9 +298,11 @@ class Visualizer2D(BaseVisualizer2D):
         combined_schedule.update(copy.deepcopy(schedule["schedule"]))
 
         if map_frame:
+            # map_to_world returns cell centers for discrete maps — no extra
+            # overlay offset on top of it.
             for agent_name, agent in combined_schedule.items():
                 for state in agent:
-                    state["x"],state["y"] = map.map_to_world((state["x"],state["y"]))
+                    state["x"], state["y"] = map.map_to_world((state["x"], state["y"]))
         # Reserve space on the right for the legend only when a legend is drawn;
         # otherwise let the axes fill the whole figure (no white margin).
         _right = 0.82 if show_legend else 1.0
