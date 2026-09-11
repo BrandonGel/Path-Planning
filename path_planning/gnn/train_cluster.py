@@ -10,10 +10,11 @@ from typing import List, Tuple
 
 import numpy as np
 import torch
+import torch.nn as nn
 import wandb
 from torch.nn.utils import clip_grad_norm_
 from torch_geometric.loader import DataLoader
-from torch_geometric.nn import to_hetero
+from torch_geometric.nn import GraphUNet, to_hetero
 
 from path_planning.gnn.dataloader_cluster import (
     GraphDataset,
@@ -121,18 +122,69 @@ def save_embedding_snapshot(loader, model, device, out_file, num_clusters: int =
                         node_features=x, boundary_distance=y)
 
 
+class HeteroClusterEncoder(nn.Module):
+    """to_hetero encoder + a homogeneous GraphUNet refinement stage.
+
+    GraphUNet's top-K pooling cannot be fx-traced by to_hetero, so it runs
+    AFTER the hetero encoder, over the merged embedding and the roadmap
+    ('node','to','node') edges only (approx/boundary relations are S/G
+    shortcuts and self-loops — not meaningful pooling structure). A
+    LazyLinear bridges the encoder's node_out_channels to the configured
+    gnn_in_channels; the final embedding dim becomes gnn_out_channels."""
+
+    def __init__(self, hetero_encoder: nn.Module, graph_unet_params: dict,
+                 default_hidden: int = 64):
+        super().__init__()
+        self.hetero_encoder = hetero_encoder
+        in_ch = int(graph_unet_params.get('gnn_in_channels', default_hidden))
+        hidden = int(graph_unet_params.get('gnn_hidden_channels', in_ch))
+        out_ch = int(graph_unet_params.get('gnn_out_channels', in_ch))
+        depth = int(graph_unet_params.get('depth', 3))
+        pool_ratios = graph_unet_params.get('pool_ratios', [0.5] * depth)
+        self.proj = nn.LazyLinear(in_ch)
+        self.graph_unet = GraphUNet(in_ch, hidden, out_ch, depth, pool_ratios)
+
+    def forward(self, x_dict, edge_index_dict, edge_attr_dict=None, batch_dict=None):
+        out = self.hetero_encoder(x_dict, edge_index_dict, edge_attr_dict, batch_dict)
+        z = out['node']
+        edge_index = edge_index_dict[('node', 'to', 'node')]
+        batch = batch_dict.get('node') if batch_dict else None
+        z = self.graph_unet(self.proj(z), edge_index, batch=batch)
+        return {'node': z}
+
+
+def _get_graph_unet_params(model_config: dict, model_kwargs: dict):
+    """custom_gnn_args may sit inside encoder.model or as its sibling; accept
+    both. Returns the GraphUNet params dict or None (case-insensitive key)."""
+    custom = model_kwargs.pop('custom_gnn_args', None) or model_config.get('custom_gnn_args')
+    if not custom:
+        return None
+    gnn_block = custom.get('gnn') or {}
+    for build_type, params in gnn_block.items():
+        if build_type.lower() == 'graphunet':
+            return dict(params or {})
+    return None
+
+
 def set_cluster_model(model_config: dict, train_config: dict, data_sample, device: torch.device):
     """run_train.set_model adapted for the encoder: metadata comes from
     get_dummy_sample_data() (to/approx/boundary only) so the supervision-only
-    ('node','sp','node') relation never enters the to_hetero module tree."""
+    ('node','sp','node') relation never enters the to_hetero module tree.
+    When custom_gnn_args configures a GraphUNet, the traced hetero encoder is
+    wrapped with a homogeneous post-stage (see HeteroClusterEncoder)."""
     loss_fcn = ClusterLossFunction(model_config['loss'])
 
     model_kwargs = dict(model_config['model'])
+    graph_unet_params = _get_graph_unet_params(model_config, model_kwargs)
     homogeneous_model = get_model(model_type=model_kwargs['type'], **model_kwargs)
     model_in_channels = homogeneous_model.node_in_channels
     dim = data_sample['node'].x.shape[1] - 3
     metadata = get_dummy_sample_data(dim=dim).metadata()
     model = to_hetero(homogeneous_model, metadata, aggr=model_config['model']['to_hetero_aggr']).to(device)
+    if graph_unet_params is not None:
+        model = HeteroClusterEncoder(model, graph_unet_params,
+                                     default_hidden=model_kwargs.get('gnn_hidden_channels', 64)).to(device)
+        model_in_channels = -1  # the LazyLinear bridge needs an init pass too
 
     if model_in_channels == -1:
         with torch.no_grad():  # initialize lazy modules
