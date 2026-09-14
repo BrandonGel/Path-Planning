@@ -38,6 +38,7 @@ from path_planning.cluster.CTopPRMpy.shortening import (
     greedy_shorten_path,
     is_deformable,
     path_length,
+    polyline_free_exact,
     remove_equivalent_paths,
     remove_too_long_paths,
     shorten_path,
@@ -807,8 +808,26 @@ class CTopPRM:
         if self.shortening_mode == "greedy":
             # Direction-independent; applying it twice is a cheap no-op-ish
             # second pass, kept so call sites stay mode-agnostic.
-            return greedy_shorten_path(self.map, path, self.geometry)
-        return shorten_path(self.map, path, self.geometry, forward=forward, grads=self._grads)
+            result = greedy_shorten_path(self.map, path, self.geometry)
+        else:
+            result = shorten_path(self.map, path, self.geometry, forward=forward,
+                                  grads=self._grads)
+        if not getattr(self.map, "use_discrete_space", False):
+            return result
+        # Discrete maps: generate_custom_nodes snaps stored waypoints to the
+        # corner lattice (cluster_map._snap_points), silently changing the
+        # geometry the shorteners validated — snapped shortcuts can cut
+        # through obstacles. Snap here and re-validate exactly; fall back to
+        # the unshortened path (roadmap nodes, snap-stable) if it collides.
+        b = np.asarray(self.map.bounds, dtype=float)[:, 0]
+        res = float(self.map.resolution)
+        snapped = b + res * np.round((np.asarray(result, dtype=float) - b) / res)
+        keep = np.ones(len(snapped), dtype=bool)  # drop snap-collapsed duplicates
+        keep[1:] = np.any(np.diff(snapped, axis=0) != 0, axis=1)
+        snapped = snapped[keep]
+        if len(snapped) < 2 or not polyline_free_exact(self.map, snapped, self.geometry):
+            return path
+        return snapped
 
 
     # ------------------------------------------------------------------

@@ -186,7 +186,25 @@ def segment_free(map_, p1: np.ndarray, p2: np.ndarray, cfg: GeometryConfig) -> b
     single batched ESDF query.
     """
     if cfg.min_clearance <= 0.0:
-        return not map_.in_collision(tuple(p1), tuple(p2))
+        fwd = not map_.in_collision(tuple(p1), tuple(p2))
+        bwd = not map_.in_collision(tuple(p2), tuple(p1))
+        if fwd and bwd:
+            return True
+        if not fwd and not bwd:
+            return False
+        # The two traversal directions disagree: the DDA's boundary
+        # tie-breaking picked different cells at a lattice-aligned endpoint
+        # or a touched cell corner (zero wall distance), not a real crossing
+        # (a segment through an occupied cell's interior fails both ways).
+        # Discrete maps snap every waypoint onto the lattice and traverse
+        # edges both ways downstream, so they stay strict. Continuous maps
+        # relax it: the segment is free if it only *touches* the inflated
+        # boundary, i.e. its sampled points all pass the boundary-inclusive
+        # ``points_free`` check. This makes the verdict direction-independent
+        # and consistent with the boundary-inclusive point predicate.
+        if getattr(map_, "use_discrete_space", False):
+            return False
+        return _segment_free_sampled(map_, p1, p2, cfg)
     pts = _segment_samples(p1, p2, cfg.collision_distance_check)
     return bool(np.all(map_.min_wall_distance(pts) >= cfg.min_clearance))
 
@@ -195,8 +213,8 @@ def _segment_free_sampled(map_, p1: np.ndarray, p2: np.ndarray, cfg: GeometryCon
     """Sampled (batched) segment check — fast inner-loop variant.
 
     Can miss sub-cell corner clips between samples in inflation mode, so
-    construction code that relies on it must validate the final polyline
-    with ``polyline_free_exact`` before accepting it.
+    construction code that relies on it must exact-check each shortcut
+    segment with ``segment_free`` before committing it.
     """
     pts = _segment_samples(p1, p2, cfg.collision_distance_check)
     return bool(np.all(points_free(map_, pts, cfg)))
@@ -337,8 +355,16 @@ def shorten_path(
     segment (``g - (g.s)s``, the C++ ``s x (g x s)`` in any dimension).
 
     The forward and backward passes give different results; callers apply
-    both, as the C++ does. On push-out failure the input is returned
-    unchanged (the C++ logs an error and does the same).
+    both, as the C++ does.
+
+    Unlike the C++ (which validates nothing and trusts the sampled checks),
+    every committed shortcut segment is exact-checked (DDA) when it is
+    committed. A shortcut that fails falls back to the farthest resampled
+    point of the *original* path that is exactly reachable, and in the
+    worst case to the next resampled point (an original sub-segment). So a
+    single blocked stretch only leaves that stretch unshortened instead of
+    discarding the whole result, and the output never contains an
+    unvalidated segment that is not part of the input path.
 
     Args:
         map_: GraphSampler (or Grid) providing collision/ESDF queries.
@@ -367,10 +393,34 @@ def shorten_path(
     # so probe from one cell outward instead.
     c_eff = max(cfg.min_clearance, float(map_.resolution))
     out = [sampled[0]]
+    last_idx = 0  # sampled index of the last committed on-path point
+    anchor_pushed = False  # whether out[-1] is an off-path push-out point
+
+    def commit_fallback(i: int) -> None:
+        """Commit the farthest sampled[j], last_idx < j < i, exactly
+        reachable from the anchor; else drop an off-path anchor and retry
+        from the on-path one; else commit sampled[last_idx + 1] (an
+        original sub-segment)."""
+        nonlocal last_idx, anchor_pushed
+        for _ in range(2):
+            anchor = out[-1]
+            for j in range(i - 1, last_idx, -1):
+                if segment_free(map_, anchor, sampled[j], cfg):
+                    out.append(sampled[j])
+                    last_idx, anchor_pushed = j, False
+                    return
+            if not anchor_pushed:
+                break
+            out.pop()  # off-path anchor is unreachable; revert to on-path
+            anchor_pushed = False
+        if last_idx + 1 < i:
+            out.append(sampled[last_idx + 1])
+            last_idx += 1
+
     for i in range(1, len(sampled) - 1):
         anchor = out[-1]
-        # Sampled (batched) check in the hot loop; the exact DDA validation
-        # of the final polyline below catches any missed corner clip.
+        # Sampled (batched) check in the hot loop; the exact DDA check runs
+        # once per committed segment below.
         if _segment_free_sampled(map_, anchor, sampled[i], cfg):
             continue
         coll = segment_first_collision(map_, anchor, sampled[i], cfg)
@@ -392,25 +442,29 @@ def shorten_path(
         t = c_eff
         while t < cfg.push_out_max_factor * c_eff:
             cand = center + v * t
-            if point_free(map_, cand, cfg):
+            if point_free(map_, cand, cfg) and segment_free(map_, anchor, cand, cfg):
                 out.append(cand)
+                anchor_pushed = True
                 placed = True
                 break
             t += cfg.collision_distance_check
         if not placed:
-            logger.warning(
-                "shorten_path: push-out failed near %s; returning path unchanged",
-                np.round(coll, 3),
+            logger.debug(
+                "shorten_path: push-out failed near %s; keeping original "
+                "sub-path there", np.round(coll, 3),
             )
-            return path.copy()
-    out.append(sampled[-1])
+            commit_fallback(i)
+    last = len(sampled) - 1
+    if not segment_free(map_, out[-1], sampled[last], cfg):
+        commit_fallback(last)
+        # Exhaust remaining original sub-segments until the end is reachable.
+        while not segment_free(map_, out[-1], sampled[last], cfg) and last_idx + 1 < last:
+            out.append(sampled[last_idx + 1])
+            last_idx += 1
+    out.append(sampled[last])
     if not forward:
         out = out[::-1]
-    result = np.asarray(out)
-    if not polyline_free_sampled(map_, result, cfg):
-        logger.debug("shorten_path: validation failed; returning path unchanged")
-        return path.copy()
-    return result
+    return np.asarray(out)
 
 
 def greedy_shorten_path(map_, path: np.ndarray, cfg: GeometryConfig) -> np.ndarray:
@@ -430,14 +484,16 @@ def greedy_shorten_path(map_, path: np.ndarray, cfg: GeometryConfig) -> np.ndarr
     last = len(sampled) - 1
     while i < last:
         j = last
-        while j > i + 1 and not _segment_free_sampled(map_, sampled[i], sampled[j], cfg):
+        # Cheap sampled check first, exact DDA only on the surviving
+        # candidate; j == i + 1 is an original sub-segment and is accepted.
+        while j > i + 1 and not (
+            _segment_free_sampled(map_, sampled[i], sampled[j], cfg)
+            and segment_free(map_, sampled[i], sampled[j], cfg)
+        ):
             j -= 1
         out.append(sampled[j])
         i = j
-    result = np.asarray(out)
-    if not polyline_free_sampled(map_, result, cfg):
-        return path.copy()
-    return result
+    return np.asarray(out)
 
 
 # ---------------------------------------------------------------------------
