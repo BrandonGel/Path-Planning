@@ -10,6 +10,7 @@ from path_planning.utils.util import (
 import os
 import tempfile
 import numpy as np
+import yaml
 from pathlib import Path
 from tqdm import tqdm
 from path_planning.common.environment.map.graph_sampler import GraphSampler, Node
@@ -326,6 +327,7 @@ def process_single_case_graphs(args: Tuple[Path, dict]) -> Tuple[bool, Path]:
     # Boundary nodes default ON here: this cluster generator exists to produce
     # boundary-aware data (BOUNDARY one-hot + ('node','boundary','node') loops).
     generate_boundary_nodes = config["generate_boundary_nodes"] if "generate_boundary_nodes" in config else True
+    boundary_node_spacing = config.get("boundary_node_spacing", None)
     num_samples = config["num_samples"] if "num_samples" in config else 1000
     num_neighbors = config["num_neighbors"] if "num_neighbors" in config else 4.0
     min_edge_len = config["min_edge_len"] if "min_edge_len" in config else 0.0
@@ -343,6 +345,24 @@ def process_single_case_graphs(args: Tuple[Path, dict]) -> Tuple[bool, Path]:
 
     input_file = get_input_file_path(case_dir)
     agents = read_agents_from_yaml(input_file)
+    # Halton sampling parameters (d_min/d_opt/sigma/floor): the case's input.yaml
+    # records them when the case was created from map.yaml; fall back to the
+    # generator config so a legacy case still gets the adaptive sampler.
+    with open(input_file, "r") as f:
+        _input_yaml = yaml.safe_load(f) or {}
+    sampling_dist_dict = _input_yaml.get("sampling_dist_dict") or config.get("sampling_dist_dict", {}) or {}
+
+    # 'grid' is a true lattice (one node per free cell, 4-neighbour edges), the
+    # same construction as dataset_ground_truth_map.create_map builds at test
+    # time. Without this the cluster generator would silently produce a KNN
+    # roadmap over num_samples random points, i.e. a prm under another name.
+    if road_map_type == "grid":
+        use_discrete_space = True
+        generate_grid_nodes = True
+        num_samples = 0
+        num_neighbors = 4.0
+        min_edge_len = 1e-10
+        max_edge_len = (1 + 1e-10) * resolution
     gt_dir = generate_roadmap_path(generate_ground_truth_path(case_dir), road_map_type_gt)
     solution_name_suffix = get_solution_name_suffix(graph_file=graph_file_name)
     density_map_file = get_density_map_file(gt_dir, solution_name_suffix,agent_velocity)
@@ -385,7 +405,8 @@ def process_single_case_graphs(args: Tuple[Path, dict]) -> Tuple[bool, Path]:
                 boundary_weights_arr = np.zeros((0,), dtype=np.float32)
         else:
             map_ = read_graph_sampler_from_yaml(
-                input_file, use_discrete_space=use_discrete_space
+                input_file, use_discrete_space=use_discrete_space,
+                sampling_dist_dict=sampling_dist_dict,
             )
             map_.set_inflation_radius(radius=agent_radius+np.sqrt(2)/2*resolution)
             map_.set_parameters(
@@ -407,7 +428,10 @@ def process_single_case_graphs(args: Tuple[Path, dict]) -> Tuple[bool, Path]:
             else:
                 prob_map = None
             samp_from_prob_map_ratio = config["samp_from_prob_map_ratio"] if "samp_from_prob_map_ratio" in config else 0
-            map_.generateRandomNodes(generate_grid_nodes=generate_grid_nodes,generate_boundary_nodes=generate_boundary_nodes,prob_map=prob_map,samp_from_prob_map_ratio=samp_from_prob_map_ratio)
+            # roadmap_type must be passed through: without it the adaptive Halton
+            # sampler never activates and 'halton' degenerates into an exact
+            # duplicate of 'cdt' (uniform samples + CDT triangulation).
+            map_.generateRandomNodes(generate_grid_nodes=generate_grid_nodes,generate_boundary_nodes=generate_boundary_nodes,prob_map=prob_map,samp_from_prob_map_ratio=samp_from_prob_map_ratio,roadmap_type=road_map_type,boundary_node_spacing=boundary_node_spacing)
             map_.generate_map(road_map_type,map_.nodes)
 
             (ndata, node_to_node_edges_arr, node_to_node_weights_arr,

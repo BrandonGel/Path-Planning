@@ -2,8 +2,8 @@ import numpy as np
 from scipy.stats import qmc
 
 # Global parameter defaults
-d_min = 0.3       # Minimum allowed distance to avoid points being too close to obstacles
-d_opt = 0.4       # Optimal distance (highest sampling probability)
+d_min = 0.0       # Minimum allowed distance to avoid points being too close to obstacles
+d_opt = 0.1       # Optimal distance (highest sampling probability)
 sigma = 0.5       # Controls the width of the probability distribution
 floor_prob = 0.2  # Minimum sampling probability in open areas
 
@@ -52,9 +52,8 @@ def halton_sampling(
     raw = halton_sampler.random(n_draw)
     samples = qmc.scale(raw, bounds[:, 0], bounds[:, 1])
 
-    if d_min <= 0:
-        return samples, halton_sampler
-
+    # d_min <= 0 only removes the hard cutoff near the inflation; the
+    # Gaussian preference (d_opt / sigma / floor) still shapes the density.
     dists = min_wall_distance(samples)
     dists = np.asarray(dists, dtype=float)
     probs = density_probability(dists, d_min, d_opt, sigma, floor)

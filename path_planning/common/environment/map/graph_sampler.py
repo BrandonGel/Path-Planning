@@ -131,6 +131,33 @@ class GraphSampler(Grid):
         mask = (self.type_map.data == TYPES.OBSTACLE) | (self.type_map.data == TYPES.INFLATION)
         return get_boundary(self, mask)
 
+    @staticmethod
+    def resample_boundary(bnd_pts: np.ndarray, bnd_segs: np.ndarray, spacing: float) -> np.ndarray:
+        """Boundary vertices plus points every ``spacing`` along each segment.
+
+        Every segment of length L gets ``round(L / spacing)`` equal
+        subdivisions (at least one), so when ``spacing`` divides the wall
+        lengths (e.g. ``spacing == resolution`` on a rectilinear boundary)
+        the interior points land exactly on the cell corners. Corner /
+        junction vertices come first, in their original order, followed by
+        the interior points; duplicates (shared corners) are dropped.
+        """
+        pts = np.asarray(bnd_pts, dtype=float)
+        out = [tuple(float(v) for v in p) for p in pts]
+        seen = {tuple(round(float(v), 8) for v in p) for p in out}
+        for u, v in np.asarray(bnd_segs, dtype=int).tolist():
+            a, b = pts[u], pts[v]
+            length = float(np.linalg.norm(b - a))
+            n = max(int(round(length / spacing)), 1)
+            for k in range(1, n):
+                q = a + (b - a) * (k / n)
+                key = tuple(round(float(x), 8) for x in q)
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append(tuple(float(x) for x in q))
+        return np.asarray(out, dtype=float)
+
     def _rebuild_boundary_nodes_index(self):
         """Re-point boundary_nodes_index at the current node registry (node
         indices shift whenever nodes are re-registered); boundary points not
@@ -579,7 +606,7 @@ class GraphSampler(Grid):
 
         return float(dists[0]) if single else dists
 
-    def generateRandomNodes(self, generate_grid_nodes = False,generate_boundary_nodes = False,prob_map = None,samp_from_prob_map_ratio = 0.5,roadmap_type:str=None):
+    def generateRandomNodes(self, generate_grid_nodes = False,generate_boundary_nodes = False,prob_map = None,samp_from_prob_map_ratio = 0.5,roadmap_type:str=None,boundary_node_spacing: float | None = None):
         if roadmap_type == 'rrg':
             return []
 
@@ -679,13 +706,19 @@ class GraphSampler(Grid):
                     self.grid_nodes_index[node] = len(nodes)-1
                     self.grid_points.append(grid_coords_tuple)
 
-        if generate_boundary_nodes:
+        want_spacing = boundary_node_spacing is not None and boundary_node_spacing > 0
+        if generate_boundary_nodes or want_spacing:
             # Obstacle/map boundary vertices (merged wall corners/junctions)
             # from the CDT boundary extraction. They lie ON the obstacle
             # outline — same as the CDT roadmap's own boundary nodes — so no
             # expandability filter is applied; edge-level collision checks in
             # the roadmap builders decide connectivity.
-            bnd_pts, _, _ = self.get_obstacle_boundary()
+            # With ``boundary_node_spacing`` the merged wall segments are
+            # resampled every ``spacing`` world units (spacing == resolution
+            # -> one node per boundary cell), corners first.
+            bnd_pts, bnd_segs, _ = self.get_obstacle_boundary()
+            if want_spacing:
+                bnd_pts = self.resample_boundary(bnd_pts, bnd_segs, boundary_node_spacing)
             for point in bnd_pts:
                 current = tuple(float(v) for v in point)
                 node = Node(current, None, 0, 0)
@@ -1271,6 +1304,31 @@ class GraphSampler(Grid):
     def set_obstacles(self, obstacles: np.ndarray):
         self.obstacles = [tuple[Any, ...](obs) for obs in obstacles]
         self.set_obstacle_map(obstacles)
+
+    def inflate_obstacles(self, radius: float = 1.0) -> None:
+        """Euclidean ESDF inflation plus the 8-connected (2^dim - 1) ring.
+
+        ``Grid.inflate_obstacles`` marks a free cell when the center-to-center
+        ESDF is within ``radius``. Diagonal neighbours of an obstacle cell sit
+        at ``sqrt(dim) * resolution`` and are skipped by the usual
+        ``agent_radius + sqrt(2)/2 * resolution`` radius even though they
+        share a corner with the obstacle. Whenever the Euclidean mask reaches
+        the edge neighbours (``radius >= resolution``) the full 3^dim ring is
+        added so corners are blocked too. A radius that inflates nothing
+        (e.g. a point agent) still inflates nothing.
+
+        Note: ring-only cells are INFLATION in the type map but keep a
+        positive ``min_wall_distance`` (it subtracts ``radius`` from the
+        obstacle ESDF); collision queries use the type map, so this only
+        affects the Halton sampling weights and ``min_clearance > 0`` checks.
+        """
+        super().inflate_obstacles(radius)
+        if radius < float(self.resolution):
+            return
+        from scipy.ndimage import binary_dilation
+        obstacle = self.type_map.data == TYPES.OBSTACLE
+        ring = binary_dilation(obstacle, structure=np.ones((3,) * self.dim, dtype=bool))
+        self.type_map[ring & (self.type_map.data == TYPES.FREE)] = TYPES.INFLATION
 
     def set_inflation_radius(self, radius: float):
         self.inflation_radius = radius

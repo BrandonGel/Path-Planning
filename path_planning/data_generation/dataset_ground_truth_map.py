@@ -37,6 +37,37 @@ from path_planning.data_generation.dataset_util import *
 from path_planning.common.environment.map.graph_sampler import validate_roadmap_type
 
 KEYS = ["bounds", "resolution", "time_limit", "max_iterations", "road_map_type", "use_discrete_space", "sample_num", "num_neighbors", "min_edge_len", "max_edge_len", "agent_radius", "nb_obstacles", "nb_agents", "obs_size"]
+# Keys that define the case itself (obstacle / agent sampling). An existing
+# case is NEVER regenerated implicitly (cases may be hand-built or copied, and
+# regenerating replaces their obstacles); a mismatch only prints a warning.
+CASE_KEYS = ("bounds", "resolution", "nb_obstacles", "nb_agents", "obs_size")
+# Keys that only steer how the roadmap is built from the case's obstacles and
+# agents; a mismatch patches input.yaml (+ permutation copies) and rebuilds
+# the graph for the requested roadmap type. agent_radius is here because the
+# parameter directory encodes it: a case copied from another radius folder
+# must be inflated with the radius of the folder it lives in.
+MAP_BUILD_KEYS = (
+    "agent_radius", "road_map_type", "use_discrete_space", "sample_num",
+    "num_neighbors", "min_edge_len", "max_edge_len", "generate_boundary_nodes",
+    "boundary_node_spacing", "sampling_dist_dict",
+)
+
+
+def _read_build_config(graph_file: Path):
+    """Build settings recorded in ``<pickle stem>_runtime.yaml`` next to ``graph_file``
+    (see create_map), or None when the sidecar or the record is missing (legacy pickle)."""
+    runtime_file = get_graph_runtime_file_path(graph_file.parent, graph_file.name)
+    if not runtime_file.exists():
+        return None
+    try:
+        with open(runtime_file, "r") as f:
+            data = yaml.safe_load(f)
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    build_config = data.get("build_config")
+    return build_config if isinstance(build_config, dict) else None
 
 
 def _make_position_sampler(mean_cells, std_cells, dimensions, uniform_fallback, max_attempts, stats, key):
@@ -168,6 +199,9 @@ class InputFile:
         # (GraphSampler.generateRandomNodes(generate_boundary_nodes=...)). Not in
         # KEYS on purpose: existing datasets' input.yaml lack it and must stay valid.
         generate_boundary_nodes = kwargs.get("generate_boundary_nodes", False)
+        # Optional spacing (world units) for resampling the boundary; None keeps
+        # corners/junctions only, resolution gives one node per boundary cell.
+        boundary_node_spacing = kwargs.get("boundary_node_spacing", None)
         sampling_dist_dict = kwargs.get("sampling_dist_dict", {})
         gen_cfg = normalize_gen_config(kwargs.get("gen", None))  # start/goal placement (config/gen.yaml)
         map_ = GraphSampler(bounds=bounds, resolution=resolution, start=[], goal=[], sampling_dist_dict=sampling_dist_dict)
@@ -193,6 +227,7 @@ class InputFile:
             "resolution": resolution,
             "obs_size": obs_size,
             "generate_boundary_nodes": generate_boundary_nodes,
+            "boundary_node_spacing": boundary_node_spacing,
             "sampling_dist_dict": sampling_dist_dict,
         }
         total_cells = int(math.prod(dimensions))
@@ -390,13 +425,14 @@ def create_map(param: Dict, generate_new_graph: bool = False,graph_file: Path =N
         t_setup = time.perf_counter()
 
         generate_boundary_nodes = param.get("generate_boundary_nodes", False)
+        boundary_node_spacing = param.get("boundary_node_spacing", None)
         # roadmap_type must be passed through: without it the adaptive Halton
         # sampler never activates and 'halton' silently degenerates into an
         # exact duplicate of 'cdt' (uniform samples + CDT triangulation).
         if road_map_type == 'grid':
-            nodes = map_.generateRandomNodes(generate_grid_nodes=True, generate_boundary_nodes=generate_boundary_nodes)
+            nodes = map_.generateRandomNodes(generate_grid_nodes=True, generate_boundary_nodes=generate_boundary_nodes, boundary_node_spacing=boundary_node_spacing)
         else:
-            nodes = map_.generateRandomNodes(generate_boundary_nodes=generate_boundary_nodes, roadmap_type=road_map_type)
+            nodes = map_.generateRandomNodes(generate_boundary_nodes=generate_boundary_nodes, roadmap_type=road_map_type, boundary_node_spacing=boundary_node_spacing)
         t_sample = time.perf_counter()
         map_.generate_map(road_map_type,nodes)
         t_build = time.perf_counter()
@@ -415,6 +451,10 @@ def create_map(param: Dict, generate_new_graph: bool = False,graph_file: Path =N
                 },
                 "num_nodes": len(map_.nodes),
                 "num_edges": len(map_.edges),
+                # Settings this pickle was built with; process_single_case_map_generation
+                # compares against them (not against the shared input.yaml, which only
+                # reflects the LAST roadmap type built) to decide whether a rebuild is needed.
+                "build_config": {k: param.get(k) for k in MAP_BUILD_KEYS},
             },
         )
         if verbose:
@@ -547,17 +587,76 @@ def process_single_case_map_generation(args: Tuple) -> Optional[int]:
     inpt = input_class.get_input_content()
     if graph_file is None:
         graph_file = get_graph_file_path(map_path)
-    if generate_new_graph or not inpt or not graph_file.exists():
+    # Regenerate the case only when explicitly asked or when input.yaml is
+    # missing/invalid. A missing graph pickle alone is NOT a reason: a valid
+    # existing input.yaml (e.g. a hand-built case) must be kept, and
+    # create_map below builds the graph from it.
+    # An existing case is kept (obstacles, agents, permutations), but the
+    # roadmap built from it must reflect the requested config: when map-build
+    # keys differ (radius/roadmap type/sampling/boundary nodes) they are
+    # patched into input.yaml (+ its permutation copies) and only the graph
+    # for this roadmap type is rebuilt. Case-defining keys are never changed
+    # here; a mismatch is reported so the user can decide (-gng regenerates
+    # the case from scratch, i.e. NEW obstacles and agents).
+    rebuild_graph = False
+    if inpt and not generate_new_graph:
+        case_diff = {
+            k: (inpt.get(k), config[k]) for k in CASE_KEYS
+            if k in config and inpt.get(k) is not None and inpt.get(k) != config[k]
+        }
+        if case_diff:
+            print(f"case_{case_id}: WARNING existing input.yaml differs from the config on {case_diff} "
+                  f"(existing -> requested); the case is kept as is")
+        if True:
+            build_diff = {
+                k: (inpt.get(k), config[k]) for k in MAP_BUILD_KEYS
+                if k in config and (inpt.get(k) or None) != (config[k] or None)
+            }
+            if build_diff:
+                # input.yaml is shared by every roadmap type of the case and records
+                # the settings of whichever type was built last, so a mismatch here is
+                # expected whenever scripts loop over several types. Rebuild only if
+                # THIS type's pickle was built with different settings (recorded in
+                # its runtime sidecar); a legacy pickle without that record is rebuilt.
+                built_with = _read_build_config(Path(graph_file))
+                if Path(graph_file).exists() and built_with is not None:
+                    stale = {
+                        k: (built_with.get(k), config[k]) for k in MAP_BUILD_KEYS
+                        if k in config and (built_with.get(k) or None) != (config[k] or None)
+                    }
+                elif Path(graph_file).exists():
+                    stale = build_diff  # legacy pickle without a build record
+                else:
+                    stale = {}  # no pickle yet: create_map builds it anyway
+                if stale:
+                    print(f"case_{case_id}: map-build settings changed {stale} (existing -> requested); rebuilding the {road_map_type} graph")
+                    rebuild_graph = True
+                patch = {k: config[k] for k in build_diff}
+                inpt.update(patch)
+                with open(input_file, "w") as f:
+                    yaml.safe_dump(_to_native_yaml(inpt), f)
+                perm_base = generate_perm_base_path(case_path)
+                if perm_base.exists():
+                    for p in sorted(perm_base.iterdir()):
+                        pf = p / "input.yaml"
+                        if not (p.is_dir() and pf.exists()):
+                            continue
+                        with open(pf, "r") as f:
+                            perm_inpt = yaml.safe_load(f)
+                        if isinstance(perm_inpt, dict):
+                            perm_inpt.update(patch)
+                            with open(pf, "w") as f:
+                                yaml.safe_dump(_to_native_yaml(perm_inpt), f)
+    if generate_new_graph or not inpt:
         inpt = input_class.gen_input(**config)
-        if generate_new_graph or not graph_file.exists() or not input_file.exists():
-            if verbose:
-                print(f"Generated new input file {input_file}")
-            with open(input_file, "w") as f:
-                yaml.safe_dump(_to_native_yaml(inpt), f)   
+        if verbose:
+            print(f"Generated new input file {input_file}")
+        with open(input_file, "w") as f:
+            yaml.safe_dump(_to_native_yaml(inpt), f)
     
 
     # Build and save graph once
-    create_map(inpt, generate_new_graph,graph_file,verbose)
+    create_map(inpt, generate_new_graph or rebuild_graph, graph_file, verbose)
 
     # Generate and save permutation agent configs
     generate_permutation(inpt, config, case_path, generate_new_graph=generate_new_graph, verbose=verbose)
