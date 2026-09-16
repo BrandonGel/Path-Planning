@@ -113,6 +113,7 @@ class CTopPRM:
         force_min_clusters: bool = False,
         clustering: str = "wavefront",
         custom_seeds: Optional[Sequence[Endpoint]] = None,
+        em_kwargs: Optional[dict] = None,
     ) -> None:
         if shortening_mode not in _SHORTENING_MODES:
             raise ValueError(
@@ -132,6 +133,9 @@ class CTopPRM:
                 "(e.g. generateRandomNodes + generate_roadmap)"
             )
         self.map = graph_map
+        # Extra GraphEM constructor kwargs for clustering == "em"
+        # (e.g. {"covariance_type": "spherical"}).
+        self.em_kwargs = dict(em_kwargs or {})
         self._min_clusters_arg = min_clusters
         self._max_clusters_arg = max_clusters
         self.max_path_length_ratio = float(max_path_length_ratio)
@@ -232,7 +236,7 @@ class CTopPRM:
             # (endpoints stay fixed) and the wavefront fill below
             # regenerates all downstream state.
             target_k = max(self.min_clusters, num_seeds)
-            self.cluster_model = GraphEM(self.map, target_k).fit(seeds)
+            self.cluster_model = GraphEM(self.map, target_k, **self.em_kwargs).fit(seeds)
             seeds = list(self.cluster_model.center_node_indices)
             self.max_clusters = max(self.max_clusters, len(seeds))
         elif self.clustering == "custom":

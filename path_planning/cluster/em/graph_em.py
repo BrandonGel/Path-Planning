@@ -44,6 +44,7 @@ assignments stay available as ``responsibilities``.
 from __future__ import annotations
 
 import logging
+import time
 from typing import List, Optional, Sequence, Tuple, Union
 
 import numpy as np
@@ -57,6 +58,8 @@ from path_planning.cluster.kmeans.graph_kmeans import (
 from path_planning.common.environment.node import Node
 
 logger = logging.getLogger(__name__)
+
+_COVARIANCE_TYPES = ("full", "spherical")
 
 Endpoint = Union[int, Sequence[float]]
 
@@ -124,6 +127,7 @@ class GraphEM:
             for the anchor spacing guard and reporting.
         log_likelihood_history: total log-likelihood per EM iteration.
         n_iter_: EM iterations run.
+        timed_out_: True when fit stopped on ``time_limit``.
     """
 
     def __init__(
@@ -131,15 +135,34 @@ class GraphEM:
         graph_map,
         n_clusters: int,
         *,
-        max_iters: int = 50,
-        tol: float = 1e-6,
+        max_iters: int = 25,
+        tol: float = 1e-3,
         min_sigma: Optional[float] = None,
         dup_radius: Optional[float] = None,
         init: str = "kpp",
         patience: Optional[int] = None,
+        covariance_type: str = "full",
+        time_limit: Optional[float] = None,
     ) -> None:
         if init not in _INIT_MODES:
             raise ValueError(f"init must be one of {_INIT_MODES}, got {init!r}")
+        if covariance_type not in _COVARIANCE_TYPES:
+            raise ValueError(
+                f"covariance_type must be one of {_COVARIANCE_TYPES}, got {covariance_type!r}"
+            )
+        # "full": anisotropic Sigma_k learned per component (default).
+        # "spherical": Sigma_k = sigma_k^2 I. The graph-warped displacement then
+        # enters the likelihood only through its length, so the E-step reduces
+        # to D_kn^2 / sigma_k^2 (no direction tensor, no batched inverses) and
+        # the M-step to a weighted mean of D^2 -- both fully vectorized over K.
+        self.covariance_type = covariance_type
+        # Wall-clock budget for fit() in seconds (None = unlimited). Checked
+        # after every E-step; on expiry fit returns the best snapshot so far
+        # (same path as the max_iters cap) and sets timed_out_ = True.
+        if time_limit is not None and float(time_limit) <= 0.0:
+            raise ValueError(f"time_limit must be > 0, got {time_limit}")
+        self.time_limit = None if time_limit is None else float(time_limit)
+        self.timed_out_ = False
         if not getattr(graph_map, "nodes", None) or not getattr(graph_map, "road_map", None):
             raise ValueError(
                 "graph_map has no roadmap; generate one first "
@@ -250,6 +273,8 @@ class GraphEM:
         seen = set()
         prev_ll = -np.inf
         since_best = 0
+        self.timed_out_ = False
+        t_start = time.perf_counter()
         for it in range(1, self.max_iters + 1):
             self.n_iter_ = it
             D = self._distance_matrix(sources)
@@ -280,6 +305,14 @@ class GraphEM:
                 )
                 break
             seen.add(tuple(sources))
+            if (self.time_limit is not None
+                    and time.perf_counter() - t_start >= self.time_limit):
+                self.timed_out_ = True
+                logger.warning(
+                    "GraphEM time limit of %.0fs reached after %d iterations; "
+                    "returning the best snapshot so far", self.time_limit, it
+                )
+                break
 
             weights, covs, new_sources = self._m_step(
                 sources, D, resp, reachable, centers, snapped, len(fixed)
@@ -451,6 +484,21 @@ class GraphEM:
         likelihood.
         """
         dim = self._points.shape[1]
+        if self.covariance_type == "spherical":
+            # Sigma_k = s_k I  ->  v^T Sigma^{-1} v = D^2 / s_k, log|Sigma| = d log s_k
+            s2 = covs[:, 0, 0]                                        # (K,)
+            const = np.log(weights) - 0.5 * dim * (_LOG_2PI + np.log(s2))
+            with np.errstate(invalid="ignore", divide="ignore"):
+                z2 = np.where(np.isfinite(D), np.square(D) / s2[:, None], np.inf)
+            logp = const[:, None] - 0.5 * z2
+            m = np.max(logp, axis=0)
+            reachable = np.isfinite(m)
+            resp = np.zeros_like(logp)
+            lse = m[reachable] + np.log(
+                np.sum(np.exp(logp[:, reachable] - m[reachable]), axis=0)
+            )
+            resp[:, reachable] = np.exp(logp[:, reachable] - lse)
+            return resp, reachable, float(np.sum(lse))
         precs = np.linalg.inv(covs)                # (K, d, d) batched
         logdets = np.linalg.slogdet(covs)[1]       # (K,)
         const = np.log(weights) - 0.5 * (dim * _LOG_2PI + logdets)
@@ -514,7 +562,14 @@ class GraphEM:
         d_fin = np.where(np.isfinite(D[:, reachable]), D[:, reachable], 0.0)
         covs = np.empty((len(sources), dim, dim))
         pts_reach = self._points[reachable]
+        if self.covariance_type == "spherical":
+            # sigma_k^2 = E_r[|v|^2] / dim = sum_n r_kn D_kn^2 / (dim * mass_k)
+            s2 = (r * np.square(d_fin)).sum(axis=1) / (dim * safe_mass)
+            s2 = np.maximum(s2, self.min_sigma ** 2)
+            covs[:] = s2[:, None, None] * np.eye(dim)[None]
         for k, s in enumerate(sources):
+            if self.covariance_type == "spherical":
+                break
             # Unit direction row rebuilt on the fly (identical values to the
             # former precomputed U tensor, without the (K, n, dim) memory).
             disp = pts_reach - self._points[s]

@@ -37,7 +37,15 @@ from path_planning.data_generation.dataset_util import (
 from path_planning.utils.util import agents_yaml_to_roadmap_frame, set_global_seed
 
 # method name (folder / file suffix) -> CTopPRM clustering mode
-CLUSTER_METHODS = {"ctopprm": "wavefront", "kmeans": "kmeans", "em": "em"}
+CLUSTER_METHODS = {"ctopprm": "wavefront", "kmeans": "kmeans", "em": "em", "em_iso": "em"}
+# Extra GraphEM kwargs per method (em_iso = EM with spherical covariances).
+# Both EM variants get a 5-minute wall-clock budget per case: on expiry the
+# best snapshot so far is used (recorded as em_timed_out in the stats).
+EM_TIME_LIMIT = 300.0
+EM_KWARGS = {
+    "em": {"time_limit": EM_TIME_LIMIT},
+    "em_iso": {"covariance_type": "spherical", "time_limit": EM_TIME_LIMIT},
+}
 
 
 def get_cluster_graph_name(method: str, source_graph_name: str = "graph_map.pkl") -> str:
@@ -109,6 +117,7 @@ def build_cluster_map(
         # cluster_fraction is not a floor for the ctopprm method. kmeans/em
         # reach K on their own; keep them on the natural-stop path.
         force_min_clusters=CLUSTER_METHODS[method] == "wavefront",
+        em_kwargs=EM_KWARGS.get(method),
     )
     planner.set_up_distinct_paths(list(zip(starts, goals)))
     t_cluster = time.perf_counter()
@@ -137,7 +146,7 @@ def build_cluster_map(
 
     stats = {
         "method": method,
-        "clustering_mode": CLUSTER_METHODS[method],
+        "clustering_mode": CLUSTER_METHODS[method] + ("(spherical)" if method == "em_iso" else ""),
         "min_clusters": k,
         "num_clusters": len(planner.seed_indices),
         "num_nodes": len(fresh.nodes),
@@ -150,6 +159,10 @@ def build_cluster_map(
             "build": t_build - t_distill,
         },
     }
+    em_model = getattr(planner, "cluster_model", None)
+    if CLUSTER_METHODS[method] == "em" and em_model is not None:
+        stats["em_iterations"] = int(getattr(em_model, "n_iter_", 0))
+        stats["em_timed_out"] = bool(getattr(em_model, "timed_out_", False))
     return fresh, stats
 
 
