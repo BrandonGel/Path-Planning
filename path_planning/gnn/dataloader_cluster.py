@@ -120,7 +120,29 @@ def _load_single_graph(files: Tuple[Path, Path]) -> HeteroData:
         'binary_id': binary_id
     }
 
-def get_dummy_sample_data(dim: int = 2):
+TASK_RELATION = ('node', 'approx', 'node')      # start/goal -> all-node Dijkstra edges
+BOUNDARY_RELATION = ('node', 'boundary', 'node')  # boundary-node self-loops
+
+
+def apply_edge_ablation(data: HeteroData, use_boundary_edges: bool = True,
+                        use_task_edges: bool = True) -> HeteroData:
+    """Drop the task (approx) and/or boundary relation from a cluster
+    HeteroData in place (edge-ablation runs; idempotent, returns data). The
+    node features are untouched: the [start/goal, free, boundary] one-hot and
+    the cluster target y still carry both signals — this removes message
+    passing over the relation, not the information."""
+    if not use_task_edges and TASK_RELATION in data.edge_types:
+        del data[TASK_RELATION]
+    if not use_boundary_edges and BOUNDARY_RELATION in data.edge_types:
+        del data[BOUNDARY_RELATION]
+    return data
+
+
+def get_dummy_sample_data(dim: int = 2, use_boundary_edges: bool = True,
+                          use_task_edges: bool = True):
+    """Minimal HeteroData whose metadata() matches real cluster samples:
+    to (+ approx / boundary when the corresponding flag is on). The model is
+    to_hetero'd on this, so the flags must match the data the model sees."""
     data = HeteroData()
     num_nodes = 100
     # dim + 3: [pos | start/goal | free | boundary]
@@ -128,17 +150,19 @@ def get_dummy_sample_data(dim: int = 2):
     data['node','to','node'].edge_index = torch.tensor(np.zeros((2,num_nodes)), dtype=torch.long)
     data['node','to','node'].edge_attr = torch.tensor(np.zeros((num_nodes,1)), dtype=torch.float)
     data['node','to','node'].edge_weight = None
-    data['node','approx','node'].edge_index = torch.tensor(np.zeros((2,num_nodes)), dtype=torch.long)
-    data['node','approx','node'].edge_attr = torch.tensor(np.zeros((num_nodes,1)), dtype=torch.float)
-    data['node','approx','node'].edge_weight = None
+    if use_task_edges:
+        data['node','approx','node'].edge_index = torch.tensor(np.zeros((2,num_nodes)), dtype=torch.long)
+        data['node','approx','node'].edge_attr = torch.tensor(np.zeros((num_nodes,1)), dtype=torch.float)
+        data['node','approx','node'].edge_weight = None
     data['node'].y = torch.tensor(np.zeros((num_nodes,1)), dtype=torch.float)
     transform = torch_geometric.transforms.Compose([AddSelfLoops('edge_attr',fill_value=0.0)])
     data = transform(data)
     # After AddSelfLoops so the boundary relation keeps only its own loops;
     # present in the dummy so metadata() matches real cluster data.
-    data['node','boundary','node'].edge_index = torch.tensor(np.tile(np.arange(num_nodes), (2, 1)), dtype=torch.long)
-    data['node','boundary','node'].edge_attr = torch.tensor(np.zeros((num_nodes,1)), dtype=torch.float)
-    data['node','boundary','node'].edge_weight = None
+    if use_boundary_edges:
+        data['node','boundary','node'].edge_index = torch.tensor(np.tile(np.arange(num_nodes), (2, 1)), dtype=torch.long)
+        data['node','boundary','node'].edge_attr = torch.tensor(np.zeros((num_nodes,1)), dtype=torch.float)
+        data['node','boundary','node'].edge_weight = None
     return data
 
 class GraphDataset(InMemoryDataset):  
@@ -151,9 +175,18 @@ class GraphDataset(InMemoryDataset):
                 transform: Optional[Callable] = None,
                 pre_transform: Optional[Callable] = None,
                 pre_filter: Optional[Callable] = None,
-                num_workers: Optional[int] = 1):
+                num_workers: Optional[int] = 1,
+                use_boundary_edges: bool = True,
+                use_task_edges: bool = True):
         self.data_files = data_files
         self.load_file = load_file
+        # Edge ablation (see apply_edge_ablation); applied per graph below.
+        self.use_boundary_edges = bool(use_boundary_edges)
+        self.use_task_edges = bool(use_task_edges)
+        if load_file is not None and not (self.use_boundary_edges and self.use_task_edges):
+            raise ValueError(
+                "load_file caches graphs with the full relation set; set load_file "
+                "to null for an edge-ablation run (use_boundary_edges/use_task_edges)")
         self.save_file = save_file if save_file is not None and len(str(save_file)) > 0 else os.path.join(root, 'data.pt') if root is not None else 'data.pt'
         self.data_binary_id = []
         super().__init__(root, transform, pre_transform, pre_filter)
@@ -211,6 +244,7 @@ class GraphDataset(InMemoryDataset):
                     data['node','sp','node'].edge_index = torch.tensor(result_dict['node_sp_node_edges'], dtype=torch.long)
                     data['node','sp','node'].edge_attr = torch.tensor(result_dict['node_sp_node_edata'], dtype=torch.float)
                     data['node','sp','node'].edge_weight = None
+                    apply_edge_ablation(data, self.use_boundary_edges, self.use_task_edges)
                     # data['node','to','node'].edge_weight = 1/(1 + data['node','to','node'].edge_attr)
                     # data['node','approx','node'].edge_weight = 1/(1 + data['node','approx','node'].edge_attr)
                     if num_hops >= 0:
@@ -270,6 +304,7 @@ class GraphDataset(InMemoryDataset):
                 data['node','sp','node'].edge_index = torch.tensor(result_dict['node_sp_node_edges'], dtype=torch.long)
                 data['node','sp','node'].edge_attr = torch.tensor(result_dict['node_sp_node_edata'], dtype=torch.float)
                 data['node','sp','node'].edge_weight = None
+                apply_edge_ablation(data, self.use_boundary_edges, self.use_task_edges)
 
                 if num_hops >= 0:
                     node_mask = data['node'].y > 0 

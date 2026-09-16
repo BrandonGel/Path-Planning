@@ -12,6 +12,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import wandb
+import yaml
 from torch.nn.utils import clip_grad_norm_
 from torch_geometric.loader import DataLoader
 from torch_geometric.nn import GraphUNet, to_hetero
@@ -153,6 +154,14 @@ class HeteroClusterEncoder(nn.Module):
         return {'node': z}
 
 
+def edge_flags_from_config(train_config: dict) -> Tuple[bool, bool]:
+    """(use_boundary_edges, use_task_edges) from train_config['dataset']['config'];
+    missing keys mean True, so configs that predate the edge ablation (e.g. the
+    gnn6 run) keep the full to/approx/boundary relation set."""
+    cfg = (train_config.get('dataset') or {}).get('config') or {}
+    return bool(cfg.get('use_boundary_edges', True)), bool(cfg.get('use_task_edges', True))
+
+
 def _get_graph_unet_params(model_config: dict, model_kwargs: dict):
     """custom_gnn_args may sit inside encoder.model or as its sibling; accept
     both. Returns the GraphUNet params dict or None (case-insensitive key)."""
@@ -168,7 +177,8 @@ def _get_graph_unet_params(model_config: dict, model_kwargs: dict):
 
 def set_cluster_model(model_config: dict, train_config: dict, data_sample, device: torch.device):
     """run_train.set_model adapted for the encoder: metadata comes from
-    get_dummy_sample_data() (to/approx/boundary only) so the supervision-only
+    get_dummy_sample_data() (to + approx/boundary per the edge-ablation flags
+    in dataset.config, see edge_flags_from_config) so the supervision-only
     ('node','sp','node') relation never enters the to_hetero module tree.
     When custom_gnn_args configures a GraphUNet, the traced hetero encoder is
     wrapped with a homogeneous post-stage (see HeteroClusterEncoder)."""
@@ -179,7 +189,9 @@ def set_cluster_model(model_config: dict, train_config: dict, data_sample, devic
     homogeneous_model = get_model(model_type=model_kwargs['type'], **model_kwargs)
     model_in_channels = homogeneous_model.node_in_channels
     dim = data_sample['node'].x.shape[1] - 3
-    metadata = get_dummy_sample_data(dim=dim).metadata()
+    use_boundary_edges, use_task_edges = edge_flags_from_config(train_config)
+    metadata = get_dummy_sample_data(dim=dim, use_boundary_edges=use_boundary_edges,
+                                     use_task_edges=use_task_edges).metadata()
     model = to_hetero(homogeneous_model, metadata, aggr=model_config['model']['to_hetero_aggr']).to(device)
     if graph_unet_params is not None:
         model = HeteroClusterEncoder(model, graph_unet_params,
@@ -199,7 +211,16 @@ def set_cluster_model(model_config: dict, train_config: dict, data_sample, devic
     resume_epoch = train_config['train']['resume_epoch']
     model_load_folder = train_config['train']['load_folder']
     if resume_epoch > 0 and model_load_folder is not None:
-        model.load_state_dict(torch.load(os.path.join(model_load_folder, f"epoch_{resume_epoch}.pth")))
+        state = torch.load(os.path.join(model_load_folder, f"epoch_{resume_epoch}.pth"),
+                           map_location=device)
+        try:
+            model.load_state_dict(state)
+        except RuntimeError:
+            # compiled checkpoints carry an _orig_mod. prefix; strip/add so
+            # compiled and uncompiled models interoperate (dataset_prune idiom)
+            stripped = {(k[len('_orig_mod.'):] if k.startswith('_orig_mod.') else f'_orig_mod.{k}'): v
+                        for k, v in state.items()}
+            model.load_state_dict(stripped)
 
     optimizer = get_optimizer(optimizer_type=model_config['optimizer']['type'],
                               model_weights=model.parameters(), **model_config['optimizer'])
@@ -221,8 +242,14 @@ def run_cluster_train(train_config: dict, num_workers: int = None, use_cuda: boo
     load_file = Path(dataset_cfg['load_file']) if dataset_cfg.get('load_file') else None
     save_file = Path(dataset_cfg['save_file']) if dataset_cfg.get('save_file') else None
     data_files = get_graph_dataset_file_paths(folder_path, dataset_cfg['config'])
+    use_boundary_edges, use_task_edges = edge_flags_from_config(train_config)
+    rels = ['to'] + (['approx'] if use_task_edges else []) + (['boundary'] if use_boundary_edges else [])
+    print(f"Edge relations: {' + '.join(rels)}"
+          + ("" if len(rels) > 1 else " (roadmap edges only)"))
     graph_dataset = GraphDataset(data_files, load_file=load_file, save_file=save_file,
-                                 num_hops=-1, num_workers=num_workers)
+                                 num_hops=-1, num_workers=num_workers,
+                                 use_boundary_edges=use_boundary_edges,
+                                 use_task_edges=use_task_edges)
 
     batch_size = train_config['train']['batch_size']
     idx_train, idx_test, train_loader, test_loader = split_dataset_by_case(
@@ -248,6 +275,12 @@ def run_cluster_train(train_config: dict, num_workers: int = None, use_cuda: boo
         embeddings_folder = os.path.join(wandb.run.dir, "embeddings")
         os.makedirs(model_version_folder, exist_ok=True)
         os.makedirs(embeddings_folder, exist_ok=True)
+        # Write files/config.yaml ourselves: gnn_cluster_map.load_cluster_encoder
+        # rebuilds the model (and the edge-ablation relation set) from it, and
+        # offline wandb (0.24) does not always materialize the file. Plain YAML
+        # is accepted by _unwrap_wandb_config alongside wandb's {value: ...} form.
+        with open(os.path.join(wandb.run.dir, "config.yaml"), "w") as f:
+            yaml.safe_dump(train_config, f, sort_keys=False)
         run.define_metric("epoch/train_loss", step_metric="epoch")
         run.define_metric("epoch/test_loss", step_metric="epoch")
         start_time = time()
