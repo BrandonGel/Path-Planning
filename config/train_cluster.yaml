@@ -1,0 +1,77 @@
+# Self-supervised cluster-GNN encoder training (cluster.md §13 objective).
+# Model keys use the exact GNN.__init__ parameter names — get_model silently
+# drops anything it doesn't recognize.
+seed: 42
+
+encoder:
+  loss:
+    graph_reconstruction:
+      weight: 1.0
+      args:
+        num_neg_per_pos: 1
+    shortest_path:
+      weight: 1.0
+      args:
+        use_start_goal_pairs: true
+    cluster:
+      weight: 0.4    # 1.0 collapsed the embeddings (std 0.04, L_graph pinned at ln2);
+                     # small weight keeps the §14 obstacle-aware pressure without collapse
+      args:
+        num_clusters: 128
+        temperature: 4.0
+        alpha: 3.6
+        sigma: 2.0
+  model:
+    type: gatv2
+    node_in_channels: -1        # LazyLinear — inferred from the 5-wide features
+    node_out_channels: 32       # embedding dimension (cluster.md §38 A6: 8/16/32/64)
+    num_mlp_start_layers: 2
+    node_mlp_start_channels: 64
+    num_gnn_blocks: 3
+    gnn_hidden_channels: 64
+    num_mlp_end_layers: 2
+    node_mlp_end_channels: 64
+    edge_in_channels: -1
+    edge_use_mlp_start: true
+    edge_mlp_start_channels: 16
+    use_edge_dim: true          # roadmap/boundary edge distances feed attention
+    num_heads: 4
+    concat: true
+    residual: true
+    dropout: 0.0
+    activation_function: leaky_relu
+    to_hetero_aggr: sum
+  optimizer:
+    type: adamw
+    lr: 0.0005
+    weight_decay: 0.0001
+
+device:
+  compile: true
+  compile_dynamic: true
+
+train:
+  batch_size: 32
+  test_size: 0.1
+  num_epochs: 100
+  resume_epoch: 0
+  save_epoch: 10
+  verbose_epoch: 10
+  save_folder: logs/cluster
+  load_folder: null
+  num_workers: 4
+
+dataset:
+  folder_path:
+    # 100 x 12-agent cases, boundary nodes at the resolution (-gbn -bns 1.0),
+    # 1500 samples for the continuous types; built by
+    # scripts/generate/run_cluster_dataset.py. Every root listed here must
+    # exist (the loader iterates each one).
+    - /home/bho36/Dropbox/Team_Path_Planning/brandon_graph_data/train_cluster/map64.0x64.0_resolution1.0/agents12_obst0.025/radius0.5
+  load_file: null
+  save_file: null
+  config:
+    # Mixed-type training over all four source roadmap types; a root without
+    # a type's sample_cluster/<type> folder is skipped for that type.
+    road_map_types: [grid, prm, cdt, halton]
+    target_space: cluster

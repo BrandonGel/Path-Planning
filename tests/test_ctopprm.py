@@ -154,6 +154,43 @@ class TestCTopPRM(unittest.TestCase):
                         ib in pruned.road_map[ia] or ia in pruned.road_map[ib]
                     )
 
+    def test_shortening_keeps_partial_shortcuts(self):
+        # A shortcut that fails the exact check must only leave that stretch
+        # unshortened, not revert the whole path (which used to leave raw
+        # wavefront tree paths in the distilled roadmap).
+        from path_planning.cluster.CTopPRMpy import shortening as S
+
+        set_global_seed(42)
+        map_ = _build_block_map([START], [GOAL])
+        cfg = CTopPRM(map_).geometry
+        over_the_top = np.array(
+            [[2.0, 10.0], [4.0, 15.5], [10.0, 15.5], [16.0, 15.5], [18.0, 10.0]]
+        )
+        shorteners = (S.shorten_path, S.greedy_shorten_path)
+        for fn in shorteners:
+            out = fn(map_, over_the_top, cfg)
+            np.testing.assert_allclose(out[0], START, atol=1e-9)
+            np.testing.assert_allclose(out[-1], GOAL, atol=1e-9)
+            self.assertLess(path_length(out), path_length(over_the_top))
+            self.assertTrue(S.polyline_free_exact(map_, out, cfg))
+
+        # Reject every shortcut longer than 6 units: the shorter shortcuts
+        # must survive and the rest must fall back to the original path.
+        orig = S.segment_free
+        S.segment_free = lambda m, p1, p2, c: (
+            float(np.linalg.norm(np.asarray(p2) - np.asarray(p1))) <= 6.0
+            and orig(m, p1, p2, c)
+        )
+        try:
+            for fn in shorteners:
+                out = fn(map_, over_the_top, cfg)
+                self.assertLess(path_length(out), path_length(over_the_top))
+                seg = np.linalg.norm(np.diff(out, axis=0), axis=1)
+                self.assertTrue(np.all(seg <= 6.0 + 1e-6))
+                self.assertTrue(S.polyline_free_exact(map_, out, cfg))
+        finally:
+            S.segment_free = orig
+
     def test_endpoint_resolution(self):
         # Exact node coordinate and index forms resolve identically; a nearby
         # off-node coordinate snaps to the nearest node.

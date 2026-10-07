@@ -38,6 +38,7 @@ from path_planning.cluster.CTopPRMpy.shortening import (
     greedy_shorten_path,
     is_deformable,
     path_length,
+    polyline_free_exact,
     remove_equivalent_paths,
     remove_too_long_paths,
     shorten_path,
@@ -54,7 +55,7 @@ Connection = Tuple[float, int, int]
 
 _SHORTENING_MODES = ("gradient", "greedy", "none")
 
-_CLUSTERING_MODES = ("wavefront", "kmeans", "em")
+_CLUSTERING_MODES = ("wavefront", "kmeans", "em", "custom")
 
 
 class CTopPRM:
@@ -111,6 +112,8 @@ class CTopPRM:
         max_sequences_per_pair: int = 200,
         force_min_clusters: bool = False,
         clustering: str = "wavefront",
+        custom_seeds: Optional[Sequence[Endpoint]] = None,
+        em_kwargs: Optional[dict] = None,
     ) -> None:
         if shortening_mode not in _SHORTENING_MODES:
             raise ValueError(
@@ -120,12 +123,19 @@ class CTopPRM:
             raise ValueError(
                 f"clustering must be one of {_CLUSTERING_MODES}, got {clustering!r}"
             )
+        if (clustering == "custom") != (custom_seeds is not None):
+            raise ValueError(
+                "custom_seeds must be provided iff clustering == 'custom'"
+            )
         if not getattr(graph_map, "nodes", None) or not getattr(graph_map, "road_map", None):
             raise ValueError(
                 "graph_map has no roadmap; generate one first "
                 "(e.g. generateRandomNodes + generate_roadmap)"
             )
         self.map = graph_map
+        # Extra GraphEM constructor kwargs for clustering == "em"
+        # (e.g. {"covariance_type": "spherical"}).
+        self.em_kwargs = dict(em_kwargs or {})
         self._min_clusters_arg = min_clusters
         self._max_clusters_arg = max_clusters
         self.max_path_length_ratio = float(max_path_length_ratio)
@@ -136,6 +146,7 @@ class CTopPRM:
         self.max_sequences_per_pair = int(max_sequences_per_pair)
         self.force_min_clusters = bool(force_min_clusters)
         self.clustering = clustering
+        self.custom_seeds = list(custom_seeds) if custom_seeds is not None else None
         self.cluster_model = None
 
         step = (
@@ -225,8 +236,18 @@ class CTopPRM:
             # (endpoints stay fixed) and the wavefront fill below
             # regenerates all downstream state.
             target_k = max(self.min_clusters, num_seeds)
-            self.cluster_model = GraphEM(self.map, target_k).fit(seeds)
+            self.cluster_model = GraphEM(self.map, target_k, **self.em_kwargs).fit(seeds)
             seeds = list(self.cluster_model.center_node_indices)
+            self.max_clusters = max(self.max_clusters, len(seeds))
+        elif self.clustering == "custom":
+            # Caller-supplied anchors (e.g. GNN-embedding K-means medoids).
+            # Endpoints stay first (the extract-path invariant), duplicates
+            # are dropped, and the wavefront fill below regenerates all
+            # downstream state — exactly like the kmeans/em branches.
+            for e in self.custom_seeds:
+                idx = self.resolve_endpoint(e)
+                if idx not in seeds:
+                    seeds.append(idx)
             self.max_clusters = max(self.max_clusters, len(seeds))
 
         self._wavefront_fill(seeds)
@@ -791,8 +812,26 @@ class CTopPRM:
         if self.shortening_mode == "greedy":
             # Direction-independent; applying it twice is a cheap no-op-ish
             # second pass, kept so call sites stay mode-agnostic.
-            return greedy_shorten_path(self.map, path, self.geometry)
-        return shorten_path(self.map, path, self.geometry, forward=forward, grads=self._grads)
+            result = greedy_shorten_path(self.map, path, self.geometry)
+        else:
+            result = shorten_path(self.map, path, self.geometry, forward=forward,
+                                  grads=self._grads)
+        if not getattr(self.map, "use_discrete_space", False):
+            return result
+        # Discrete maps: generate_custom_nodes snaps stored waypoints to the
+        # corner lattice (cluster_map._snap_points), silently changing the
+        # geometry the shorteners validated — snapped shortcuts can cut
+        # through obstacles. Snap here and re-validate exactly; fall back to
+        # the unshortened path (roadmap nodes, snap-stable) if it collides.
+        b = np.asarray(self.map.bounds, dtype=float)[:, 0]
+        res = float(self.map.resolution)
+        snapped = b + res * np.round((np.asarray(result, dtype=float) - b) / res)
+        keep = np.ones(len(snapped), dtype=bool)  # drop snap-collapsed duplicates
+        keep[1:] = np.any(np.diff(snapped, axis=0) != 0, axis=1)
+        snapped = snapped[keep]
+        if len(snapped) < 2 or not polyline_free_exact(self.map, snapped, self.geometry):
+            return path
+        return snapped
 
 
     # ------------------------------------------------------------------

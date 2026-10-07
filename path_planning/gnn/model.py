@@ -1,6 +1,6 @@
 import torch
 from torch import nn
-from torch_geometric.nn import GCNConv, GATConv, GATv2Conv, TransformerConv
+from torch_geometric.nn import GCNConv, GATConv, GATv2Conv, TransformerConv, GraphUNet
 from torch_geometric.nn import global_mean_pool, global_max_pool, global_add_pool
 from torch_geometric.utils import scatter as pyg_scatter
 import torch_geometric as pyg
@@ -63,7 +63,7 @@ class GNN(nn.Module):
                     num_gnn_blocks:int=3,gnn_hidden_channels:int=64,
                     num_mlp_end_layers:int=2, node_mlp_end_channels:int=16,
                     edge_in_channels:int=None,edge_use_mlp_start:bool=True,edge_mlp_start_channels:int=16,use_edge_dim:bool=False,
-                    activation_function:str='relu',pooling_function: str = None,dropout:float=0.0):
+                    activation_function:str='relu',pooling_function: str = None,dropout:float=0.0,custom_gnn_args:dict={}):
         super().__init__()
         
         self.node_in_channels = node_in_channels
@@ -89,7 +89,7 @@ class GNN(nn.Module):
         self.edge_linear = nn.ModuleList()
         self.gnn = nn.ModuleList()
         self.last_linear = nn.ModuleList()
-
+        self.custom_gnn_args = custom_gnn_args
     def _new_activation(self) -> nn.Module:
         return ACTIVATION_CLASSES[self._activation_name]()
 
@@ -97,6 +97,9 @@ class GNN(nn.Module):
         self.build_start_linear()
         self.build_edge_linear()
         self.build_gnn()
+        # Appends configured custom stages (e.g. GraphUNet) after the conv
+        # stack and updates num_gnn_input before build_last_linear sizes.
+        self.build_custom_gnn('gnn')
         self.build_last_linear()
 
     def build_start_linear(self):
@@ -152,6 +155,33 @@ class GNN(nn.Module):
                 self.last_linear.append(self._new_activation())
             self.last_linear.append(nn.Linear(self.node_mlp_end_channels, self.node_out_channels))
 
+    def build_custom_gnn(self,build_status:str):
+        """Append custom stages from custom_gnn_args[build_status] to the
+        current stack. NOTE: GraphUNet contains top-K pooling that torch.fx /
+        to_hetero cannot trace — for hetero training use the post-stage
+        wrapper in train_cluster.set_cluster_model instead; this in-stack
+        path is for homogeneous models."""
+        if not self.custom_gnn_args:
+            return
+
+        for key, build_info in self.custom_gnn_args.items():
+            if build_status != key:
+                continue
+            for build_type, build_params in build_info.items():
+                if build_type.lower() == 'GraphUNet'.lower():
+                    # PyG signature: GraphUNet(in, hidden, out, depth, pool_ratios)
+                    gnn_in_channels = build_params.get('gnn_in_channels', self.num_gnn_input)
+                    gnn_hidden_channels = build_params.get('gnn_hidden_channels', self.gnn_hidden_channels)
+                    gnn_out_channels = build_params.get('gnn_out_channels', self.gnn_hidden_channels)
+                    depth = int(build_params.get('depth', self.num_gnn_blocks))
+                    pool_ratios = build_params.get('pool_ratios', [0.5]*depth)
+                    if gnn_in_channels != self.num_gnn_input:
+                        # bridge from the conv stack's output width
+                        self.gnn.append(nn.Linear(self.num_gnn_input, gnn_in_channels))
+                    self.gnn.append(GraphUNet(gnn_in_channels, gnn_hidden_channels,
+                                              gnn_out_channels, depth, pool_ratios))
+                    self.num_gnn_input = gnn_out_channels
+
     def forward(self, x, edge_index,edge_attr=None,batch=None):
         for linear in self.start_linear:
             x = linear(x)
@@ -162,9 +192,13 @@ class GNN(nn.Module):
             else:
                 edge_attr = None
         for gnn in self.gnn:
-            # Check if it's an activation function (only takes x) or a GNN layer (takes x, edge_index, edge_attr)
-            if isinstance(gnn, (nn.ReLU, nn.Tanh, nn.Sigmoid, nn.ELU, nn.LeakyReLU, nn.PReLU, nn.SELU)):
+            # Dispatch by layer kind: activations and bridge Linears take x
+            # alone; GraphUNet takes (x, edge_index, batch) and cannot consume
+            # edge features; conv layers take (x, edge_index, edge_attr).
+            if isinstance(gnn, (nn.ReLU, nn.Tanh, nn.Sigmoid, nn.ELU, nn.LeakyReLU, nn.PReLU, nn.SELU, nn.Linear)):
                 x = gnn(x)
+            elif isinstance(gnn, GraphUNet):
+                x = gnn(x, edge_index, batch=batch)
             else:
                 x = gnn(x, edge_index, edge_attr)
         if self.pooling_function is not None and batch is not None:
@@ -187,14 +221,14 @@ class GCN(GNN):
                     num_gnn_blocks:int=3,gnn_hidden_channels:int=64,
                     num_mlp_end_layers:int=2, node_mlp_end_channels:int=16,
                     edge_in_channels:int=None,edge_use_mlp_start:bool=True,edge_mlp_start_channels:int=16,use_edge_dim:bool=False,
-                    activation_function:str='relu',pooling_function: str = None,dropout:float=0.0):
+                    activation_function:str='relu',pooling_function: str = None,dropout:float=0.0,custom_gnn_args:dict={}):
         super().__init__(node_in_channels=node_in_channels, node_out_channels=node_out_channels,
                          gnn_hidden_channels=gnn_hidden_channels,
                          num_gnn_blocks=num_gnn_blocks,
                          num_mlp_start_layers=num_mlp_start_layers,node_mlp_start_channels=node_mlp_start_channels,
                          num_mlp_end_layers=num_mlp_end_layers,node_mlp_end_channels=node_mlp_end_channels,
                          edge_in_channels=edge_in_channels,edge_use_mlp_start=edge_use_mlp_start,edge_mlp_start_channels=edge_mlp_start_channels,
-                         use_edge_dim=use_edge_dim,activation_function=activation_function,pooling_function=pooling_function,dropout=dropout)
+                         use_edge_dim=use_edge_dim,activation_function=activation_function,pooling_function=pooling_function,dropout=dropout,custom_gnn_args=custom_gnn_args)
          # Build the model structure
         self.build_model()
         
@@ -222,7 +256,7 @@ class GAT(GNN):
                     num_mlp_end_layers:int=2, node_mlp_end_channels:int=16,
                     edge_in_channels:int=None,edge_use_mlp_start:bool=True,edge_mlp_start_channels:int=16,
                     num_heads:int=4,concat:bool=True,residual:bool=False,dropout:float=0.0,use_edge_dim:bool=False,
-                    activation_function:str='relu',pooling_function: str = None):
+                    activation_function:str='relu',pooling_function: str = None,custom_gnn_args:dict={}):
         # Set GAT-specific attributes before calling super().__init__() 
         self.num_heads = num_heads
         self.concat = concat
@@ -233,7 +267,7 @@ class GAT(GNN):
                          num_mlp_start_layers=num_mlp_start_layers,node_mlp_start_channels=node_mlp_start_channels,
                          num_mlp_end_layers=num_mlp_end_layers,node_mlp_end_channels=node_mlp_end_channels,
                          edge_in_channels=edge_in_channels,edge_use_mlp_start=edge_use_mlp_start,edge_mlp_start_channels=edge_mlp_start_channels,
-                         use_edge_dim=use_edge_dim,activation_function=activation_function,pooling_function=pooling_function,dropout=dropout)
+                         use_edge_dim=use_edge_dim,activation_function=activation_function,pooling_function=pooling_function,dropout=dropout,custom_gnn_args=custom_gnn_args)
         self.num_gnn_input = self.gnn_hidden_channels*self.num_heads if self.concat else self.gnn_hidden_channels
         # Build the model structure
         self.build_model()
@@ -263,13 +297,13 @@ class GATv2(GAT):
                     num_mlp_end_layers:int=2, node_mlp_end_channels:int=16,
                     edge_in_channels:int=None,edge_use_mlp_start:bool=True,edge_mlp_start_channels:int=16,
                     num_heads:int=4,concat:bool=True,residual:bool=False,dropout:float=0.0,use_edge_dim:bool=False,
-                    activation_function:str='relu',pooling_function: str = None):
+                    activation_function:str='relu',pooling_function: str = None,custom_gnn_args:dict={}):
         super().__init__(node_in_channels=node_in_channels, node_out_channels=node_out_channels,
                          num_gnn_blocks=num_gnn_blocks,gnn_hidden_channels=gnn_hidden_channels,
                          num_mlp_start_layers=num_mlp_start_layers,node_mlp_start_channels=node_mlp_start_channels,
                          num_mlp_end_layers=num_mlp_end_layers,node_mlp_end_channels=node_mlp_end_channels,
                          edge_in_channels=edge_in_channels,edge_use_mlp_start=edge_use_mlp_start,edge_mlp_start_channels=edge_mlp_start_channels,
-                         use_edge_dim=use_edge_dim,activation_function=activation_function,pooling_function=pooling_function,dropout=dropout)
+                         use_edge_dim=use_edge_dim,activation_function=activation_function,pooling_function=pooling_function,dropout=dropout,custom_gnn_args=custom_gnn_args)
         self.num_gnn_input = self.gnn_hidden_channels*self.num_heads if self.concat else self.gnn_hidden_channels
         # Build the model structure
         self.build_model()
@@ -300,7 +334,7 @@ class Transformer(GNN):
                     num_mlp_end_layers:int=2, node_mlp_end_channels:int=16,
                     edge_in_channels:int=None,edge_use_mlp_start:bool=True,edge_mlp_start_channels:int=16,
                     num_heads:int=4,concat:bool=True,beta=False,dropout:float=0.0,use_edge_dim:bool=False,
-                    activation_function:str='relu',pooling_function: str = None):
+                    activation_function:str='relu',pooling_function: str = None,custom_gnn_args:dict={}):
         self.num_heads = num_heads
         self.concat = concat
         self.beta = beta
@@ -310,7 +344,7 @@ class Transformer(GNN):
                          num_mlp_start_layers=num_mlp_start_layers,node_mlp_start_channels=node_mlp_start_channels,
                          num_mlp_end_layers=num_mlp_end_layers,node_mlp_end_channels=node_mlp_end_channels,
                          edge_in_channels=edge_in_channels,edge_use_mlp_start=edge_use_mlp_start,edge_mlp_start_channels=edge_mlp_start_channels,
-                         use_edge_dim=use_edge_dim,activation_function=activation_function,pooling_function=pooling_function,dropout=dropout)
+                         use_edge_dim=use_edge_dim,activation_function=activation_function,pooling_function=pooling_function,dropout=dropout,custom_gnn_args=custom_gnn_args)
         self.num_gnn_input = self.gnn_hidden_channels*self.num_heads if self.concat else self.gnn_hidden_channels
         # Build the model structure
         self.build_model()

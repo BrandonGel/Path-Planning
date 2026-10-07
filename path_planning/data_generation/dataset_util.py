@@ -46,6 +46,13 @@ def generate_sample_base_path(base_path: Path):
     sample_base_path.mkdir(parents=True, exist_ok=True)
     return sample_base_path
 
+def generate_cluster_sample_base_path(base_path: Path):
+    """Cluster-GNN training samples; separate from sample/ so the two
+    generators never overwrite each other's graph.npz files."""
+    sample_base_path = base_path / "sample_cluster"
+    sample_base_path.mkdir(parents=True, exist_ok=True)
+    return sample_base_path
+
 def generate_sample_path(base_path: Path, sample_id: int, augmentation_id: int = 0):
     sample_path = base_path/ f"graph_{sample_id}_{augmentation_id}"
     sample_path.mkdir(parents=True, exist_ok=True)
@@ -55,6 +62,11 @@ def generate_gnn_sampler_path(base_path: Path, gnn_folder_name: str):
     gnn_path = base_path/ "gnn" / gnn_folder_name
     gnn_path.mkdir(parents=True, exist_ok=True)
     return gnn_path
+
+def generate_cluster_path(base_path: Path):
+    cluster_path = base_path / "cluster"
+    cluster_path.mkdir(parents=True, exist_ok=True)
+    return cluster_path
 
 def get_input_file_path(base_path: Path):
     input_file = base_path / "input.yaml"

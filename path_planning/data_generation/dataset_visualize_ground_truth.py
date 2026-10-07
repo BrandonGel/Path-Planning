@@ -69,11 +69,11 @@ def load_and_visualize_case(perm_path: Path,graph_file: Path = None,mapf_solver_
         schedule = solution_data["schedule"]
         for agent_name, trajectory in schedule.items():
             path = np.array([[point['x'], point['y']] for point in trajectory])
-            if map_.use_discrete_space:
-                path = np.array(
-                    [map_.map_to_world((float(px), float(py))) for px, py in path]
-                )
-            vis.plot_path(path)
+            # Discrete schedules hold grid indices: exactly ONE map_to_world
+            # conversion (inside plot_path, which maps indices to cell
+            # centers). Converting here AND in plot_path shifted every path
+            # +resolution cell up-right.
+            vis.plot_path(path, map_frame=map_.use_discrete_space)
 
         if hasattr(map_, "nodes") and hasattr(map_, "road_map") and map_.nodes and map_.road_map is not None:
             vis.plot_road_map(map_, map_.nodes, map_.road_map, map_frame=map_.use_discrete_space)

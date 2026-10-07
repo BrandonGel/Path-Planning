@@ -10,7 +10,7 @@ from scipy.spatial.distance import cdist
 from itertools import product
 from python_motion_planning.common import TYPES
 from path_planning.utils.cgal_sweep import CGAL_Sweep
-from path_planning.common.environment.map.cdt import get_planar_graph
+from path_planning.common.environment.map.cdt import get_boundary, get_planar_graph
 from path_planning.global_planner.sample_search.rrg import RRG
 import faiss
 import pickle
@@ -32,6 +32,7 @@ class GraphSampler(Grid):
         self.start = start
         self.goal = goal
         self.grid_points = []
+        self.boundary_points = []
         self.obstacles = []
         self.obs_size = 0.5
         self.inflation_radius = 0.0
@@ -46,6 +47,7 @@ class GraphSampler(Grid):
         self.start_nodes_index = {}
         self.goal_nodes_index = {}
         self.grid_nodes_index = {}
+        self.boundary_nodes_index = {}
         self.start_to_all_edges_dict = {}
         self.goal_to_all_edges_dict = {}
         self.nodes = []
@@ -115,6 +117,56 @@ class GraphSampler(Grid):
     
     def get_grid_nodes(self) -> List[Node]:
         return [self.nodes[i] for i in self.grid_nodes_index.values()]
+
+    def get_boundary_nodes(self) -> List[Node]:
+        return [self.nodes[i] for i in self.boundary_nodes_index.values()]
+
+    def get_obstacle_boundary(self):
+        """Obstacle/inflation boundary geometry from the CDT extraction
+        (path_planning.common.environment.map.cdt.get_boundary): merged wall
+        corners/junctions plus the enclosing map rectangle.
+
+        Returns (boundary_points (N,2), boundary_segments (M,2) index pairs,
+        holes: one interior point per obstacle component)."""
+        mask = (self.type_map.data == TYPES.OBSTACLE) | (self.type_map.data == TYPES.INFLATION)
+        return get_boundary(self, mask)
+
+    @staticmethod
+    def resample_boundary(bnd_pts: np.ndarray, bnd_segs: np.ndarray, spacing: float) -> np.ndarray:
+        """Boundary vertices plus points every ``spacing`` along each segment.
+
+        Every segment of length L gets ``round(L / spacing)`` equal
+        subdivisions (at least one), so when ``spacing`` divides the wall
+        lengths (e.g. ``spacing == resolution`` on a rectilinear boundary)
+        the interior points land exactly on the cell corners. Corner /
+        junction vertices come first, in their original order, followed by
+        the interior points; duplicates (shared corners) are dropped.
+        """
+        pts = np.asarray(bnd_pts, dtype=float)
+        out = [tuple(float(v) for v in p) for p in pts]
+        seen = {tuple(round(float(v), 8) for v in p) for p in out}
+        for u, v in np.asarray(bnd_segs, dtype=int).tolist():
+            a, b = pts[u], pts[v]
+            length = float(np.linalg.norm(b - a))
+            n = max(int(round(length / spacing)), 1)
+            for k in range(1, n):
+                q = a + (b - a) * (k / n)
+                key = tuple(round(float(x), 8) for x in q)
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append(tuple(float(x) for x in q))
+        return np.asarray(out, dtype=float)
+
+    def _rebuild_boundary_nodes_index(self):
+        """Re-point boundary_nodes_index at the current node registry (node
+        indices shift whenever nodes are re-registered); boundary points not
+        present as nodes are dropped from the index but kept in boundary_points."""
+        self.boundary_nodes_index = {}
+        for point in self.boundary_points:
+            node = Node(tuple(point), None, 0, 0)
+            if node in self.node_index_dict:
+                self.boundary_nodes_index[node] = self.node_index_dict[node]
 
     def get_random_nodes(self) -> List[Node]:
         if len(self.nodes) >= self.sample_num:
@@ -554,7 +606,7 @@ class GraphSampler(Grid):
 
         return float(dists[0]) if single else dists
 
-    def generateRandomNodes(self, generate_grid_nodes = False,prob_map = None,samp_from_prob_map_ratio = 0.5,roadmap_type:str=None):
+    def generateRandomNodes(self, generate_grid_nodes = False,generate_boundary_nodes = False,prob_map = None,samp_from_prob_map_ratio = 0.5,roadmap_type:str=None,boundary_node_spacing: float | None = None):
         if roadmap_type == 'rrg':
             return []
 
@@ -653,7 +705,31 @@ class GraphSampler(Grid):
                     self.node_index_dict[node] = len(nodes) - 1
                     self.grid_nodes_index[node] = len(nodes)-1
                     self.grid_points.append(grid_coords_tuple)
-        
+
+        want_spacing = boundary_node_spacing is not None and boundary_node_spacing > 0
+        if generate_boundary_nodes or want_spacing:
+            # Obstacle/map boundary vertices (merged wall corners/junctions)
+            # from the CDT boundary extraction. They lie ON the obstacle
+            # outline — same as the CDT roadmap's own boundary nodes — so no
+            # expandability filter is applied; edge-level collision checks in
+            # the roadmap builders decide connectivity.
+            # With ``boundary_node_spacing`` the merged wall segments are
+            # resampled every ``spacing`` world units (spacing == resolution
+            # -> one node per boundary cell), corners first.
+            bnd_pts, bnd_segs, _ = self.get_obstacle_boundary()
+            if want_spacing:
+                bnd_pts = self.resample_boundary(bnd_pts, bnd_segs, boundary_node_spacing)
+            for point in bnd_pts:
+                current = tuple(float(v) for v in point)
+                node = Node(current, None, 0, 0)
+                if node in self.node_index_dict:
+                    self.boundary_nodes_index[node] = self.node_index_dict[node]
+                    continue
+                nodes.append(node)
+                self.node_index_dict[node] = len(nodes) - 1
+                self.boundary_nodes_index[node] = len(nodes) - 1
+                self.boundary_points.append(current)
+
         for start in self.start:
             node = Node(tuple(start),None,0,0)
             if node in self.node_index_dict:
@@ -827,6 +903,7 @@ class GraphSampler(Grid):
         self.start_nodes_index = {}
         self.goal_nodes_index = {}
         self.grid_nodes_index = {}
+        self.boundary_nodes_index = {}
         for point in points:
             node = Node(tuple(point),None,0,0)
             if node in self.node_index_dict:
@@ -853,6 +930,7 @@ class GraphSampler(Grid):
         self.num_total_nodes = len(nodes)
         self.cost_matrix = cdist(np.array([node.current for node in nodes]), np.array([node.current for node in nodes]), metric='euclidean')
         self.nodes = nodes
+        self._rebuild_boundary_nodes_index()
 
         # Filter the CDT edges the same way PRM / 'dt' do: drop any that are in collision
         # or outside [min_edge_length, max_edge_length]. The constrained triangulation can
@@ -886,6 +964,7 @@ class GraphSampler(Grid):
         self.start_nodes_index = {}
         self.goal_nodes_index = {}
         self.grid_nodes_index = {}
+        self.boundary_nodes_index = {}
 
         # Initialize graph structure
         nodes = []
@@ -1001,19 +1080,28 @@ class GraphSampler(Grid):
         self.edges, self.edge_indices_dict,self.edge_weights  = self.calculate_edges(road_map,edge_weights)
         return road_map
 
-    def generate_custom_nodes(self,points: List[int]):
+    def generate_custom_nodes(self,points: List[int],filter_points: bool = True):
+        # filter_points=False keeps every point (preserving the caller's edge
+        # indexing) -- for points taken from an already-validated roadmap,
+        # which may legally contain nodes point_expandable rejects (e.g. RRG
+        # nodes slightly outside the bounds); load_graph_sampler never
+        # filters such nodes either.
         num_nodes = 0
         nodes = []
         points = np.array(points)
         for ii in range(len(points)):
             pos = points[ii]
             if self.use_discrete_space:
-                # Snap to cell center in world coords.
-                current = tuple(self.map_to_world(pos, discrete=True))
+                # Snap to the corner lattice bounds[d,0] + resolution*i that
+                # grid nodes are generated on (map_to_world is center-based
+                # and would shift every node by resolution/2).
+                b = np.asarray(self.bounds, dtype=float)[:, 0]
+                idx = np.round((np.asarray(pos, dtype=float) - b) / self.resolution)
+                current = tuple(b + self.resolution * idx)
             else:
                 current = tuple(points[ii])
             node = Node(current,None,0,0)
-            if self.point_expandable(tuple(pos)):
+            if not filter_points or self.point_expandable(tuple(pos)):
                 nodes.append(node)
                 self.node_index_dict[node] = len(nodes) - 1
                 num_nodes += 1
@@ -1217,6 +1305,31 @@ class GraphSampler(Grid):
         self.obstacles = [tuple[Any, ...](obs) for obs in obstacles]
         self.set_obstacle_map(obstacles)
 
+    def inflate_obstacles(self, radius: float = 1.0) -> None:
+        """Euclidean ESDF inflation plus the 8-connected (2^dim - 1) ring.
+
+        ``Grid.inflate_obstacles`` marks a free cell when the center-to-center
+        ESDF is within ``radius``. Diagonal neighbours of an obstacle cell sit
+        at ``sqrt(dim) * resolution`` and are skipped by the usual
+        ``agent_radius + sqrt(2)/2 * resolution`` radius even though they
+        share a corner with the obstacle. Whenever the Euclidean mask reaches
+        the edge neighbours (``radius >= resolution``) the full 3^dim ring is
+        added so corners are blocked too. A radius that inflates nothing
+        (e.g. a point agent) still inflates nothing.
+
+        Note: ring-only cells are INFLATION in the type map but keep a
+        positive ``min_wall_distance`` (it subtracts ``radius`` from the
+        obstacle ESDF); collision queries use the type map, so this only
+        affects the Halton sampling weights and ``min_clearance > 0`` checks.
+        """
+        super().inflate_obstacles(radius)
+        if radius < float(self.resolution):
+            return
+        from scipy.ndimage import binary_dilation
+        obstacle = self.type_map.data == TYPES.OBSTACLE
+        ring = binary_dilation(obstacle, structure=np.ones((3,) * self.dim, dtype=bool))
+        self.type_map[ring & (self.type_map.data == TYPES.FREE)] = TYPES.INFLATION
+
     def set_inflation_radius(self, radius: float):
         self.inflation_radius = radius
         self.inflate_obstacles(radius)
@@ -1237,6 +1350,8 @@ class GraphSampler(Grid):
         self.start_nodes_index = {}
         self.goal_nodes_index = {}
         self.grid_nodes_index = {}
+        self.boundary_points = []
+        self.boundary_nodes_index = {}
         self.cost_matrix = None
         self.obstacles = []
         self.inflation_radius = 0.0
@@ -1252,6 +1367,7 @@ class GraphSampler(Grid):
             "max_edge_length": self.max_edge_length,
             "use_discrete_space": self.use_discrete_space,
             "grid_points": self.grid_points,
+            "boundary_points": self.boundary_points,
             "nodes": self.nodes,
             # ndarray, not list-of-tuples: pickling 4.5M tuples costs ~10s / ~200MB, the array
             # milliseconds / ~70MB. set_obstacles() accepts either on load.
@@ -1295,6 +1411,7 @@ class GraphSampler(Grid):
         self.set_inflation_radius(self.inflation_radius)
         self.track_with_link = data["track_with_link"]
         self.grid_points = data["grid_points"]
+        self.boundary_points = data.get("boundary_points", [])
 
         # Set up node index dict
         self.node_index_dict = {node: i for i, node in enumerate(self.nodes)}
@@ -1302,6 +1419,7 @@ class GraphSampler(Grid):
         self.start_nodes_index = {Node(tuple(start),None,0,0):self.node_index_dict[Node(tuple(start),None,0,0)] for start in self.start}
         self.goal_nodes_index = {Node(tuple(goal),None,0,0):self.node_index_dict[Node(tuple(goal),None,0,0)] for goal in self.goal}
         self.grid_nodes_index = {Node(tuple(grid_point),None,0,0):self.node_index_dict[Node(tuple(grid_point),None,0,0)] for grid_point in self.grid_points}
+        self._rebuild_boundary_nodes_index()
 
         # Calculate edges (must happen before get_start/goal_nodes_with_all_edges)
         self.road_map = data["road_map"]
@@ -1412,6 +1530,7 @@ class GraphSampler(Grid):
         self.start = [list(transform_pos(tuple(s))) for s in self.start]
         self.goal = [list(transform_pos(tuple(g))) for g in self.goal]
         self.grid_points = [transform_pos(tuple(gp)) for gp in self.grid_points]
+        self.boundary_points = [transform_pos(tuple(bp)) for bp in self.boundary_points]
 
         if len(self.obstacles) > 0:
             obs = np.asarray(self.obstacles, dtype=int)
@@ -1447,6 +1566,7 @@ class GraphSampler(Grid):
             Node(tuple(gp), None, 0, 0): self.node_index_dict[Node(tuple(gp), None, 0, 0)]
             for gp in self.grid_points
         }
+        self._rebuild_boundary_nodes_index()
 
         # 7. Clear caches and rebuild derived structures
         self.start_to_all_edges_dict = {}
@@ -1485,6 +1605,12 @@ class GraphSampler(Grid):
             if idx in kept_set:
                 pruned_grid_points.append(grid_node.current)
 
+        # Same for boundary points
+        pruned_boundary_points = []
+        for boundary_node, idx in self.boundary_nodes_index.items():
+            if idx in kept_set:
+                pruned_boundary_points.append(boundary_node.current)
+
         # Edges and edge weights restricted to kept nodes
         pruned_road_map = []
         pruned_road_map_edge_weights = []
@@ -1519,6 +1645,7 @@ class GraphSampler(Grid):
             "max_edge_length": self.max_edge_length,
             "use_discrete_space": self.use_discrete_space,
             "grid_points": pruned_grid_points,
+            "boundary_points": pruned_boundary_points,
             "nodes": pruned_nodes,
             "obstacles": self.obstacles,
             "inflation_radius": self.inflation_radius,

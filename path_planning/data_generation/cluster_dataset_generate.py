@@ -10,11 +10,13 @@ from path_planning.utils.util import (
 import os
 import tempfile
 import numpy as np
+import yaml
 from pathlib import Path
 from tqdm import tqdm
 from path_planning.common.environment.map.graph_sampler import GraphSampler, Node
 from typing import List, Tuple
 from scipy.interpolate import RegularGridInterpolator
+from scipy.spatial import cKDTree
 from multiprocessing import Pool, cpu_count
 from scipy.ndimage import generic_filter,generate_binary_structure
 from path_planning.utils.util import set_global_seed
@@ -60,6 +62,9 @@ TARGET_SPACE_TYPE_TO_NAME = {
     'fuzzy_distribution',
     'convolution_binary',
     'convolution_distribution',
+    # Self-supervised: y = per-node Euclidean distance to the obstacle
+    # boundary (cluster.md §7 d_i^B); needs no solver-labeled density map.
+    'cluster',
 }
 
 def get_target_space_type_name(target_space_type:str):
@@ -109,6 +114,19 @@ def get_prob_map(target_space_type:str, map:GraphSampler,density_map:np.ndarray,
 def generate_target_space(target_space_type:str, map:GraphSampler,density_map:np.ndarray,ignore_generate: bool = False,config:dict = None):
     y = []
     target_space_type = target_space_type.lower()
+    if target_space_type == 'cluster':
+        # d_i^B: distance to the nearest boundary node — the §14 obstacle
+        # weighting basis (w_i = 1 + a*exp(-d^2/2s^2)) computed at train time.
+        pos = np.array([node.current for node in map.nodes])
+        b_idx = sorted(set(map.boundary_nodes_index.values()))
+        if b_idx:
+            y = cKDTree(pos[b_idx]).query(pos)[0]
+        else:
+            # No boundary nodes registered: fall back to the map diagonal so
+            # every weight degrades to ~1 instead of exploding.
+            b = np.asarray(map.bounds, dtype=float)
+            y = np.full(len(pos), float(np.linalg.norm(b[:, 1] - b[:, 0])))
+        return np.asarray(y, dtype=np.float32)
     if 'fuzzy' in target_space_type:
         num_hops = int(config["num_hops"]) if config is not None and "num_hops" in config else 1
         if num_hops < 1:
@@ -202,18 +220,46 @@ def transform_graph_map_to_gnn(map_: GraphSampler):
 
     # Generate Node Data ('node')
     pos = np.array([node.current for node in map_.nodes])
-    # Concatenate Position & zero class vector
-    ndata = np.concatenate((pos, np.zeros((pos.shape[0], 2))), axis=1)
+    # Concatenate Position & zero class vector: 3-way exclusive one-hot
+    # [start/goal, free, boundary] with precedence start/goal > boundary > free.
+    ndata = np.concatenate((pos, np.zeros((pos.shape[0], 3))), axis=1)
     start_goal_mask = np.full(len(ndata),fill_value=0).astype(bool)
     start_goal_idx = [map_.get_node_index(node) for node in start_goal_nodes]
     start_goal_mask[start_goal_idx] = True
-    # Specify Start & Goal Nodes to have the one class value
+    boundary_mask = np.full(len(ndata), fill_value=0).astype(bool)
+    boundary_idx = list(map_.boundary_nodes_index.values())
+    boundary_mask[boundary_idx] = True
+    boundary_mask &= ~start_goal_mask
     ndata[start_goal_mask, map_.dim] = 1
-    ndata[~start_goal_mask, map_.dim+1] = 1
+    ndata[~(start_goal_mask | boundary_mask), map_.dim+1] = 1
+    ndata[boundary_mask, map_.dim+2] = 1
 
     # Generate Edges ('node', 'to', 'node')
     edges = np.array(map_.edges)
     edata = np.array(edge_weights)
+
+    # Generate Boundary Self-Loop Edges ('node', 'boundary', 'node'): one (i, i)
+    # per boundary node and per roadmap neighbor of a boundary node. Uses the
+    # full boundary index (pre-precedence) so a start/goal sitting on the
+    # outline still carries the structural self-loop.
+    bset = set(map_.boundary_nodes_index.values())
+    loop_set = set(bset)
+    for u, v in map_.edges:
+        if u in bset:
+            loop_set.add(v)
+        if v in bset:
+            loop_set.add(u)
+    if loop_set:
+        loop_idx = sorted(loop_set)
+        boundary_edges_arr = np.array([(i, i) for i in loop_idx], dtype=np.int32)
+        # Edge value: Euclidean distance from the node to the obstacle boundary
+        # (min over the graph's boundary nodes) — 0 on boundary nodes, positive
+        # on their roadmap neighbors (cluster.md §7's d_i^B).
+        boundary_tree = cKDTree(pos[sorted(bset)])
+        boundary_weights_arr = boundary_tree.query(pos[loop_idx])[0].astype(np.float32)
+    else:
+        boundary_edges_arr = np.zeros((0, 2), dtype=np.int32)
+        boundary_weights_arr = np.zeros((0,), dtype=np.float32)
 
     # Generate Start & Goal Edges ('node', 'approx', 'node')
     start_goal_edges_list = []
@@ -230,7 +276,38 @@ def transform_graph_map_to_gnn(map_: GraphSampler):
     start_goal_edges_arr = np.array(start_goal_edges_list, dtype=np.int32)
     start_goal_weights_arr = np.array(start_goal_weights_list, dtype=np.float32)
 
-    return ndata,node_to_node_edges_arr, node_to_node_weights_arr, start_goal_edges_arr, start_goal_weights_arr
+    return (ndata, node_to_node_edges_arr, node_to_node_weights_arr,
+            start_goal_edges_arr, start_goal_weights_arr,
+            boundary_edges_arr, boundary_weights_arr)
+
+def sample_shortest_path_pairs(map_: GraphSampler, num_sources: int = 16,
+                               num_pairs: int = 2048, rng=None):
+    """cluster.md §11: sampled (i, j, D_ij) graph shortest-path supervision
+    pairs for L_SP. Sources are non-start/goal nodes (S/G-to-all pairs already
+    live in the ('node','approx','node') relation); each source contributes
+    pairs to every reachable node, then the pool is subsampled to num_pairs.
+    Returns (pairs (P,2) int32, dists (P,) float32)."""
+    rng = np.random.default_rng() if rng is None else rng
+    n = len(map_.nodes)
+    sg = set(map_.start_nodes_index.values()) | set(map_.goal_nodes_index.values())
+    candidates = [i for i in range(n) if i not in sg]
+    if not candidates or num_sources <= 0 or num_pairs <= 0:
+        return np.zeros((0, 2), dtype=np.int32), np.zeros((0,), dtype=np.float32)
+    sources = rng.choice(candidates, size=min(num_sources, len(candidates)), replace=False)
+    pairs, dists = [], []
+    for s in sources:
+        for v, d in map_._dijkstra(int(s)):
+            if v == int(s):
+                continue
+            pairs.append((int(s), int(v)))
+            dists.append(float(d))
+    pairs = np.array(pairs, dtype=np.int32).reshape(-1, 2)
+    dists = np.array(dists, dtype=np.float32)
+    if len(pairs) > num_pairs:
+        keep = rng.choice(len(pairs), size=num_pairs, replace=False)
+        pairs, dists = pairs[keep], dists[keep]
+    return pairs, dists
+
 
 def process_single_case_graphs(args: Tuple[Path, dict]) -> Tuple[bool, Path]:
     """
@@ -247,7 +324,9 @@ def process_single_case_graphs(args: Tuple[Path, dict]) -> Tuple[bool, Path]:
 
     use_discrete_space = config["use_discrete_space"] if "use_discrete_space" in config else False
     generate_grid_nodes = config["generate_grid_nodes"] if "generate_grid_nodes" in config else False
-    generate_boundary_nodes = config["generate_boundary_nodes"] if "generate_boundary_nodes" in config else False
+    # Boundary nodes default ON here: this cluster generator exists to produce
+    # boundary-aware data (BOUNDARY one-hot + ('node','boundary','node') loops).
+    generate_boundary_nodes = config["generate_boundary_nodes"] if "generate_boundary_nodes" in config else True
     boundary_node_spacing = config.get("boundary_node_spacing", None)
     num_samples = config["num_samples"] if "num_samples" in config else 1000
     num_neighbors = config["num_neighbors"] if "num_neighbors" in config else 4.0
@@ -266,12 +345,35 @@ def process_single_case_graphs(args: Tuple[Path, dict]) -> Tuple[bool, Path]:
 
     input_file = get_input_file_path(case_dir)
     agents = read_agents_from_yaml(input_file)
+    # Halton sampling parameters (d_min/d_opt/sigma/floor): the case's input.yaml
+    # records them when the case was created from map.yaml; fall back to the
+    # generator config so a legacy case still gets the adaptive sampler.
+    with open(input_file, "r") as f:
+        _input_yaml = yaml.safe_load(f) or {}
+    sampling_dist_dict = _input_yaml.get("sampling_dist_dict") or config.get("sampling_dist_dict", {}) or {}
+
+    # 'grid' is a true lattice (one node per free cell, 4-neighbour edges), the
+    # same construction as dataset_ground_truth_map.create_map builds at test
+    # time. Without this the cluster generator would silently produce a KNN
+    # roadmap over num_samples random points, i.e. a prm under another name.
+    if road_map_type == "grid":
+        use_discrete_space = True
+        generate_grid_nodes = True
+        num_samples = 0
+        num_neighbors = 4.0
+        min_edge_len = 1e-10
+        max_edge_len = (1 + 1e-10) * resolution
     gt_dir = generate_roadmap_path(generate_ground_truth_path(case_dir), road_map_type_gt)
     solution_name_suffix = get_solution_name_suffix(graph_file=graph_file_name)
     density_map_file = get_density_map_file(gt_dir, solution_name_suffix,agent_velocity)
-    density_map = np.load(density_map_file)
+    # Density maps come from solver-labeled ground truth; the self-supervised
+    # 'cluster' target space needs none (cluster.md §45), so load lazily.
+    needs_density = target_space.lower() != 'cluster' or config.get("weighted_sampling", False)
+    density_map = np.load(density_map_file) if needs_density else None
 
-    sample_base_dir = generate_roadmap_path(generate_sample_base_path(case_dir), road_map_type)
+    # Namespaced under sample_cluster/ so these samples never clobber the
+    # pruning datasets living under sample/.
+    sample_base_dir = generate_roadmap_path(generate_cluster_sample_base_path(case_dir), road_map_type)
     for ii in range(num_graph_samples):
         # Check if graph gnn file exists
         graph_sample_path = generate_sample_path(sample_base_dir, ii, 0)
@@ -292,9 +394,19 @@ def process_single_case_graphs(args: Tuple[Path, dict]) -> Tuple[bool, Path]:
             start_goal_edges_arr = data_dict['approx_edge_index']
             start_goal_weights_arr = data_dict['approx_edge_attr']
             binary_id = data_dict['binary_id']
+            # Legacy npz (pre-boundary, 4-wide features) lack these keys; they
+            # flow through empty — regenerate with generate_new_graph=True to
+            # get boundary features.
+            if 'boundary_edge_index' in data_dict.files:
+                boundary_edges_arr = data_dict['boundary_edge_index']
+                boundary_weights_arr = data_dict['boundary_edge_attr']
+            else:
+                boundary_edges_arr = np.zeros((0, 2), dtype=np.int32)
+                boundary_weights_arr = np.zeros((0,), dtype=np.float32)
         else:
             map_ = read_graph_sampler_from_yaml(
-                input_file, use_discrete_space=use_discrete_space
+                input_file, use_discrete_space=use_discrete_space,
+                sampling_dist_dict=sampling_dist_dict,
             )
             map_.set_inflation_radius(radius=agent_radius+np.sqrt(2)/2*resolution)
             map_.set_parameters(
@@ -316,10 +428,23 @@ def process_single_case_graphs(args: Tuple[Path, dict]) -> Tuple[bool, Path]:
             else:
                 prob_map = None
             samp_from_prob_map_ratio = config["samp_from_prob_map_ratio"] if "samp_from_prob_map_ratio" in config else 0
-            map_.generateRandomNodes(generate_grid_nodes=generate_grid_nodes,generate_boundary_nodes=generate_boundary_nodes,prob_map=prob_map,samp_from_prob_map_ratio=samp_from_prob_map_ratio,boundary_node_spacing=boundary_node_spacing)
+            # roadmap_type must be passed through: without it the adaptive Halton
+            # sampler never activates and 'halton' degenerates into an exact
+            # duplicate of 'cdt' (uniform samples + CDT triangulation).
+            map_.generateRandomNodes(generate_grid_nodes=generate_grid_nodes,generate_boundary_nodes=generate_boundary_nodes,prob_map=prob_map,samp_from_prob_map_ratio=samp_from_prob_map_ratio,roadmap_type=road_map_type,boundary_node_spacing=boundary_node_spacing)
             map_.generate_map(road_map_type,map_.nodes)
 
-            ndata,node_to_node_edges_arr, node_to_node_weights_arr, start_goal_edges_arr, start_goal_weights_arr = transform_graph_map_to_gnn(map_)
+            (ndata, node_to_node_edges_arr, node_to_node_weights_arr,
+             start_goal_edges_arr, start_goal_weights_arr,
+             boundary_edges_arr, boundary_weights_arr) = transform_graph_map_to_gnn(map_)
+            # Shortest-path supervision pairs for L_SP (cluster.md §11)
+            sp_rng = np.random.default_rng(int(config.get("seed", 42)) + ii)
+            sp_pair_index, sp_pair_dist = sample_shortest_path_pairs(
+                map_,
+                num_sources=int(config.get("num_sp_sources", 16)),
+                num_pairs=int(config.get("num_sp_pairs", 2048)),
+                rng=sp_rng,
+            )
             # Save as compressed npz (10x smaller than pickle)
             np.savez_compressed(
                 graph_gnn_file,
@@ -328,6 +453,10 @@ def process_single_case_graphs(args: Tuple[Path, dict]) -> Tuple[bool, Path]:
                 edge_attr=node_to_node_weights_arr,
                 approx_edge_index=start_goal_edges_arr,
                 approx_edge_attr=start_goal_weights_arr,
+                boundary_edge_index=boundary_edges_arr,
+                boundary_edge_attr=boundary_weights_arr,
+                sp_pair_index=sp_pair_index,
+                sp_pair_dist=sp_pair_dist,
                 binary_id=np.binary_repr(0, width=map_.dim)
             )
 
@@ -359,14 +488,27 @@ def process_single_case_graphs(args: Tuple[Path, dict]) -> Tuple[bool, Path]:
             map_aug.rotate(augmentation_id, axes=(0, 1))
 
             # Rotate the density map to match the new orientation
-            rotated_density = np.rot90(density_map, k=augmentation_id, axes=(0, 1))
+            rotated_density = (np.rot90(density_map, k=augmentation_id, axes=(0, 1))
+                               if density_map is not None else None)
 
             # Generate node features and graph arrays for the rotated map
             (ndata_aug,
              node_to_node_edges_arr_aug,
              node_to_node_weights_arr_aug,
              start_goal_edges_arr_aug,
-             start_goal_weights_arr_aug) = transform_graph_map_to_gnn(map_aug)
+             start_goal_weights_arr_aug,
+             boundary_edges_arr_aug,
+             boundary_weights_arr_aug) = transform_graph_map_to_gnn(map_aug)
+            # Node indices survive rotation, so resample pairs from the rotated
+            # map (distances are rotation-invariant; this keeps it simple).
+            sp_rng_aug = np.random.default_rng(
+                int(config.get("seed", 42)) + ii * num_augmentations + augmentation_id)
+            sp_pair_index_aug, sp_pair_dist_aug = sample_shortest_path_pairs(
+                map_aug,
+                num_sources=int(config.get("num_sp_sources", 16)),
+                num_pairs=int(config.get("num_sp_pairs", 2048)),
+                rng=sp_rng_aug,
+            )
 
             np.savez_compressed(
                 gnn_graph_file,
@@ -375,6 +517,10 @@ def process_single_case_graphs(args: Tuple[Path, dict]) -> Tuple[bool, Path]:
                 edge_attr=node_to_node_weights_arr_aug,
                 approx_edge_index=start_goal_edges_arr_aug,
                 approx_edge_attr=start_goal_weights_arr_aug,
+                boundary_edge_index=boundary_edges_arr_aug,
+                boundary_edge_attr=boundary_weights_arr_aug,
+                sp_pair_index=sp_pair_index_aug,
+                sp_pair_dist=sp_pair_dist_aug,
                 binary_id=np.binary_repr(augmentation_id, width=2),
             )
             map_aug.save_graph_sampler(graph_file)
