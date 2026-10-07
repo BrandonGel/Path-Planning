@@ -30,6 +30,12 @@ from path_planning.cluster.cluster_map import (
     save_cluster_map,
 )
 from path_planning.cluster.CTopPRMpy.ctopprm import CTopPRM
+from path_planning.cluster.embeddings import (
+    EMBEDDING_METHODS,
+    compute_embedding,
+    default_method_name,
+    embedding_summary,
+)
 from path_planning.common.environment.map.graph_sampler import GraphSampler
 from path_planning.data_generation.cluster_dataset_generate import (
     transform_graph_map_to_gnn,
@@ -74,6 +80,12 @@ def gnn_seed_name(method_name: str = GNN_METHOD) -> str:
     return f"graph_map_{method_name}_seeds.npy"
 
 
+def gnn_spectrum_name(method_name: str) -> str:
+    """Full classical-MDS eigenvalue spectrum (descending) of an isomap
+    control run, for explained-variance-vs-d plots; shape (n_lcc,)."""
+    return f"graph_map_{method_name}_spectrum.npy"
+
+
 def gnn_graph_name(method_name: str = GNN_METHOD) -> str:
     """Pickle name for a gnn-family method (e.g. gnn2 for the stage-2
     encoder) so multiple checkpoints' results can coexist per case."""
@@ -96,7 +108,8 @@ def _unwrap_wandb_config(config):
 
 def sampler_to_cluster_heterodata(map_: GraphSampler, use_boundary_edges: bool = True,
                                   use_task_edges: bool = True,
-                                  use_node_type_features: bool = True) -> HeteroData:
+                                  use_node_type_features: bool = True,
+                                  use_boundary_node_features: bool = True) -> HeteroData:
     """Live GraphSampler -> the cluster-training HeteroData layout.
 
     The three flags mirror the training-time ablation (dataset.config in the
@@ -143,7 +156,8 @@ def sampler_to_cluster_heterodata(map_: GraphSampler, use_boundary_edges: bool =
         data['node', 'boundary', 'node'].edge_index = torch.zeros((2, 0), dtype=torch.long)
         data['node', 'boundary', 'node'].edge_attr = torch.zeros((0, 1), dtype=torch.float)
     data['node', 'boundary', 'node'].edge_weight = None
-    return apply_edge_ablation(data, use_boundary_edges, use_task_edges, use_node_type_features)
+    return apply_edge_ablation(data, use_boundary_edges, use_task_edges, use_node_type_features,
+                               use_boundary_node_features)
 
 
 def read_run_config(run_folder) -> dict:
@@ -154,13 +168,15 @@ def read_run_config(run_folder) -> dict:
         return _unwrap_wandb_config(yaml.safe_load(f))
 
 
-def ablation_flags_from_config(cfg: dict) -> Tuple[bool, bool, bool]:
-    """(use_boundary_edges, use_task_edges, use_node_type_features) recorded in
-    the run config under dataset.config; missing keys (runs that predate the
-    ablations, e.g. gnn6) mean the full relation set and the real one-hot."""
+def ablation_flags_from_config(cfg: dict) -> Tuple[bool, bool, bool, bool]:
+    """(use_boundary_edges, use_task_edges, use_node_type_features,
+    use_boundary_node_features) recorded in the run config under dataset.config;
+    missing keys (runs that predate the ablations, e.g. gnn6) mean the full
+    relation set and the real one-hot."""
     dcfg = ((cfg.get("dataset") or {}).get("config") or {})
     return (bool(dcfg.get("use_boundary_edges", True)), bool(dcfg.get("use_task_edges", True)),
-            bool(dcfg.get("use_node_type_features", True)))
+            bool(dcfg.get("use_node_type_features", True)),
+            bool(dcfg.get("use_boundary_node_features", True)))
 
 
 def edge_flags_from_config(cfg: dict) -> Tuple[bool, bool]:
@@ -185,7 +201,8 @@ def load_cluster_encoder(run_folder, sample_data: HeteroData, epoch: Optional[in
     files = run_folder / "files" if (run_folder / "files").exists() else run_folder
     cfg = read_run_config(run_folder)
     model_cfg = dict(cfg["encoder"]["model"])
-    use_boundary_edges, use_task_edges, use_node_type_features = ablation_flags_from_config(cfg)
+    (use_boundary_edges, use_task_edges, use_node_type_features,
+     use_boundary_node_features) = ablation_flags_from_config(cfg)
     from path_planning.gnn.train_cluster import (  # deferred: pulls in wandb
         HeteroClusterEncoder, _get_graph_unet_params)
     graph_unet_params = _get_graph_unet_params(cfg["encoder"], model_cfg)
@@ -208,7 +225,7 @@ def load_cluster_encoder(run_folder, sample_data: HeteroData, epoch: Optional[in
     # The caller may pass a full sample; drop the ablated relations so the lazy
     # init below sees exactly the checkpoint's relation set.
     sample_data = apply_edge_ablation(sample_data, use_boundary_edges, use_task_edges,
-                                      use_node_type_features)
+                                      use_node_type_features, use_boundary_node_features)
     model = to_hetero(homogeneous, metadata, aggr=model_cfg['to_hetero_aggr']).to(device)
     if graph_unet_params is not None:
         # stage-2 checkpoints wrap the traced encoder with a GraphUNet post-stage
@@ -267,11 +284,16 @@ def _boundary_distances(map_: GraphSampler) -> np.ndarray:
 
 
 @torch.no_grad()
-def gnn_seed_indices(model, data: HeteroData, map_: GraphSampler, k: int,
-                     device: torch.device,
+def gnn_seed_indices(model, data: Optional[HeteroData], map_: GraphSampler, k: int,
+                     device: Optional[torch.device],
                      obstacle_aware: bool = False,
                      boundary_distance_threshold: float = 1.5,
-                     obstacle_cluster_budget: Optional[float] = None
+                     obstacle_cluster_budget: Optional[float] = None,
+                     embedding_method: str = "gnn",
+                     embedding_dim: int = 32,
+                     embedding_cache=None,
+                     drop_disconnected: bool = False,
+                     full_spectrum: bool = False,
                      ) -> Tuple[List[int], Dict[str, float], Dict[str, np.ndarray]]:
     """Embedding K-means anchor nodes: cluster.md §16A + §17 medoids in latent
     space. Start/goal nodes are excluded (protected singletons, §5) — CTopPRM
@@ -284,15 +306,44 @@ def gnn_seed_indices(model, data: HeteroData, map_: GraphSampler, k: int,
     capped at 0.9) — more retained resolution near obstacles, coarser open
     space. Returns (medoid node indices, timing dict, latent arrays:
     'embeddings' (num_source_nodes, dim) row-aligned with map_.nodes, and
-    'centroids' (len(seeds), dim) with row j the K-means centre of seed j)."""
+    'centroids' (len(seeds), dim) with row j the K-means centre of seed j).
+
+    embedding_method selects the embedding (embeddings.compute_embedding):
+    "gnn" (default; model/data/device required, output identical to the
+    original inline forward) or one of the unlearned controls euclid / isomap
+    / spectral, which need no model. Vertices a control could not embed
+    (outside the largest connected component) are removed from the K-means
+    candidates; drop_disconnected applies that same filter to every method
+    (sanity runs only — the default gnn path keeps them, as it always has).
+    The embedding is timed by the same 'inference' timer for every method."""
     t0 = time.perf_counter()
-    ds = data.to(device)
-    z = model(dict(ds.x_dict), ds.edge_index_dict, ds.edge_attr_dict)['node'].cpu().numpy()
-    t_inf = time.perf_counter() - t0
+    z, emb = compute_embedding(map_, embedding_method, embedding_dim, model=model,
+                               data=data, device=device, cache_dir=embedding_cache,
+                               full_spectrum=full_spectrum)
+    t_wall = time.perf_counter() - t0
+    # compute_embedding times the embedding itself (the forward for gnn; the
+    # Dijkstra + eigensolve for the controls) with the same perf_counter timer;
+    # the wall time here additionally contains cache lookups and the optional
+    # diagnostic full spectrum, which are not embedding cost.
+    t_inf = float(emb["compute_time"])
 
     sg = set(map_.start_nodes_index.values()) | set(map_.goal_nodes_index.values())
-    free = np.array([i for i in range(len(z)) if i not in sg], dtype=np.int64)
+    excluded = set(sg)
+    dropped = set(int(i) for i in emb["dropped"])
+    if drop_disconnected and embedding_method in ("gnn", "euclid"):
+        from path_planning.cluster.embeddings import largest_component, symmetric_roadmap_csr
+        csr, _ = symmetric_roadmap_csr(map_)
+        lcc, n_comp, _ = largest_component(csr)
+        dropped = set(np.setdiff1d(np.arange(len(z)), lcc).tolist())
+        emb["dropped"] = np.asarray(sorted(dropped), dtype=np.int64)
+        emb["n_components"] = int(n_comp)
+    excluded |= dropped
+    free = np.array([i for i in range(len(z)) if i not in excluded], dtype=np.int64)
     k_free = min(max(k - len(sg), 1), len(free) - 1)
+    emb_summary = embedding_summary(emb)
+    emb_summary.update({"n_candidates": int(len(free)), "n_anchors": int(len(sg)),
+                        "k_free": int(k_free), "drop_disconnected": bool(drop_disconnected),
+                        "wall_time": float(t_wall)})
     t1 = time.perf_counter()
     budget_info: Dict[str, float] = {}
     if not obstacle_aware:
@@ -322,19 +373,28 @@ def gnn_seed_indices(model, data: HeteroData, map_: GraphSampler, k: int,
     t_km = time.perf_counter() - t1
     times = {"inference": t_inf, "kmeans": t_km}
     times.update(budget_info)
+    times["embedding"] = emb_summary
     latent = {"embeddings": z, "centroids": centroids,
               "seeds": np.asarray(seeds, dtype=np.int64)}
+    if emb.get("spectrum") is not None:
+        latent["spectrum"] = np.asarray(emb["spectrum"], dtype=np.float64)
     return seeds, times, latent
 
 
 def build_gnn_cluster_map(source_map: GraphSampler, agents: List[dict], model,
-                          device: torch.device, cluster_fraction: float = 0.05,
+                          device: Optional[torch.device], cluster_fraction: float = 0.05,
                           obstacle_aware: bool = False,
                           boundary_distance_threshold: float = 1.5,
                           obstacle_cluster_budget: Optional[float] = None,
                           use_boundary_edges: bool = True,
                           use_task_edges: bool = True,
                           use_node_type_features: bool = True,
+                          use_boundary_node_features: bool = True,
+                          embedding_method: str = "gnn",
+                          embedding_dim: int = 32,
+                          embedding_cache=None,
+                          drop_disconnected: bool = False,
+                          full_spectrum: bool = False,
                           ) -> Tuple[GraphSampler, dict, Dict[str, np.ndarray]]:
     """GNN analogue of cluster_map.build_cluster_map: same K formula, same
     distilled-sampler assembly and alignment assertion; the cluster anchors
@@ -348,14 +408,20 @@ def build_gnn_cluster_map(source_map: GraphSampler, agents: List[dict], model,
     k = max(num_endpoints + 2, math.ceil(cluster_fraction * len(source_map.nodes)))
 
     t0 = time.perf_counter()
-    data = sampler_to_cluster_heterodata(source_map, use_boundary_edges, use_task_edges,
-                                         use_node_type_features)
+    if embedding_method == "gnn":
+        data = sampler_to_cluster_heterodata(source_map, use_boundary_edges, use_task_edges,
+                                             use_node_type_features, use_boundary_node_features)
+    else:
+        data = None   # controls need no HeteroData (heterodata time is 0)
     t_hetero = time.perf_counter()
     seeds, seed_times, latent = gnn_seed_indices(
         model, data, source_map, k, device,
         obstacle_aware=obstacle_aware,
         boundary_distance_threshold=boundary_distance_threshold,
-        obstacle_cluster_budget=obstacle_cluster_budget)
+        obstacle_cluster_budget=obstacle_cluster_budget,
+        embedding_method=embedding_method, embedding_dim=embedding_dim,
+        embedding_cache=embedding_cache, drop_disconnected=drop_disconnected,
+        full_spectrum=full_spectrum)
     t_seeds = time.perf_counter()
 
     planner = CTopPRM(source_map, clustering="custom", custom_seeds=seeds,
@@ -373,7 +439,7 @@ def build_gnn_cluster_map(source_map: GraphSampler, agents: List[dict], model,
     got = np.asarray([n.current for n in nodes[: len(points)]], dtype=float)
     if len(nodes) < len(points) or not np.allclose(got, expected, atol=1e-9):
         raise RuntimeError(
-            f"{GNN_METHOD}: distilled points rejected by point_expandable "
+            f"{embedding_method}: distilled points rejected by point_expandable "
             f"({len(nodes)} nodes for {len(points)} points); refusing to save "
             f"a roadmap with misaligned edge indices"
         )
@@ -381,9 +447,10 @@ def build_gnn_cluster_map(source_map: GraphSampler, agents: List[dict], model,
     t_build = time.perf_counter()
 
     stats = {
-        "method": GNN_METHOD,
-        "clustering_mode": ("custom(gnn-embedding-kmeans, obstacle-aware)"
-                            if obstacle_aware else "custom(gnn-embedding-kmeans)"),
+        "method": GNN_METHOD if embedding_method == "gnn" else embedding_method,
+        "clustering_mode": (f"custom({embedding_method}-embedding-kmeans, obstacle-aware)"
+                            if obstacle_aware else f"custom({embedding_method}-embedding-kmeans)"),
+        "embedding": seed_times["embedding"],
         "min_clusters": k,
         "num_clusters": len(planner.seed_indices),
         "num_nodes": len(fresh.nodes),
@@ -416,22 +483,42 @@ def create_gnn_cluster_maps(path: Path, num_cases: int, config: Dict,
                             obstacle_aware: bool = False,
                             boundary_distance_threshold: float = 1.5,
                             obstacle_cluster_budget: Optional[float] = None,
-                            method_name: str = GNN_METHOD,
-                            save_embeddings: bool = True):
+                            method_name: Optional[str] = None,
+                            save_embeddings: bool = True,
+                            embedding_method: str = "gnn",
+                            embedding_dim: int = 32,
+                            embedding_cache=None,
+                            drop_disconnected: bool = False,
+                            full_spectrum: bool = False):
     """Sequential per-case GNN distillation (the model lives in-process).
     Skips existing pkls unless overwrite; raises listing per-case failures so
     downstream graph_files stay complete. With save_embeddings three numpy
     arrays are written next to the pickle: the encoder's node embeddings
     (gnn_embedding_name, float32, row-aligned with the *source* roadmap
     nodes), the K-means centroids (gnn_centroid_name) and the medoid seed
-    indices they belong to (gnn_seed_name). Returns the resolved epoch."""
+    indices they belong to (gnn_seed_name). Returns the resolved epoch.
+
+    embedding_method != "gnn" runs one of the unlearned controls
+    (embeddings.compute_embedding): run_folder/epoch are ignored (no model is
+    loaded), the same files are written under method_name (default
+    euclid / isomap_<d> / spectral_<d>) plus graph_map_<mn>_spectrum.npy when
+    the isomap spectrum was computed (full_spectrum)."""
     path = Path(path)
     road_map_type = config["road_map_type"]
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    # Edge-ablation flags travel with the run: the test graph must carry the
-    # same relations the checkpoint was trained on.
-    use_boundary_edges, use_task_edges, use_node_type_features = \
-        ablation_flags_from_config(read_run_config(run_folder))
+    if embedding_method not in EMBEDDING_METHODS:
+        raise ValueError(f"embedding_method must be one of {EMBEDDING_METHODS}")
+    if method_name is None:
+        method_name = default_method_name(embedding_method, embedding_dim)
+    is_gnn = embedding_method == "gnn"
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu') if is_gnn else None
+    if is_gnn:
+        # Edge-ablation flags travel with the run: the test graph must carry the
+        # same relations the checkpoint was trained on.
+        (use_boundary_edges, use_task_edges, use_node_type_features,
+         use_boundary_node_features) = ablation_flags_from_config(read_run_config(run_folder))
+    else:
+        use_boundary_edges = use_task_edges = use_node_type_features = use_boundary_node_features = True
+        run_folder = None
     model = None
     resolved_epoch = None
     failures = []
@@ -453,32 +540,43 @@ def create_gnn_cluster_maps(path: Path, num_cases: int, config: Dict,
             source_map = create_map(inpt, graph_file=source_graph_file, verbose=False,
                                     args={"use_constraint_sweep": False})
             t_load = time.perf_counter() - t0
-            if model is None:
+            if is_gnn and model is None:
                 sample = sampler_to_cluster_heterodata(source_map, use_boundary_edges, use_task_edges,
-                                                       use_node_type_features)
+                                                       use_node_type_features, use_boundary_node_features)
                 model, resolved_epoch = load_cluster_encoder(run_folder, sample,
                                                              epoch=epoch, device=device)
                 if verbose:
                     print(f"loaded encoder from {run_folder} (epoch {resolved_epoch}, {device}; "
                           f"boundary edges {'on' if use_boundary_edges else 'OFF'}, "
                           f"task edges {'on' if use_task_edges else 'OFF'}, "
-                          f"node type features {'on' if use_node_type_features else 'FLAT'})")
+                          f"node type features "
+                          f"{'FLAT' if not use_node_type_features else 'start/goal only' if not use_boundary_node_features else 'on'})")
             cluster_map, stats, latent = build_gnn_cluster_map(
                 source_map, inpt["agents"], model, device, cluster_fraction,
                 obstacle_aware=obstacle_aware,
                 boundary_distance_threshold=boundary_distance_threshold,
                 obstacle_cluster_budget=obstacle_cluster_budget,
                 use_boundary_edges=use_boundary_edges, use_task_edges=use_task_edges,
-                use_node_type_features=use_node_type_features)
+                use_node_type_features=use_node_type_features,
+                use_boundary_node_features=use_boundary_node_features,
+                embedding_method=embedding_method, embedding_dim=embedding_dim,
+                embedding_cache=embedding_cache, drop_disconnected=drop_disconnected,
+                full_spectrum=full_spectrum)
             t_save0 = time.perf_counter()
             save_cluster_map(cluster_map, graph_file)
             if save_embeddings:
                 embedding_file = cluster_dir / gnn_embedding_name(method_name)
                 centroid_file = cluster_dir / gnn_centroid_name(method_name)
                 seed_file = cluster_dir / gnn_seed_name(method_name)
-                np.save(embedding_file, np.asarray(latent["embeddings"], dtype=np.float32))
-                np.save(centroid_file, np.asarray(latent["centroids"], dtype=np.float32))
+                # native dtype: the encoder's float32 (unchanged), float64 for the controls
+                emb_dtype = np.float32 if is_gnn else np.asarray(latent["embeddings"]).dtype
+                np.save(embedding_file, np.asarray(latent["embeddings"], dtype=emb_dtype))
+                np.save(centroid_file, np.asarray(latent["centroids"], dtype=emb_dtype))
                 np.save(seed_file, np.asarray(latent["seeds"], dtype=np.int64))
+                if "spectrum" in latent:
+                    spectrum_file = cluster_dir / gnn_spectrum_name(method_name)
+                    np.save(spectrum_file, np.asarray(latent["spectrum"], dtype=np.float64))
+                    stats["spectrum_file"] = str(spectrum_file)
                 stats["embedding_file"] = str(embedding_file)
                 stats["embedding_shape"] = [int(d) for d in latent["embeddings"].shape]
                 stats["centroid_file"] = str(centroid_file)
@@ -489,14 +587,19 @@ def create_gnn_cluster_maps(path: Path, num_cases: int, config: Dict,
             stats["runtime"] = sum(stats["runtime_breakdown"].values())
             stats["source_graph"] = str(source_graph_file)
             stats["cluster_fraction"] = cluster_fraction
-            stats["run_folder"] = str(run_folder)
+            stats["run_folder"] = str(run_folder) if run_folder is not None else None
             stats["epoch"] = resolved_epoch
             stats["method"] = method_name
+            stats["embedding_method"] = embedding_method
             write_runtime_yaml(get_graph_runtime_file_path(cluster_dir, gnn_graph_name(method_name)), stats)
             if verbose:
+                e = stats["embedding"]
                 print(f"case_{case_id} {road_map_type}/{method_name}: "
                       f"{stats['source_num_nodes']} -> {stats['num_nodes']} nodes, "
-                      f"{stats['num_edges']} edges ({stats['runtime']:.2f}s)")
+                      f"{stats['num_edges']} edges ({stats['runtime']:.2f}s; "
+                      f"{embedding_method} d={e.get('dim')} candidates={e['n_candidates']} "
+                      f"dropped={e['n_dropped']}"
+                      f"{' cache' if e.get('cache_hit') else ''})")
         except Exception as exc:  # noqa: BLE001 - reported to the driver
             failures.append((case_id, f"{exc}\n{traceback.format_exc()}"))
     if failures:
@@ -539,7 +642,7 @@ def summarize_gnn_cluster_runtimes(path: Path, num_cases: int, config: Dict,
     if runtimes:
         arr = np.asarray(runtimes, dtype=float)
         stage_keys = sorted({k for b in breakdowns for k in b})
-        existing[road_map_type] = {method_name: {
+        existing.setdefault(road_map_type, {})[method_name] = {
             "num_cases": len(runtimes),
             "total": round(float(arr.sum()), 6),
             "mean": round(float(arr.mean()), 6),
@@ -551,7 +654,7 @@ def summarize_gnn_cluster_runtimes(path: Path, num_cases: int, config: Dict,
                 for k in stage_keys
             },
             "cases": cases,
-        }}
+        }
     with open(output_file, "w") as f:
         yaml.safe_dump(existing, f, sort_keys=False)
     return output_file
