@@ -14,7 +14,7 @@ encoder:
       args:
         use_start_goal_pairs: true
     cluster:
-      weight: 0.4    # 1.0 collapsed the embeddings (std 0.04, L_graph pinned at ln2);
+      weight: 0.4    # same as gnn6 (the "both edges" control of the edge ablation)
                      # small weight keeps the §14 obstacle-aware pressure without collapse
       args:
         num_clusters: 128
@@ -75,3 +75,17 @@ dataset:
     # a type's sample_cluster/<type> folder is skipped for that type.
     road_map_types: [grid, prm, cdt, halton]
     target_space: cluster
+    # Edge ablation: which relations the encoder message-passes over besides the
+    # roadmap edges. Persisted into the wandb run config and honoured at
+    # inference. run_cluster_train.py --no-boundary-edges / --no-task-edges
+    # flip these to false. Node features (start/goal + boundary one-hot) and
+    # the cluster target y are unaffected.
+    use_boundary_edges: true   # ('node','boundary','node') self-loops
+    use_task_edges: true       # ('node','approx','node') start/goal -> node edges
+    # Information ablation: false flattens the [start/goal, free, boundary]
+    # node one-hot to [0, 1, 0] for every node (run_cluster_train.py
+    # --flat-node-features), so the encoder input has no obstacle/task info.
+    use_node_type_features: true
+    # false re-labels boundary nodes as free in the one-hot while keeping the
+    # start/goal column (run_cluster_train.py --no-boundary-features).
+    use_boundary_node_features: true

@@ -32,3 +32,15 @@ num_graph_samples: 1
 target_space: convolution_binary
 num_workers: null
 verbose: false
+# Halton roadmap rejection sampling (GraphSampler.generateRandomNodes ->
+# halton.halton_sampling). Acceptance probability of a sample at wall
+# distance d (world units, measured from the inflated obstacle boundary):
+#   0 if d < d_min, else floor + (1 - floor) * exp(-(d - d_opt)^2 / (2 sigma^2))
+# d_min: 0.0 keeps samples right up to the inflation; the old default 0.3 left
+# a visible empty band around every obstacle.
+sampling_dist_dict:
+  halton:
+    d_min: 0.0
+    d_opt: 0.4
+    sigma: 0.5
+    floor: 0.2
