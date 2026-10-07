@@ -68,6 +68,7 @@ if __name__ == "__main__":
     parser.add_argument("-mapf","--mapf_solver_name",type=str, default="cbs", choices=["cbs", "icbs", "lacam", "lacam_random"], help="MAPF solver to use")
     parser.add_argument("-gng","--generate_new_graph",action="store_true", help="generate new graph")
     parser.add_argument("-gbn","--generate_boundary_nodes",action="store_true", help="also register obstacle/map boundary vertices as roadmap nodes")
+    parser.add_argument("-bns","--boundary_node_spacing",type=float, default=None, help="resample obstacle/map boundary nodes every this many world units (e.g. the resolution for one node per boundary cell); default: corners/junctions only")
     parser.add_argument("-w","--num_workers",type=int, default=1, help="number of parallel workers for cases (default: auto-detect CPU cores)")
     parser.add_argument("-verbose","--verbose",dest="verbose",action="store_true", help="verbose")
     parser.add_argument("-cfg","--config",type=str, default='config/map.yaml', help="config file")
@@ -89,6 +90,7 @@ if __name__ == "__main__":
     map_config = set_map_config(map_config=map_config,args=args)
     map_config['gen'] = read_gen_config_from_yaml(args.gen_config)
     map_config['generate_boundary_nodes'] = args.generate_boundary_nodes
+    map_config['boundary_node_spacing'] = args.boundary_node_spacing
 
     base_path = map_config['path']
     nb_agents = map_config['nb_agents']

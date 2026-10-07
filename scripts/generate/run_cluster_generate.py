@@ -34,9 +34,10 @@ if __name__ == "__main__":
     parser.add_argument("-min_el","--min_edge_len",type=float, default=1e-10, help="minimum edge length")
     parser.add_argument("-max_el","--max_edge_len",type=float, default=5+1e-10, help="maximum edge length")
     parser.add_argument("-ngs","--num_graph_samples",type=int, default=1, help="number of graph samples per case")
-    parser.add_argument("-rmt","--road_map_type",type=str, default='prm', help="road map type")
+    parser.add_argument("-rmt","--road_map_types",type=str, nargs='+', default=['prm'], help="road map type(s), e.g. -rmt grid prm cdt halton (grid = lattice, ignores -ns)")
     parser.add_argument("-gng","--generate_new_graph",action="store_true", help="regenerate existing samples")
     parser.add_argument("-no-gbn","--no_generate_boundary_nodes",action="store_true", help="disable boundary nodes (on by default for this generator)")
+    parser.add_argument("-bns","--boundary_node_spacing",type=float, default=None, help="resample obstacle/map boundary nodes every this many world units (e.g. the resolution for one node per boundary cell); default: corners/junctions only")
     parser.add_argument("-sps","--num_sp_sources",type=int, default=16, help="Dijkstra sources for shortest-path supervision pairs")
     parser.add_argument("-spp","--num_sp_pairs",type=int, default=2048, help="max shortest-path supervision pairs per sample")
     parser.add_argument("-ar","--agent_radius",type=float, default=0.5, help="agent radius (inflation)")
@@ -54,10 +55,11 @@ if __name__ == "__main__":
         "min_edge_len": args.min_edge_len,
         "max_edge_len": args.max_edge_len,
         "num_graph_samples": args.num_graph_samples,
-        "road_map_type": args.road_map_type,
+        "road_map_type": None,  # set per roadmap type below
         "target_space": "cluster",
         "generate_new_graph": args.generate_new_graph,
         "generate_boundary_nodes": not args.no_generate_boundary_nodes,
+        "boundary_node_spacing": args.boundary_node_spacing,
         "num_sp_sources": args.num_sp_sources,
         "num_sp_pairs": args.num_sp_pairs,
         "agent_radius": args.agent_radius,
@@ -65,4 +67,6 @@ if __name__ == "__main__":
         "weighted_sampling": False,
     }
     for file_path in folder_path:
-        generate_graph_samples(file_path, config, num_workers=num_workers)
+        for road_map_type in args.road_map_types:
+            print(f"Generating cluster samples for road_map_type={road_map_type} in {file_path}")
+            generate_graph_samples(file_path, {**config, "road_map_type": road_map_type}, num_workers=num_workers)

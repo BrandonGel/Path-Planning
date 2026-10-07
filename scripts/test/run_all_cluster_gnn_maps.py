@@ -5,7 +5,11 @@ type x agent radius,
     existing campaign maps are never regenerated),
 (1) distill every case's roadmap with the trained GNN encoder (embeddings ->
     K-means -> latent-space medoid seeds -> CTopPRM 'custom' reconstruction)
-    and save maps/<type>/cluster/graph_map_gnn.pkl (+ runtime sidecar).
+    and save maps/<type>/cluster/graph_map_gnn.pkl (+ runtime sidecar) plus
+    the encoder's node embeddings as graph_map_gnn_embedding.npy (float32,
+    shape (num_source_nodes, dim), row i <-> source roadmap node i), the
+    K-means centroids as graph_map_gnn_centroids.npy (num_seeds, dim) and the
+    matching medoid seed node indices as graph_map_gnn_seeds.npy (num_seeds,).
 
 Solve afterwards with scripts/test/run_all_cluster_gnn_solvers.py.
 
@@ -34,6 +38,7 @@ from path_planning.cluster.gnn_cluster_map import (
     create_gnn_cluster_maps,
     summarize_gnn_cluster_runtimes,
 )
+from path_planning.cluster.embeddings import default_method_name
 from path_planning.data_generation.dataset_ground_truth_map import create_maps
 from path_planning.data_generation.dataset_ground_truth_solve import (
     create_path_parameter_directory,
@@ -60,19 +65,35 @@ if __name__ == "__main__":
     parser.add_argument("-sn","--sample_num",type=int, default=1500, help="number of sampled nodes for continuous road map types (ignored for grid)")
     parser.add_argument("-rf","--run_folder",type=str, default=DEFAULT_RUN_FOLDER, help="trained cluster-GNN wandb run folder (train_cluster.py output)")
     parser.add_argument("-epoch","--epoch",type=int, default=None, help="checkpoint epoch (default: highest; 60 = best validation of the current run)")
+    parser.add_argument("-mn","--method_name",type=str, default=None, help="method name for output files (e.g. gnn2 for a second checkpoint); default gnn / euclid / isomap_<d> / spectral_<d> by embedding method")
+    parser.add_argument("-em","--embedding_method",type=str, default="gnn", choices=["gnn","euclid","isomap","spectral"], help="vertex embedding fed to the K-means/medoid/CTopPRM pipeline: the trained encoder (gnn) or an unlearned control (euclid = raw coordinates, isomap = classical MDS on roadmap geodesics, spectral = normalized-Laplacian eigenmaps); controls ignore -rf/-epoch")
+    parser.add_argument("-ed","--embedding_dim",type=int, default=32, help="embedding dimension for isomap/spectral (ignored by gnn/euclid)")
+    parser.add_argument("-ec","--embedding_cache",type=str, default="logs/cluster/controls/embedding_cache", help="content-addressed cache dir for isomap/spectral solves ('' disables)")
+    parser.add_argument("-dd","--drop_disconnected",action="store_true", help="also drop vertices outside the largest connected component from the K-means candidates for gnn/euclid (sanity runs; isomap/spectral always do)")
+    parser.add_argument("-fs","--full_spectrum",action="store_true", help="isomap: also compute the full MDS eigenvalue spectrum (explained variance; graph_map_<mn>_spectrum.npy)")
     parser.add_argument("-ow","--overwrite_cluster",action="store_true", help="rebuild GNN cluster maps even if they already exist")
+    parser.add_argument("-nse","--no_save_embedding",action="store_true", help="skip writing the per-case GNN node embeddings, K-means centroids and medoid seeds (cluster/graph_map_<method>_{embedding,centroids,seeds}.npy)")
+    parser.add_argument("-oa","--obstacle_aware",action="store_true", help="cluster.md §15: split the K budget between obstacle-region and open-space nodes")
+    parser.add_argument("-bdt","--boundary_distance_threshold",type=float, default=1.5, help="d_i^B threshold (world units) separating obstacle region from open space")
+    parser.add_argument("-ocb","--obstacle_cluster_budget",type=float, default=None, help="fraction of K for the obstacle region (default: 2x its population share, capped 0.9)")
     parser.add_argument("-c","--num_cases",type=int, default=25, help="number of cases")
     parser.add_argument("-gng","--generate_new_graph",action="store_true", help="generate new source graph")
+    parser.add_argument("-gbn","--generate_boundary_nodes",action="store_true", help="also register obstacle/map boundary vertices as roadmap nodes")
+    parser.add_argument("-bns","--boundary_node_spacing",type=float, default=None, help="resample obstacle/map boundary nodes every this many world units (e.g. the resolution for one node per boundary cell); default: corners/junctions only")
     parser.add_argument("-gen_config","--gen_config",type=str, default='config/gen.yaml', help="start/goal placement config")
     parser.add_argument("-cfg","--config",type=str, default='config/map.yaml', help="config file")
     parser.add_argument("-w","--num_workers",type=int, default=None, help="parallel workers for source-map creation (GNN distillation is sequential)")
     parser.add_argument("-heurs","--heuristic_types",type=str, default='',choices=['manhattan', 'euclidean','dijkstra'], help="heuristic type")
     args = parser.parse_args()
+    if args.method_name is None:
+        args.method_name = default_method_name(args.embedding_method, args.embedding_dim)
 
     with open(args.config, 'r') as f:
         map_config = yaml.load(f,Loader=yaml.FullLoader)
     map_config = set_map_config(map_config=map_config,args=args)
     map_config['gen'] = read_gen_config_from_yaml(args.gen_config)
+    map_config['generate_boundary_nodes'] = args.generate_boundary_nodes
+    map_config['boundary_node_spacing'] = args.boundary_node_spacing
     num_workers=map_config['num_workers']
     base_path = map_config['path']
 
@@ -114,8 +135,18 @@ if __name__ == "__main__":
             create_gnn_cluster_maps(path, args.num_cases, map_config,
                                     run_folder=args.run_folder, epoch=args.epoch,
                                     cluster_fraction=args.cluster_fraction,
-                                    overwrite=args.overwrite_cluster)
+                                    overwrite=args.overwrite_cluster,
+                                    obstacle_aware=args.obstacle_aware,
+                                    boundary_distance_threshold=args.boundary_distance_threshold,
+                                    obstacle_cluster_budget=args.obstacle_cluster_budget,
+                                    method_name=args.method_name,
+                                    save_embeddings=not args.no_save_embedding,
+                                    embedding_method=args.embedding_method,
+                                    embedding_dim=args.embedding_dim,
+                                    embedding_cache=args.embedding_cache or None,
+                                    drop_disconnected=args.drop_disconnected,
+                                    full_spectrum=args.full_spectrum)
 
             runtime_file = summarize_gnn_cluster_runtimes(
-                path, args.num_cases, map_config)
+                path, args.num_cases, map_config, method_name=args.method_name)
             print(f"GNN clustering runtime summary saved: {runtime_file}")

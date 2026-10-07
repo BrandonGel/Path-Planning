@@ -11,6 +11,15 @@ python scripts/generate/run_ground_truth.py -s benchmark/train -b 0 32.0 0 32.0 
 
 """
 
+import sys
+from pathlib import Path as _Path
+
+# Import the local `path_planning` package (this repo) instead of the stale
+# non-editable copy in site-packages (same pattern as the other scripts).
+_repo_root = _Path(__file__).resolve().parents[2]
+if str(_repo_root) not in sys.path:
+    sys.path.insert(0, str(_repo_root))
+
 from path_planning.data_generation.dataset_ground_truth_solve import (
     create_solutions,
     create_path_parameter_directory,
@@ -52,12 +61,16 @@ if __name__ == "__main__":
     parser.add_argument("-ds","--use_discrete_space",action="store_true",help="use discrete space",)
     parser.add_argument("-dp","--delete_failed_path",action="store_true", help="delete failed path")
     parser.add_argument("-gng","--generate_new_graph",action="store_true", help="generate new graph")
+    parser.add_argument("-gbn","--generate_boundary_nodes",action="store_true", help="generate boundary nodes")
+    parser.add_argument("-bns","--boundary_node_spacing",type=float, default=None, help="resample obstacle/map boundary nodes every this many world units (e.g. the resolution for one node per boundary cell); default: corners/junctions only")
     parser.add_argument("-rs","--resolve_solution",dest="resolve_solution",action="store_true", help="resolve solution")
     parser.add_argument("-cfg","--config",type=str, default='config/map.yaml', help="config file")
     parser.add_argument("-gen_config","--gen_config",type=str, default='config/gen.yaml', help="start/goal placement config (uniform | gaussian), see config/gen.yaml")
     parser.add_argument("-w","--num_workers",type=int, default=None, help="number of parallel workers for cases (default: auto-detect CPU cores)")
     parser.add_argument("-heurs","--heuristic_types",type=str, default='',choices=['manhattan', 'euclidean','dijkstra'], help="heuristic type")
     parser.add_argument("-sample_num","--sample_num",type=int, default=0, help="number of samples to generate")
+    parser.add_argument("-nn","--num_neighbors",type=float, default=15.0, help="KNN neighbours for continuous road maps (cluster scripts use 13.0)")
+    parser.add_argument("-max_el","--max_edge_len",type=float, default=2.1, help="maximum edge length for continuous road maps (cluster scripts use 5.1)")
     args = parser.parse_args()
 
 
@@ -65,12 +78,14 @@ if __name__ == "__main__":
         map_config = yaml.load(f,Loader=yaml.FullLoader)
     map_config = set_map_config(map_config=map_config,args=args)
     map_config['gen'] = read_gen_config_from_yaml(args.gen_config)
+    map_config['generate_boundary_nodes'] = args.generate_boundary_nodes
+    map_config['boundary_node_spacing'] = args.boundary_node_spacing
     num_workers=map_config['num_workers']
     base_path = map_config['path']
 
     discrete_config = {
             'use_discrete_space': True,
-            'sample_num': 0 if args.sample_num == 0 else args.sample_num,
+            'sample_num': 0,  # grid lattice ignores it; keep the recorded build key aligned with the cluster scripts
             'num_neighbors': 4.0,
             'min_edge_len': 0.1,
             'max_edge_len': 1.1,
@@ -79,9 +94,9 @@ if __name__ == "__main__":
     continuous_config = {
             'use_discrete_space': False,
             'sample_num': 2000 if args.sample_num == 0 else args.sample_num,
-            'num_neighbors': 15.0,
+            'num_neighbors': args.num_neighbors,
             'min_edge_len': 0.1,
-            'max_edge_len': 5.1,
+            'max_edge_len': args.max_edge_len,
             'heuristic_type': 'euclidean' if args.heuristic_types == '' else args.heuristic_types,
     }
     agent_radii=args.agent_radii

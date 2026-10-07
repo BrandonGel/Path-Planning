@@ -69,6 +69,8 @@ if __name__ == "__main__":
     parser.add_argument("-m","--max_iterations",type=int, default=10000, help="max iterations for the solver")
     parser.add_argument("-dp","--delete_failed_path",action="store_true", help="delete failed path")
     parser.add_argument("-gng","--generate_new_graph",action="store_true", help="generate new source graph")
+    parser.add_argument("-gbn","--generate_boundary_nodes",action="store_true", help="also register obstacle/map boundary vertices as roadmap nodes")
+    parser.add_argument("-bns","--boundary_node_spacing",type=float, default=None, help="resample obstacle/map boundary nodes every this many world units (e.g. the resolution for one node per boundary cell); default: corners/junctions only")
     parser.add_argument("-gen_config","--gen_config",type=str, default='config/gen.yaml', help="start/goal placement config used when the dataset was generated")
     parser.add_argument("-cfg","--config",type=str, default='config/map.yaml', help="config file")
     parser.add_argument("-w","--num_workers",type=int, default=None, help="number of parallel workers for cases (default: auto-detect CPU cores)")
@@ -79,6 +81,8 @@ if __name__ == "__main__":
         map_config = yaml.load(f,Loader=yaml.FullLoader)
     map_config = set_map_config(map_config=map_config,args=args)
     map_config['gen'] = read_gen_config_from_yaml(args.gen_config)
+    map_config['generate_boundary_nodes'] = args.generate_boundary_nodes
+    map_config['boundary_node_spacing'] = args.boundary_node_spacing
     num_workers=map_config['num_workers']
     base_path = map_config['path']
 

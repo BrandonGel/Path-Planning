@@ -27,7 +27,7 @@ import yaml
 random.seed(0)
 np.random.seed(0)
 
-from path_planning.cluster.gnn_cluster_map import GNN_GRAPH_NAME
+from path_planning.cluster.gnn_cluster_map import GNN_GRAPH_NAME, gnn_graph_name
 from path_planning.data_generation.dataset_ground_truth_solve import (
     create_path_parameter_directory,
     create_solutions,
@@ -54,6 +54,9 @@ if __name__ == "__main__":
     parser.add_argument("-ar","--agent_radii",nargs='+',type=float, default=[0.5], help="agent radius")
     parser.add_argument("-av","--agent_velocities",nargs='+',type=float, default=[1.0], help="agent velocity (cbs/icbs only run at 0.0)")
     parser.add_argument("-mapf","--mapf_solver_names",type=str, nargs='+', default=["sipp"], choices=["cbs", "icbs", "lacam", "lacam_random", "sipp"], help="MAPF solver to use")
+    parser.add_argument("-gbn","--generate_boundary_nodes",action="store_true", help="accepted for CLI parity with run_all_cluster_gnn_maps.py (this script never rebuilds source maps)")
+    parser.add_argument("-bns","--boundary_node_spacing",type=float, default=None, help="accepted for CLI parity with run_all_cluster_gnn_maps.py (this script never rebuilds source maps)")
+    parser.add_argument("-mn","--method_name",type=str, default="gnn", help="method name of the cluster maps to solve (e.g. gnn2)")
     parser.add_argument("-sn","--sample_num",type=int, default=1500, help="number of sampled nodes for continuous road map types (ignored for grid)")
     parser.add_argument("-c","--num_cases",type=int, default=25, help="number of cases")
     parser.add_argument("-t","--time_limit",type=int, default=60, help="time_limit for the solver in seconds")
@@ -104,7 +107,7 @@ if __name__ == "__main__":
             missing = []
             for case_id in range(args.num_cases):
                 _, map_path = generate_base_case_path(path, case_id, road_map_type)
-                graph_file = get_graph_file_path(generate_cluster_path(map_path), GNN_GRAPH_NAME)
+                graph_file = get_graph_file_path(generate_cluster_path(map_path), gnn_graph_name(args.method_name))
                 graph_files.append(graph_file)
                 # Without an existing pkl create_map would silently build a
                 # fresh roadmap and save it under the cluster name.

@@ -53,6 +53,7 @@ if __name__ == "__main__":
     parser.add_argument("-rmt_gt","--road_map_type_gt",type=str, default='grid', help="road map type for ground truth")
     parser.add_argument("-ggn","--generate_grid_nodes",action="store_true", help="generate grid nodes")
     parser.add_argument("-gbn","--generate_boundary_nodes",action="store_true", help="also register obstacle/map boundary vertices as roadmap nodes")
+    parser.add_argument("-bns","--boundary_node_spacing",type=float, default=None, help="resample obstacle/map boundary nodes every this many world units (e.g. the resolution for one node per boundary cell); default: corners/junctions only")
     parser.add_argument("-av","--agent_velocity",type=float, default=0.0, help="agent velocity")
     parser.add_argument("-ts","--target_space",type=str, default='convolution_binary', help="target space")
     parser.add_argument("-gng","--generate_new_graph",dest="generate_new_graph",action="store_true", help="generate new graph")
@@ -81,6 +82,7 @@ if __name__ == "__main__":
             "road_map_type_gt": args.road_map_type_gt,
             "generate_grid_nodes": args.generate_grid_nodes,
             "generate_boundary_nodes": args.generate_boundary_nodes,
+            "boundary_node_spacing": args.boundary_node_spacing,
             "agent_velocity": args.agent_velocity,
             "target_space": args.target_space,
             "generate_new_graph": args.generate_new_graph,

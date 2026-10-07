@@ -31,7 +31,21 @@ if __name__ == "__main__":
     parser.add_argument("--no-cuda", dest="use_cuda", action="store_false")
     parser.add_argument("-online", "--online", action="store_true", help="wandb online mode")
     parser.add_argument("--compile", dest="compile", action="store_true", help="torch.compile the model")
-    parser.set_defaults(use_cuda=True, compile=None)
+    parser.add_argument("--no-boundary-edges", dest="use_boundary_edges", action="store_false",
+                        help="edge ablation: drop the ('node','boundary','node') relation")
+    parser.add_argument("--no-task-edges", dest="use_task_edges", action="store_false",
+                        help="edge ablation: drop the ('node','approx','node') start/goal relation "
+                             "(also removes it from the shortest-path loss)")
+    parser.add_argument("--flat-node-features", dest="use_node_type_features", action="store_false",
+                        help="information ablation: flatten the [start/goal, free, boundary] node "
+                             "one-hot to [0, 1, 0] for every node")
+    parser.add_argument("--no-boundary-features", dest="use_boundary_node_features", action="store_false",
+                        help="information ablation: re-label boundary nodes as free in the node one-hot "
+                             "(start/goal column kept)")
+    parser.add_argument("--cluster-alpha", type=float, default=None,
+                        help="override encoder.loss.cluster.args.alpha (0 = no obstacle weighting)")
+    parser.set_defaults(use_cuda=True, compile=None, use_boundary_edges=True, use_task_edges=True,
+                        use_node_type_features=True, use_boundary_node_features=True)
     args = parser.parse_args()
 
     with open(args.train_config, "r") as f:
@@ -49,6 +63,18 @@ if __name__ == "__main__":
         train_config['seed'] = args.seed
     if args.compile is not None:
         train_config['device']['compile'] = args.compile
+    # Edge-ablation flags live in dataset.config so wandb persists them into the
+    # run's config.yaml, where gnn_cluster_map.load_cluster_encoder reads them back.
+    if not args.use_boundary_edges:
+        train_config['dataset']['config']['use_boundary_edges'] = False
+    if not args.use_task_edges:
+        train_config['dataset']['config']['use_task_edges'] = False
+    if not args.use_node_type_features:
+        train_config['dataset']['config']['use_node_type_features'] = False
+    if not args.use_boundary_node_features:
+        train_config['dataset']['config']['use_boundary_node_features'] = False
+    if args.cluster_alpha is not None:
+        train_config['encoder']['loss']['cluster']['args']['alpha'] = float(args.cluster_alpha)
 
     run_cluster_train(train_config, num_workers=args.num_workers,
                       use_cuda=args.use_cuda, online=args.online)
