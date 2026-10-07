@@ -6,7 +6,7 @@
 """
 from typing import List
 from python_motion_planning.common.env import TYPES,  Grid,  Node
-from matplotlib.patches import Circle
+from matplotlib.patches import Circle, RegularPolygon
 import matplotlib.pyplot as plt
 from matplotlib import animation
 import re
@@ -15,6 +15,7 @@ from python_motion_planning.common.visualizer.visualizer_2d import Visualizer2D 
 import matplotlib.colors as mcolors
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 import copy
+from typing import Tuple
 
 class Visualizer2D(BaseVisualizer2D):
     """
@@ -164,8 +165,8 @@ class Visualizer2D(BaseVisualizer2D):
                         nodes: List[Node],
                         road_map: List[List[int]],
                         node_color: str = "#8c564b", 
-                        edge_color: str = "#e377c2", 
-                        node_size: float = 20, 
+                        edge_color: str = "gray", 
+                        node_size: float = 0, 
                         start_size: float = 0,
                         goal_size: float = 0,
                         linewidth: float = 1.0, 
@@ -174,9 +175,20 @@ class Visualizer2D(BaseVisualizer2D):
                         node_value: List[float] = None,
                         show_edge: bool = True,
                         cmap: mcolors.Colormap = None,
-                        map_frame: bool = True) -> None:
+                        map_frame: bool = True,
+                        extra_special_specs: List[Tuple[List[Tuple[float, float]], str, str, float, str]] = None,
+                        special_patch_radius: float = None) -> None:
         """
         Plot the roadmap.
+
+        special_patch_radius: when set (> 0), the special endpoints (start / goal /
+        pickups / ... and extra_special_specs) are drawn as matplotlib patches of
+        that radius in WORLD units with a black outline — 'o' -> Circle,
+        '^' -> triangle, 's' -> square — so they scale with the map like the agent
+        circles do. In this mode the spec's scatter size only acts as a switch:
+        size <= 0 hides that spec (as s=0 does for scatter), any positive size
+        draws it at special_patch_radius. Default None keeps the scatter markers
+        (sizes in points^2).
 
         Args:
             road_map: List of lists containing edge connections.
@@ -229,8 +241,21 @@ class Visualizer2D(BaseVisualizer2D):
             ('parking', 'gray', 's', 'Parking'),
         ):
             special_specs.append((_as_point_list(getattr(map_, attr, None)), color, marker, goal_size, label))
-        special_specs.append((_as_point_list(getattr(map_, 'start', None)), 'red', 'o', start_size, 'Start'))
-        special_specs.append((_as_point_list(getattr(map_, 'goal', None)), 'blue', 'o', goal_size, 'Goal'))
+        # Caller-supplied endpoint specs (points, color, marker, size, label), e.g.
+        # per-agent coloured starts/goals. A spec labelled 'Start' / 'Goal'
+        # (case-insensitive) replaces the default red/blue markers for that kind.
+        extra_special_specs = list(extra_special_specs or [])
+        extra_labels = {str(spec[4]).lower() for spec in extra_special_specs}
+        if 'start' not in extra_labels:
+            special_specs.append((_as_point_list(getattr(map_, 'start', None)), 'red', 'o', start_size, 'Start'))
+        if 'goal' not in extra_labels:
+            special_specs.append((_as_point_list(getattr(map_, 'goal', None)), 'blue', 'o', goal_size, 'Goal'))
+        seen_labels = set()
+        for pts, color, marker, size, label in extra_special_specs:
+            # One legend entry per label even though each agent has its own spec.
+            special_specs.append((_as_point_list(pts), color, marker, size,
+                                  label if label not in seen_labels else ''))
+            seen_labels.add(label)
         
         # Mask out waypoints that coincide with any special endpoint.
         is_special = np.zeros(len(nodes), dtype=bool)
@@ -246,14 +271,50 @@ class Visualizer2D(BaseVisualizer2D):
             vmax = max(1, np.max(node_value))
             self.ax.scatter(x_coords[keep], y_coords[keep], c=node_value[keep], edgecolors='black', s=node_size, alpha=node_alpha, zorder=self.zorder['road_map'], label='Sample nodes', cmap=cmap, vmin=vmin, vmax=vmax)
         else:
-            self.ax.scatter(x_coords[keep], y_coords[keep], c=node_color, edgecolors='black', s=node_size, alpha=node_alpha, zorder=self.zorder['road_map'], label='Sample nodes')
+            # node_color may be one colour for all nodes, or one colour PER NODE (a
+            # sequence / (N, 3|4) array aligned with `nodes`, e.g. cluster colours);
+            # per-node colours are masked like the coordinates so they stay aligned
+            # once the special endpoints are dropped.
+            per_node = False
+            if not isinstance(node_color, str):
+                nc = np.asarray(node_color)
+                # (N, 3|4) colour rows, or N colour names; a lone RGB(A) tuple is 1-D numeric.
+                per_node = len(nc) == len(nodes) and (nc.ndim == 2 or nc.dtype.kind in 'US')
+            c = np.asarray(node_color)[keep] if per_node else node_color
+            self.ax.scatter(x_coords[keep], y_coords[keep], c=c, edgecolors='black', s=node_size, alpha=node_alpha, zorder=self.zorder['road_map'], label='Sample nodes')
 
         # Plot the special endpoints with their respective marker and color.
+        use_patches = special_patch_radius is not None and special_patch_radius > 0
         for pts, color, marker, size, label in special_specs:
+            if use_patches and size is not None and size <= 0:
+                continue  # hidden spec (still suppresses the default marker of its label)
             for k, pt in enumerate(pts):
-                self.ax.scatter(pt[0] + off, pt[1] + off, c=color, marker=marker, s=size,
-                                alpha=1, zorder=self.zorder['expand_tree_node'],
-                                label=label if k == 0 else '')
+                xy = (pt[0] + off, pt[1] + off)
+                patch = self._special_patch(xy, marker, special_patch_radius) if use_patches else None
+                if patch is not None:
+                    patch.set(facecolor=color, edgecolor='k', linewidth=1, alpha=1,
+                              zorder=self.zorder['expand_tree_node'],
+                              label=label if k == 0 else '_nolegend_')
+                    self.ax.add_patch(patch)
+                else:  # scatter fallback (default mode, or a marker without a patch shape)
+                    self.ax.scatter(xy[0], xy[1], color=color, marker=marker, s=size,
+                                    alpha=1, zorder=self.zorder['expand_tree_node'],
+                                    label=label if k == 0 else '')
+
+    @staticmethod
+    def _special_patch(xy, marker: str, radius: float):
+        """Patch (world units) for a scatter-style marker, or None if unsupported."""
+        if marker == 'o':
+            return Circle(xy, radius)
+        if marker == '^':
+            return RegularPolygon(xy, 3, radius=radius)
+        if marker == 'v':
+            return RegularPolygon(xy, 3, radius=radius, orientation=np.pi)
+        if marker == 's':
+            return RegularPolygon(xy, 4, radius=radius, orientation=np.pi / 4)
+        if marker == 'D':
+            return RegularPolygon(xy, 4, radius=radius)
+        return None
 
 
     def add_legend(self, loc: str = 'center left', bbox_to_anchor: tuple = (1.01, 0.5),
@@ -292,7 +353,14 @@ class Visualizer2D(BaseVisualizer2D):
 
     def animate(self,file_name,map, schedule, road_map=None, skip_frames=1, intermediate_frames=3,speed=1,map_frame=True,radius=0.0,
                 show_paths=True, show_legend=True, rack_pts=None, roadmap_specials=True,
-                background_img=None, background_extent=None):
+                background_img=None, background_extent=None,
+                agent_colors=None,extra_special_specs=None,special_patch_radius=None,
+                nodes=None, writer=None, dpi=200):
+        """nodes: optional node list aligned with ``road_map`` (e.g. a k-hop
+        subgraph from k_hop_subgraph). Defaults to map.nodes.
+        writer: matplotlib animation writer name. Defaults to 'ffmpeg' when it
+        is available, otherwise 'pillow' (use a .gif file_name in that case)."""
+        _nodes = map.nodes if nodes is None else nodes
 
         combined_schedule = {}
         combined_schedule.update(copy.deepcopy(schedule["schedule"]))
@@ -312,14 +380,18 @@ class Visualizer2D(BaseVisualizer2D):
         # Size the agent markers (Circle, in data units) to visually match the rack
         # scatter markers (s=RACK_S points^2). Convert the marker's point-diameter to
         # data units using the axes' data-width / pixel-width.
-        RACK_S = 28.0
-        _data_w = float(map.bounds[0][1] - map.bounds[0][0])
-        _ax_w_pts = self.figsize[0] * _right * 72.0
-        _marker_dia_pts = np.sqrt(RACK_S)
-        agent_radius_vis = (_marker_dia_pts / 2.0) * (_data_w / _ax_w_pts)
+        # RACK_S = 28.0
+        # _data_w = float(map.bounds[0][1] - map.bounds[0][0])
+        # _ax_w_pts = self.figsize[0] * _right * 72.0
+        # _marker_dia_pts = np.sqrt(RACK_S)
+        # agent_radius_vis = (_marker_dia_pts / 2.0) * (_data_w / _ax_w_pts)
+        agent_radius_vis = radius
 
         # Draw static map and paths
-        Colors = ['orange', 'blue', 'green']
+        if agent_colors is None:
+            Colors = ['orange', 'blue', 'green']
+        else:
+            Colors = agent_colors
         self.ax.clear()
         self.plot_grid_map(map)
         # Optionally draw a detailed background image (e.g. the photographic occupancy
@@ -329,12 +401,15 @@ class Visualizer2D(BaseVisualizer2D):
         if background_img is not None and background_extent is not None:
             self.ax.imshow(background_img, origin='upper', extent=background_extent,
                            interpolation='nearest', zorder=self.zorder['grid_map'] + 2)
-        if road_map is not None and map.nodes != []:
+        if road_map is not None and len(_nodes) > 0:
             if roadmap_specials:
-                self.plot_road_map(map,map.nodes,road_map,map_frame=map_frame)
+                # special_patch_radius (world units): draw start/goal/... as outlined
+                # patches instead of scatter markers — see plot_road_map.
+                self.plot_road_map(map,_nodes,road_map,map_frame=map_frame,extra_special_specs=extra_special_specs,
+                                   special_patch_radius=special_patch_radius)
             else:
                 # Roadmap nodes + edges only (no start/goal/parking markers, no legend).
-                _coords = np.array([n.current for n in map.nodes], dtype=float)
+                _coords = np.array([n.current for n in _nodes], dtype=float)
                 for _i, _nbrs in enumerate(road_map):
                     for _j in _nbrs:
                         if _j > _i and _j < len(_coords):
@@ -356,12 +431,14 @@ class Visualizer2D(BaseVisualizer2D):
         # create agents:
         T = 0
                 
-        # draw goals first
-        for name in schedule["schedule"]:
+        # draw agent first
+        for ii,name in enumerate(schedule["schedule"]):
             start = schedule["schedule"][name][0]
             x,y = start["x"], start["y"]
-            agents[name] = Circle((x, y), agent_radius_vis, facecolor=Colors[0], edgecolor='black',zorder=self.zorder['robot_circle'])
-            agents[name].original_face_color = Colors[0]
+            color = Colors[ii%len(Colors)]
+
+            agents[name] = Circle((x, y), agent_radius_vis, facecolor=color, edgecolor='black',zorder=self.zorder['robot_circle'])
+            agents[name].original_face_color = color
             patches.append(agents[name])
 
             T = max(T, schedule["schedule"][name][-1]["t"])//skip_frames
@@ -372,15 +449,12 @@ class Visualizer2D(BaseVisualizer2D):
             agent_names[name].set_verticalalignment('center')
             artists.append(agent_names[name])
 
-        colors = ['tab:green']
-        agent_num = 0
         if show_paths:
             for idx, (agent_name, agent) in enumerate(combined_schedule.items()):
                 pos = np.array([[state['x'],state['y']] for state in agent])
-                self.ax.plot(pos[:,0], pos[:,1], color=colors[agent_num], zorder=self.zorder['traj'],linewidth=3,
+                color = Colors[idx%len(Colors)]
+                self.ax.plot(pos[:,0], pos[:,1], color=color, zorder=self.zorder['traj'],linewidth=3,
                              label='Trajectory' if idx == 0 else '')
-                agent_num += 1
-                agent_num %= len(colors)
 
         if show_legend:
             self.add_legend()
@@ -441,11 +515,13 @@ class Visualizer2D(BaseVisualizer2D):
                                 interval=100,
                                 blit=True)
 
+        if writer is None:
+            writer = "ffmpeg" if animation.writers.is_available("ffmpeg") else "pillow"
         anim.save(
             file_name,
-            "ffmpeg",
+            writer,
             fps=intermediate_frames * speed,
-            dpi=200)
+            dpi=dpi)
         self.set_fig_size(self.figsize[0], self.figsize[1])
 
     def plot_density_map(self, density_map: np.ndarray, grid_map: Grid=None, equal: bool = False, alpha: float = 1.0,masked_map = None,interpolation: str = 'bilinear',use_fig_colorbar: bool = True) -> None:
