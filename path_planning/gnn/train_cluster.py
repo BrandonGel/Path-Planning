@@ -154,12 +154,19 @@ class HeteroClusterEncoder(nn.Module):
         return {'node': z}
 
 
-def edge_flags_from_config(train_config: dict) -> Tuple[bool, bool]:
-    """(use_boundary_edges, use_task_edges) from train_config['dataset']['config'];
-    missing keys mean True, so configs that predate the edge ablation (e.g. the
-    gnn6 run) keep the full to/approx/boundary relation set."""
+def ablation_flags_from_config(train_config: dict) -> Tuple[bool, bool, bool]:
+    """(use_boundary_edges, use_task_edges, use_node_type_features) from
+    train_config['dataset']['config']; missing keys mean True, so configs that
+    predate the ablations (e.g. the gnn6 run) keep the full relation set and
+    the [start/goal, free, boundary] one-hot."""
     cfg = (train_config.get('dataset') or {}).get('config') or {}
-    return bool(cfg.get('use_boundary_edges', True)), bool(cfg.get('use_task_edges', True))
+    return (bool(cfg.get('use_boundary_edges', True)), bool(cfg.get('use_task_edges', True)),
+            bool(cfg.get('use_node_type_features', True)))
+
+
+def edge_flags_from_config(train_config: dict) -> Tuple[bool, bool]:
+    """(use_boundary_edges, use_task_edges) — see ablation_flags_from_config."""
+    return ablation_flags_from_config(train_config)[:2]
 
 
 def _get_graph_unet_params(model_config: dict, model_kwargs: dict):
@@ -242,14 +249,16 @@ def run_cluster_train(train_config: dict, num_workers: int = None, use_cuda: boo
     load_file = Path(dataset_cfg['load_file']) if dataset_cfg.get('load_file') else None
     save_file = Path(dataset_cfg['save_file']) if dataset_cfg.get('save_file') else None
     data_files = get_graph_dataset_file_paths(folder_path, dataset_cfg['config'])
-    use_boundary_edges, use_task_edges = edge_flags_from_config(train_config)
+    use_boundary_edges, use_task_edges, use_node_type_features = ablation_flags_from_config(train_config)
     rels = ['to'] + (['approx'] if use_task_edges else []) + (['boundary'] if use_boundary_edges else [])
     print(f"Edge relations: {' + '.join(rels)}"
-          + ("" if len(rels) > 1 else " (roadmap edges only)"))
+          + ("" if len(rels) > 1 else " (roadmap edges only)")
+          + f"; node type features: {'on' if use_node_type_features else 'FLAT [0,1,0]'}")
     graph_dataset = GraphDataset(data_files, load_file=load_file, save_file=save_file,
                                  num_hops=-1, num_workers=num_workers,
                                  use_boundary_edges=use_boundary_edges,
-                                 use_task_edges=use_task_edges)
+                                 use_task_edges=use_task_edges,
+                                 use_node_type_features=use_node_type_features)
 
     batch_size = train_config['train']['batch_size']
     idx_train, idx_test, train_loader, test_loader = split_dataset_by_case(

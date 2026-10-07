@@ -125,17 +125,30 @@ BOUNDARY_RELATION = ('node', 'boundary', 'node')  # boundary-node self-loops
 
 
 def apply_edge_ablation(data: HeteroData, use_boundary_edges: bool = True,
-                        use_task_edges: bool = True) -> HeteroData:
-    """Drop the task (approx) and/or boundary relation from a cluster
-    HeteroData in place (edge-ablation runs; idempotent, returns data). The
-    node features are untouched: the [start/goal, free, boundary] one-hot and
-    the cluster target y still carry both signals — this removes message
-    passing over the relation, not the information."""
+                        use_task_edges: bool = True,
+                        use_node_type_features: bool = True) -> HeteroData:
+    """Ablate a cluster HeteroData in place (idempotent, returns data):
+    - use_task_edges=False / use_boundary_edges=False drop the approx /
+      boundary relation (message passing only; the node one-hot and the
+      cluster target y still carry the information);
+    - use_node_type_features=False flattens the [start/goal, free, boundary]
+      one-hot to [0, 1, 0] for every node (positions untouched), so the
+      encoder input carries no obstacle / task information at all. The
+      cluster loss then cannot exclude start/goal nodes; inference anchors
+      stay protected via the map's start/goal indices."""
     if not use_task_edges and TASK_RELATION in data.edge_types:
         del data[TASK_RELATION]
     if not use_boundary_edges and BOUNDARY_RELATION in data.edge_types:
         del data[BOUNDARY_RELATION]
+    if not use_node_type_features:
+        x = data['node'].x
+        dim = x.shape[1] - 3
+        x[:, dim:] = 0.0
+        x[:, dim + 1] = 1.0
     return data
+
+
+apply_ablation = apply_edge_ablation  # readability alias (3 flags)
 
 
 def get_dummy_sample_data(dim: int = 2, use_boundary_edges: bool = True,
@@ -177,16 +190,19 @@ class GraphDataset(InMemoryDataset):
                 pre_filter: Optional[Callable] = None,
                 num_workers: Optional[int] = 1,
                 use_boundary_edges: bool = True,
-                use_task_edges: bool = True):
+                use_task_edges: bool = True,
+                use_node_type_features: bool = True):
         self.data_files = data_files
         self.load_file = load_file
-        # Edge ablation (see apply_edge_ablation); applied per graph below.
+        # Ablation flags (see apply_edge_ablation); applied per graph below.
         self.use_boundary_edges = bool(use_boundary_edges)
         self.use_task_edges = bool(use_task_edges)
-        if load_file is not None and not (self.use_boundary_edges and self.use_task_edges):
+        self.use_node_type_features = bool(use_node_type_features)
+        if load_file is not None and not (self.use_boundary_edges and self.use_task_edges
+                                          and self.use_node_type_features):
             raise ValueError(
-                "load_file caches graphs with the full relation set; set load_file "
-                "to null for an edge-ablation run (use_boundary_edges/use_task_edges)")
+                "load_file caches un-ablated graphs; set load_file to null for an "
+                "ablation run (use_boundary_edges/use_task_edges/use_node_type_features)")
         self.save_file = save_file if save_file is not None and len(str(save_file)) > 0 else os.path.join(root, 'data.pt') if root is not None else 'data.pt'
         self.data_binary_id = []
         super().__init__(root, transform, pre_transform, pre_filter)
@@ -244,7 +260,8 @@ class GraphDataset(InMemoryDataset):
                     data['node','sp','node'].edge_index = torch.tensor(result_dict['node_sp_node_edges'], dtype=torch.long)
                     data['node','sp','node'].edge_attr = torch.tensor(result_dict['node_sp_node_edata'], dtype=torch.float)
                     data['node','sp','node'].edge_weight = None
-                    apply_edge_ablation(data, self.use_boundary_edges, self.use_task_edges)
+                    apply_edge_ablation(data, self.use_boundary_edges, self.use_task_edges,
+                                        self.use_node_type_features)
                     # data['node','to','node'].edge_weight = 1/(1 + data['node','to','node'].edge_attr)
                     # data['node','approx','node'].edge_weight = 1/(1 + data['node','approx','node'].edge_attr)
                     if num_hops >= 0:
@@ -304,7 +321,8 @@ class GraphDataset(InMemoryDataset):
                 data['node','sp','node'].edge_index = torch.tensor(result_dict['node_sp_node_edges'], dtype=torch.long)
                 data['node','sp','node'].edge_attr = torch.tensor(result_dict['node_sp_node_edata'], dtype=torch.float)
                 data['node','sp','node'].edge_weight = None
-                apply_edge_ablation(data, self.use_boundary_edges, self.use_task_edges)
+                apply_edge_ablation(data, self.use_boundary_edges, self.use_task_edges,
+                                    self.use_node_type_features)
 
                 if num_hops >= 0:
                     node_mask = data['node'].y > 0 

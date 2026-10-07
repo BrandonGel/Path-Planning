@@ -95,13 +95,14 @@ def _unwrap_wandb_config(config):
 
 
 def sampler_to_cluster_heterodata(map_: GraphSampler, use_boundary_edges: bool = True,
-                                  use_task_edges: bool = True) -> HeteroData:
+                                  use_task_edges: bool = True,
+                                  use_node_type_features: bool = True) -> HeteroData:
     """Live GraphSampler -> the cluster-training HeteroData layout.
 
-    use_boundary_edges / use_task_edges mirror the training-time edge
-    ablation (dataset.config in the run's config.yaml, see
-    edge_flags_from_config): the relation is dropped after assembly exactly
-    as GraphDataset does, so the sample matches the checkpoint's metadata.
+    The three flags mirror the training-time ablation (dataset.config in the
+    run's config.yaml, see ablation_flags_from_config): relations are dropped
+    / the node one-hot flattened after assembly exactly as GraphDataset does,
+    so the sample matches what the checkpoint was trained on.
 
     Composes transform_graph_map_to_gnn (5-wide one-hot + boundary self-loop
     arrays) with the _load_single_graph normalization convention the encoder
@@ -142,7 +143,7 @@ def sampler_to_cluster_heterodata(map_: GraphSampler, use_boundary_edges: bool =
         data['node', 'boundary', 'node'].edge_index = torch.zeros((2, 0), dtype=torch.long)
         data['node', 'boundary', 'node'].edge_attr = torch.zeros((0, 1), dtype=torch.float)
     data['node', 'boundary', 'node'].edge_weight = None
-    return apply_edge_ablation(data, use_boundary_edges, use_task_edges)
+    return apply_edge_ablation(data, use_boundary_edges, use_task_edges, use_node_type_features)
 
 
 def read_run_config(run_folder) -> dict:
@@ -153,12 +154,18 @@ def read_run_config(run_folder) -> dict:
         return _unwrap_wandb_config(yaml.safe_load(f))
 
 
-def edge_flags_from_config(cfg: dict) -> Tuple[bool, bool]:
-    """(use_boundary_edges, use_task_edges) recorded in the run config under
-    dataset.config; missing keys (runs that predate the edge ablation, e.g.
-    gnn6) mean the full to/approx/boundary relation set."""
+def ablation_flags_from_config(cfg: dict) -> Tuple[bool, bool, bool]:
+    """(use_boundary_edges, use_task_edges, use_node_type_features) recorded in
+    the run config under dataset.config; missing keys (runs that predate the
+    ablations, e.g. gnn6) mean the full relation set and the real one-hot."""
     dcfg = ((cfg.get("dataset") or {}).get("config") or {})
-    return bool(dcfg.get("use_boundary_edges", True)), bool(dcfg.get("use_task_edges", True))
+    return (bool(dcfg.get("use_boundary_edges", True)), bool(dcfg.get("use_task_edges", True)),
+            bool(dcfg.get("use_node_type_features", True)))
+
+
+def edge_flags_from_config(cfg: dict) -> Tuple[bool, bool]:
+    """(use_boundary_edges, use_task_edges) — see ablation_flags_from_config."""
+    return ablation_flags_from_config(cfg)[:2]
 
 
 def load_cluster_encoder(run_folder, sample_data: HeteroData, epoch: Optional[int] = None,
@@ -178,7 +185,7 @@ def load_cluster_encoder(run_folder, sample_data: HeteroData, epoch: Optional[in
     files = run_folder / "files" if (run_folder / "files").exists() else run_folder
     cfg = read_run_config(run_folder)
     model_cfg = dict(cfg["encoder"]["model"])
-    use_boundary_edges, use_task_edges = edge_flags_from_config(cfg)
+    use_boundary_edges, use_task_edges, use_node_type_features = ablation_flags_from_config(cfg)
     from path_planning.gnn.train_cluster import (  # deferred: pulls in wandb
         HeteroClusterEncoder, _get_graph_unet_params)
     graph_unet_params = _get_graph_unet_params(cfg["encoder"], model_cfg)
@@ -200,7 +207,8 @@ def load_cluster_encoder(run_folder, sample_data: HeteroData, epoch: Optional[in
                                      use_task_edges=use_task_edges).metadata()
     # The caller may pass a full sample; drop the ablated relations so the lazy
     # init below sees exactly the checkpoint's relation set.
-    sample_data = apply_edge_ablation(sample_data, use_boundary_edges, use_task_edges)
+    sample_data = apply_edge_ablation(sample_data, use_boundary_edges, use_task_edges,
+                                      use_node_type_features)
     model = to_hetero(homogeneous, metadata, aggr=model_cfg['to_hetero_aggr']).to(device)
     if graph_unet_params is not None:
         # stage-2 checkpoints wrap the traced encoder with a GraphUNet post-stage
@@ -326,6 +334,7 @@ def build_gnn_cluster_map(source_map: GraphSampler, agents: List[dict], model,
                           obstacle_cluster_budget: Optional[float] = None,
                           use_boundary_edges: bool = True,
                           use_task_edges: bool = True,
+                          use_node_type_features: bool = True,
                           ) -> Tuple[GraphSampler, dict, Dict[str, np.ndarray]]:
     """GNN analogue of cluster_map.build_cluster_map: same K formula, same
     distilled-sampler assembly and alignment assertion; the cluster anchors
@@ -339,7 +348,8 @@ def build_gnn_cluster_map(source_map: GraphSampler, agents: List[dict], model,
     k = max(num_endpoints + 2, math.ceil(cluster_fraction * len(source_map.nodes)))
 
     t0 = time.perf_counter()
-    data = sampler_to_cluster_heterodata(source_map, use_boundary_edges, use_task_edges)
+    data = sampler_to_cluster_heterodata(source_map, use_boundary_edges, use_task_edges,
+                                         use_node_type_features)
     t_hetero = time.perf_counter()
     seeds, seed_times, latent = gnn_seed_indices(
         model, data, source_map, k, device,
@@ -420,7 +430,8 @@ def create_gnn_cluster_maps(path: Path, num_cases: int, config: Dict,
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     # Edge-ablation flags travel with the run: the test graph must carry the
     # same relations the checkpoint was trained on.
-    use_boundary_edges, use_task_edges = edge_flags_from_config(read_run_config(run_folder))
+    use_boundary_edges, use_task_edges, use_node_type_features = \
+        ablation_flags_from_config(read_run_config(run_folder))
     model = None
     resolved_epoch = None
     failures = []
@@ -443,19 +454,22 @@ def create_gnn_cluster_maps(path: Path, num_cases: int, config: Dict,
                                     args={"use_constraint_sweep": False})
             t_load = time.perf_counter() - t0
             if model is None:
-                sample = sampler_to_cluster_heterodata(source_map, use_boundary_edges, use_task_edges)
+                sample = sampler_to_cluster_heterodata(source_map, use_boundary_edges, use_task_edges,
+                                                       use_node_type_features)
                 model, resolved_epoch = load_cluster_encoder(run_folder, sample,
                                                              epoch=epoch, device=device)
                 if verbose:
                     print(f"loaded encoder from {run_folder} (epoch {resolved_epoch}, {device}; "
                           f"boundary edges {'on' if use_boundary_edges else 'OFF'}, "
-                          f"task edges {'on' if use_task_edges else 'OFF'})")
+                          f"task edges {'on' if use_task_edges else 'OFF'}, "
+                          f"node type features {'on' if use_node_type_features else 'FLAT'})")
             cluster_map, stats, latent = build_gnn_cluster_map(
                 source_map, inpt["agents"], model, device, cluster_fraction,
                 obstacle_aware=obstacle_aware,
                 boundary_distance_threshold=boundary_distance_threshold,
                 obstacle_cluster_budget=obstacle_cluster_budget,
-                use_boundary_edges=use_boundary_edges, use_task_edges=use_task_edges)
+                use_boundary_edges=use_boundary_edges, use_task_edges=use_task_edges,
+                use_node_type_features=use_node_type_features)
             t_save0 = time.perf_counter()
             save_cluster_map(cluster_map, graph_file)
             if save_embeddings:
