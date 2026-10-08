@@ -195,9 +195,9 @@ def create_path_parameter_directory(base_path: Path, config: Dict,dump_config: b
         "resolution": resolution,
         "agent_radius": agent_radius,
     }
-    gen_cfg = normalize_gen_config(config.get("gen", None))
-    if gen_cfg["type"] != "uniform":
-        base_config["gen"] = gen_cfg  # record non-default start/goal generation in the dataset root config
+    spawning_mechanism_cfg = standardize_spawning_mechanism_config(config.get("gen", None))
+    if spawning_mechanism_cfg["type"] != "uniform":
+        base_config["gen"] = spawning_mechanism_cfg  # record non-default start/goal generation in the dataset root config
     if dump_config:
         with open(get_config_file_path(map_path), "w") as f:
             yaml.safe_dump(_to_native_yaml(base_config), f)
@@ -209,14 +209,14 @@ GEN_TYPES = ("uniform", "gaussian")
 DEFAULT_GEN_CONFIG = {"type": "uniform", "std_scale": 0.1, "max_attempts": 100, "separate_means": True}
 
 
-def normalize_gen_config(gen_cfg) -> dict:
+def standardize_spawning_mechanism_config(spawning_mechanism_cfg) -> dict:
     """Flatten a gen.yaml dict ``{type, gaussian: {std_scale, max_attempts, separate_means}}`` (or an
     already-flat dict, e.g. read back from input.yaml) into one dict with defaults filled in.
     ``None`` / empty -> uniform (today's behaviour)."""
     cfg = dict(DEFAULT_GEN_CONFIG)
-    if isinstance(gen_cfg, dict):
-        cfg["type"] = str(gen_cfg.get("type", cfg["type"]) or cfg["type"]).lower()
-        src = gen_cfg.get("gaussian") or gen_cfg
+    if isinstance(spawning_mechanism_cfg, dict):
+        cfg["type"] = str(spawning_mechanism_cfg.get("type", cfg["type"]) or cfg["type"]).lower()
+        src = spawning_mechanism_cfg.get("gaussian") or spawning_mechanism_cfg
         cfg["std_scale"] = float(src.get("std_scale", cfg["std_scale"]))
         cfg["max_attempts"] = int(src.get("max_attempts", cfg["max_attempts"]))
         cfg["separate_means"] = bool(src.get("separate_means", cfg["separate_means"]))
@@ -231,4 +231,4 @@ def read_gen_config_from_yaml(gen_config_yaml) -> dict:
     path_planning.gnn.dataset_prune.read_prune_mechanism_from_yaml."""
     with open(gen_config_yaml, "r") as f:
         raw = yaml.load(f, Loader=yaml.FullLoader)
-    return normalize_gen_config(raw)
+    return standardize_spawning_mechanism_config(raw)

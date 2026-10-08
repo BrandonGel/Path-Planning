@@ -14,7 +14,7 @@ import numpy as np
 try:
     from path_planning.data_generation.dataset_ground_truth_map import InputFile
     from path_planning.data_generation.dataset_util import (
-        normalize_gen_config,
+        standardize_spawning_mechanism_config,
         read_gen_config_from_yaml,
     )
     from path_planning.utils.util import set_global_seed, obstacles_world_to_grid
@@ -129,13 +129,13 @@ class TestGaussian(unittest.TestCase):
 
 class TestGenConfig(unittest.TestCase):
     def test_normalize_defaults(self):
-        self.assertEqual(normalize_gen_config(None)["type"], "uniform")
-        cfg = normalize_gen_config({"type": "gaussian"})
+        self.assertEqual(standardize_spawning_mechanism_config(None)["type"], "uniform")
+        cfg = standardize_spawning_mechanism_config({"type": "gaussian"})
         self.assertEqual((cfg["std_scale"], cfg["max_attempts"], cfg["separate_means"]), (0.1, 100, True))
-        flat = normalize_gen_config({"type": "gaussian", "std_scale": 0.3, "separate_means": False})
+        flat = standardize_spawning_mechanism_config({"type": "gaussian", "std_scale": 0.3, "separate_means": False})
         self.assertEqual((flat["std_scale"], flat["separate_means"]), (0.3, False))
         with self.assertRaises(AssertionError):
-            normalize_gen_config({"type": "banana"})
+            standardize_spawning_mechanism_config({"type": "banana"})
 
     def test_read_yaml(self):
         with tempfile.TemporaryDirectory() as d:

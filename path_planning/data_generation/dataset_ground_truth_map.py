@@ -32,6 +32,7 @@ from path_planning.utils.util import (
     _to_native_yaml,
     agents_yaml_to_roadmap_frame,
     obstacles_world_to_grid,
+    get_obstacle_kernel
 )
 from path_planning.data_generation.dataset_util import *
 from path_planning.common.environment.map.graph_sampler import validate_roadmap_type
@@ -92,7 +93,7 @@ def _make_position_sampler(mean_cells, std_cells, dimensions, uniform_fallback, 
     return sample
 
 
-def _make_gaussian_role_samplers(gen_cfg: dict, map_: GraphSampler, dimensions, bounds, resolution, uniform_sampler):
+def _make_gaussian_role_samplers(spawning_mechanism_cfg: dict, map_: GraphSampler, dimensions, bounds, resolution, uniform_sampler):
     """Build the start and goal samplers for ``gen.type == "gaussian"``.
 
     Starts are drawn around one mean and goals around a second one (or the same one when
@@ -102,7 +103,7 @@ def _make_gaussian_role_samplers(gen_cfg: dict, map_: GraphSampler, dimensions, 
     """
     num_dims = len(dimensions)
     bounds_arr = np.asarray(bounds, dtype=float)
-    std_world = [float(gen_cfg["std_scale"] * (bounds_arr[d, 1] - bounds_arr[d, 0])) for d in range(num_dims)]
+    std_world = [float(spawning_mechanism_cfg["std_scale"] * (bounds_arr[d, 1] - bounds_arr[d, 0])) for d in range(num_dims)]
     std_cells = [s / float(resolution) for s in std_world]
 
     def draw_mean():
@@ -111,19 +112,19 @@ def _make_gaussian_role_samplers(gen_cfg: dict, map_: GraphSampler, dimensions, 
         return mean_world, mean_cells
 
     start_mean_world, start_mean_cells = draw_mean()
-    if gen_cfg["separate_means"]:
+    if spawning_mechanism_cfg["separate_means"]:
         goal_mean_world, goal_mean_cells = draw_mean()
     else:
         goal_mean_world, goal_mean_cells = list(start_mean_world), list(start_mean_cells)
 
     stats = {"n_fallback_start": 0, "n_fallback_goal": 0}
-    start_sampler = _make_position_sampler(start_mean_cells, std_cells, dimensions, uniform_sampler, gen_cfg["max_attempts"], stats, "n_fallback_start")
-    goal_sampler = _make_position_sampler(goal_mean_cells, std_cells, dimensions, uniform_sampler, gen_cfg["max_attempts"], stats, "n_fallback_goal")
+    start_sampler = _make_position_sampler(start_mean_cells, std_cells, dimensions, uniform_sampler, spawning_mechanism_cfg["max_attempts"], stats, "n_fallback_start")
+    goal_sampler = _make_position_sampler(goal_mean_cells, std_cells, dimensions, uniform_sampler, spawning_mechanism_cfg["max_attempts"], stats, "n_fallback_goal")
     record = {
         "type": "gaussian",
-        "std_scale": float(gen_cfg["std_scale"]),
-        "max_attempts": int(gen_cfg["max_attempts"]),
-        "separate_means": bool(gen_cfg["separate_means"]),
+        "std_scale": float(spawning_mechanism_cfg["std_scale"]),
+        "max_attempts": int(spawning_mechanism_cfg["max_attempts"]),
+        "separate_means": bool(spawning_mechanism_cfg["separate_means"]),
         "std_world": std_world,
         "start_mean_world": start_mean_world,
         "goal_mean_world": goal_mean_world,
@@ -195,15 +196,10 @@ class InputFile:
         nb_obstacles = kwargs.get("nb_obstacles", 0.1)
         nb_agents = kwargs.get("nb_agents", 4)
         obs_size = kwargs.get("obs_size", 0.5) # size of the obstacle in pixels
-        # Optional: also register obstacle/map boundary vertices as roadmap nodes
-        # (GraphSampler.generateRandomNodes(generate_boundary_nodes=...)). Not in
-        # KEYS on purpose: existing datasets' input.yaml lack it and must stay valid.
         generate_boundary_nodes = kwargs.get("generate_boundary_nodes", False)
-        # Optional spacing (world units) for resampling the boundary; None keeps
-        # corners/junctions only, resolution gives one node per boundary cell.
         boundary_node_spacing = kwargs.get("boundary_node_spacing", None)
         sampling_dist_dict = kwargs.get("sampling_dist_dict", {})
-        gen_cfg = normalize_gen_config(kwargs.get("gen", None))  # start/goal placement (config/gen.yaml)
+        spawning_mechanism_cfg = standardize_spawning_mechanism_config(kwargs.get("gen", None))  # start/goal placement (config/gen.yaml)
         map_ = GraphSampler(bounds=bounds, resolution=resolution, start=[], goal=[], sampling_dist_dict=sampling_dist_dict)
         dimensions = list(map_.shape)
         input_dict = {
@@ -232,14 +228,12 @@ class InputFile:
         }
         total_cells = int(math.prod(dimensions))
         num_dims = len(dimensions)
-        # Clearance (in cells) kept between agents' start/goal cells and obstacles /
-        # other agents: 2 * agent_radius, i.e. two agent radii (this matches the
-        # RA-L dataset generation, which used int(agent_radius / 0.5) at resolution 1).
-        INFLATE_RADIUS_SCALE = 2.0
+        
+        # Take the ceiling of the agent diameter in cells
         num_cells_to_inflate = (
-            math.ceil(INFLATE_RADIUS_SCALE * agent_radius / resolution) if resolution > 0 else 0
+            math.ceil(2.0 * agent_radius / resolution) if resolution > 0 else 0
         )
-        # total_cells = int(math.prod(no_resolution_dimensions)) 
+
         if 0 < nb_obstacles < 1:
             nb_obstacles = int(total_cells * nb_obstacles)
         required_cells = nb_obstacles + 2 * nb_agents  # obstacles + starts + goals
@@ -249,18 +243,14 @@ class InputFile:
                 f"Warning: Requesting {required_cells} positions in {total_cells} cells (>90% fill)"
             )
 
-        # Use set for O(1) lookup
-        occupied_positions = set()
-
-        # TODO: Only for 2D cases
         def get_random_position(
             exclude_set: set, max_attempts: int = 1000,
-        ) -> Optional[Tuple[int, int]]:
+        ) -> Optional[tuple]:
             """Get random position not in exclude set."""
             # For sparse boards, use random sampling
             if len(exclude_set) < total_cells * 0.7:
                 for _ in range(max_attempts):
-                    pos = tuple(np.random.randint(0, dimensions[ii]) for ii in range(num_dims))
+                    pos = tuple(int(p) for p in np.random.randint(0, dimensions))
                     if pos not in exclude_set:
                         return pos
             else:
@@ -269,36 +259,37 @@ class InputFile:
                 available = list(all_positions - exclude_set)
                 if available:
                     return available[np.random.randint(0, len(available))]
-
             return None
 
+        
+
         # Place obstacles (sample/rasterize internally in grid, publish centers in world).
+        occupied_positions = set()
         obstacles_grid = []
-        # cell_indices = np.unravel_index(np.arange(num_resolution_cells),resolution_cells_shape )
+        dim = len(map_.shape)
+        obstacle_kernel = get_obstacle_kernel(obs_size, resolution, dim)
+        obs_pos_reshape_dim = (-1,) + (1,)*dim
         for _ in range(nb_obstacles):
-            obs_pos = get_random_position(occupied_positions)
-            if obs_pos is None:
+            obs_center = get_random_position(occupied_positions)
+            if obs_center is None:
                 assert False, f"Failed to place obstacle {_} (placed {len(obstacles_grid)}/{nb_obstacles})"
-            obs_world = map_.map_to_world(obs_pos)
-            obs_world_list = [float(x) for x in np.asarray(obs_world).reshape(-1)]
-            obs_pos_inflated_arr = obstacles_world_to_grid(map_, [obs_world_list], obs_size)
-            obs_pos_inflated = [tuple(int(v) for v in row.tolist()) for row in obs_pos_inflated_arr]
-            if not obs_pos_inflated:
-                center_cell = tuple(
-                    int(v)
-                    for v in np.asarray(
-                        map_.world_to_map(tuple(obs_world_list), discrete=True)
-                    ).reshape(-1)
-                )
-                obs_pos_inflated = [center_cell]
+            # input.yaml stores only the sampled center (world frame); the footprint is
+            # re-rasterized from obs_size at load time (obstacles_world_to_grid).
+            input_dict["map"]["obstacles"].append([float(x) for x in map_.map_to_world(obs_center)])
+            if obs_size > resolution:
+                obs_pos = np.asarray(obs_center).reshape(obs_pos_reshape_dim)
+                obs_pos_inflated_arr = np.clip(obs_pos + obstacle_kernel, 0, np.array(dimensions).reshape(obs_pos_reshape_dim)-1)
+                obs_pos_inflated_arr = obs_pos_inflated_arr.reshape(dim,-1).T
+                obs_pos_inflated = [tuple(int(v) for v in row.tolist()) for row in obs_pos_inflated_arr]
+            else:
+                obs_pos_inflated = [obs_center]
+
             for pos in obs_pos_inflated:
                 if pos in occupied_positions:
                     continue
                 occupied_positions.add(pos)
                 obstacles_grid.append(pos)
-            input_dict["map"]["obstacles"].append(
-                obs_world_list
-            )
+
         
         if agent_radius > 0 and num_cells_to_inflate > 0:
             offset_range = range(-num_cells_to_inflate, num_cells_to_inflate + 1)
@@ -312,9 +303,9 @@ class InputFile:
         # Start/goal samplers. Uniform keeps the original closure (identical RNG consumption, so
         # existing datasets reproduce); gaussian biases starts and goals around random means and
         # records the drawn parameters under input_dict["gen"].
-        if gen_cfg["type"] == "gaussian":
+        if spawning_mechanism_cfg["type"] == "gaussian":
             start_sampler, goal_sampler, input_dict["gen"] = _make_gaussian_role_samplers(
-                gen_cfg, map_, dimensions, bounds, resolution, get_random_position
+                spawning_mechanism_cfg, map_, dimensions, bounds, resolution, get_random_position
             )
         else:
             start_sampler = goal_sampler = get_random_position
@@ -607,46 +598,45 @@ def process_single_case_map_generation(args: Tuple) -> Optional[int]:
         if case_diff:
             print(f"case_{case_id}: WARNING existing input.yaml differs from the config on {case_diff} "
                   f"(existing -> requested); the case is kept as is")
-        if True:
-            build_diff = {
-                k: (inpt.get(k), config[k]) for k in MAP_BUILD_KEYS
-                if k in config and (inpt.get(k) or None) != (config[k] or None)
-            }
-            if build_diff:
-                # input.yaml is shared by every roadmap type of the case and records
-                # the settings of whichever type was built last, so a mismatch here is
-                # expected whenever scripts loop over several types. Rebuild only if
-                # THIS type's pickle was built with different settings (recorded in
-                # its runtime sidecar); a legacy pickle without that record is rebuilt.
-                built_with = _read_build_config(Path(graph_file))
-                if Path(graph_file).exists() and built_with is not None:
-                    stale = {
-                        k: (built_with.get(k), config[k]) for k in MAP_BUILD_KEYS
-                        if k in config and (built_with.get(k) or None) != (config[k] or None)
-                    }
-                elif Path(graph_file).exists():
-                    stale = build_diff  # legacy pickle without a build record
-                else:
-                    stale = {}  # no pickle yet: create_map builds it anyway
-                if stale:
-                    print(f"case_{case_id}: map-build settings changed {stale} (existing -> requested); rebuilding the {road_map_type} graph")
-                    rebuild_graph = True
-                patch = {k: config[k] for k in build_diff}
-                inpt.update(patch)
-                with open(input_file, "w") as f:
-                    yaml.safe_dump(_to_native_yaml(inpt), f)
-                perm_base = generate_perm_base_path(case_path)
-                if perm_base.exists():
-                    for p in sorted(perm_base.iterdir()):
-                        pf = p / "input.yaml"
-                        if not (p.is_dir() and pf.exists()):
-                            continue
-                        with open(pf, "r") as f:
-                            perm_inpt = yaml.safe_load(f)
-                        if isinstance(perm_inpt, dict):
-                            perm_inpt.update(patch)
-                            with open(pf, "w") as f:
-                                yaml.safe_dump(_to_native_yaml(perm_inpt), f)
+        build_diff = {
+            k: (inpt.get(k), config[k]) for k in MAP_BUILD_KEYS
+            if k in config and (inpt.get(k) or None) != (config[k] or None)
+        }
+        if build_diff:
+            # input.yaml is shared by every roadmap type of the case and records
+            # the settings of whichever type was built last, so a mismatch here is
+            # expected whenever scripts loop over several types. Rebuild only if
+            # THIS type's pickle was built with different settings (recorded in
+            # its runtime sidecar); a legacy pickle without that record is rebuilt.
+            built_with = _read_build_config(Path(graph_file))
+            if Path(graph_file).exists() and built_with is not None:
+                stale = {
+                    k: (built_with.get(k), config[k]) for k in MAP_BUILD_KEYS
+                    if k in config and (built_with.get(k) or None) != (config[k] or None)
+                }
+            elif Path(graph_file).exists():
+                stale = build_diff  # legacy pickle without a build record
+            else:
+                stale = {}  # no pickle yet: create_map builds it anyway
+            if stale:
+                print(f"case_{case_id}: map-build settings changed {stale} (existing -> requested); rebuilding the {road_map_type} graph")
+                rebuild_graph = True
+            patch = {k: config[k] for k in build_diff}
+            inpt.update(patch)
+            with open(input_file, "w") as f:
+                yaml.safe_dump(_to_native_yaml(inpt), f)
+            perm_base = generate_perm_base_path(case_path)
+            if perm_base.exists():
+                for p in sorted(perm_base.iterdir()):
+                    pf = p / "input.yaml"
+                    if not (p.is_dir() and pf.exists()):
+                        continue
+                    with open(pf, "r") as f:
+                        perm_inpt = yaml.safe_load(f)
+                    if isinstance(perm_inpt, dict):
+                        perm_inpt.update(patch)
+                        with open(pf, "w") as f:
+                            yaml.safe_dump(_to_native_yaml(perm_inpt), f)
     if generate_new_graph or not inpt:
         inpt = input_class.gen_input(**config)
         if verbose:

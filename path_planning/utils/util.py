@@ -101,6 +101,21 @@ def convert_grid_to_yaml(env: pmp.common.Grid, agents: list = [], filename: str 
     with open(filename, 'w') as f:
         yaml.dump(yaml_data, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
 
+def get_obstacle_kernel(obs_size: float, resolution: float, dim: int) -> np.ndarray:
+    """
+    Get the obstacle kernel for a given obstacle size and resolution.
+    Args:
+        obs_size: The size of the obstacle.
+        resolution: The resolution of the grid.
+        dim: The dimension of the grid.
+    Returns:
+        The obstacle kernel.
+    """
+    half_num_obs_cells = math.ceil(0.5*(obs_size / resolution-1))
+    axes = [np.arange(-half_num_obs_cells,half_num_obs_cells+1) for _ in range(dim)]
+    kernel = np.array(np.meshgrid(*axes, indexing='ij'))
+    return kernel
+
 def obstacles_world_to_grid(map_: GraphSampler | Grid, obstacles_world, obs_size: float) -> np.ndarray:
     """
     Rasterize world-frame obstacle centers into grid/map indices.
@@ -110,6 +125,7 @@ def obstacles_world_to_grid(map_: GraphSampler | Grid, obstacles_world, obs_size
     """
     if obstacles_world is None or len(obstacles_world) == 0:
         return np.empty((0, len(map_.shape)), dtype=int)
+        
     dim = len(map_.shape)
     bounds = np.asarray(map_.bounds, dtype=float)
     resolution = float(map_.resolution)
@@ -119,23 +135,26 @@ def obstacles_world_to_grid(map_: GraphSampler | Grid, obstacles_world, obs_size
         c = np.asarray(center, dtype=float).reshape(-1)
         if c.size != dim:
             continue
+        # Per axis, the cells overlapped by [c - half, c + half]. This is not a fixed
+        # kernel around the center cell: an off-center obstacle (e.g. centered on a cell
+        # corner) covers the cells its extent actually touches. obs_size == 0 keeps the
+        # single cell containing the center.
         axis_ranges = []
         for d in range(dim):
-            low = c[d] - half
-            high = c[d] + half
-            # If obs_size is zero, keep a single discrete cell at center.
+            low = (c[d] - half - bounds[d, 0]) / resolution
+            high = (c[d] + half - bounds[d, 0]) / resolution
             if high <= low:
-                idx = int(np.floor((c[d] - bounds[d, 0]) / resolution + 1e-9))
-                start_idx = idx
-                end_idx = idx + 1
+                start_idx = int(np.floor(low + 1e-9))
+                end_idx = start_idx + 1
             else:
-                start_idx = int(np.floor((low - bounds[d, 0]) / resolution + 1e-9))
-                end_idx = int(np.ceil((high - bounds[d, 0]) / resolution - 1e-9))
+                start_idx = int(np.floor(low + 1e-9))
+                end_idx = int(np.ceil(high - 1e-9))
             start_idx = max(0, start_idx)
             end_idx = min(int(map_.shape[d]), max(start_idx + 1, end_idx))
-            axis_ranges.append(range(start_idx, end_idx))
-        for cell in np.array(np.meshgrid(*axis_ranges)).T.reshape(-1, dim):
-            obstacle_cells.add(tuple(int(x) for x in cell.tolist()))
+            axis_ranges.append(np.arange(start_idx, end_idx))
+        cells = np.stack(np.meshgrid(*axis_ranges, indexing="ij"), axis=-1).reshape(-1, dim)
+        obstacle_cells.update(tuple(int(v) for v in row) for row in cells.tolist())
+
     if not obstacle_cells:
         return np.empty((0, dim), dtype=int)
     return np.asarray(sorted(obstacle_cells), dtype=int)
