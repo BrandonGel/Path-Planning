@@ -1305,7 +1305,7 @@ class GraphSampler(Grid):
         self.obstacles = [tuple[Any, ...](obs) for obs in obstacles]
         self.set_obstacle_map(obstacles)
 
-    def inflate_obstacles(self, radius: float = 1.0) -> None:
+    def inflate_obstacles(self, radius: float = 1.0, use_expand = True) -> None:
         """Euclidean ESDF inflation plus the 8-connected (2^dim - 1) ring.
 
         ``Grid.inflate_obstacles`` marks a free cell when the center-to-center
@@ -1322,18 +1322,12 @@ class GraphSampler(Grid):
         obstacle ESDF); collision queries use the type map, so this only
         affects the Halton sampling weights and ``min_clearance > 0`` checks.
         """
+        radius = np.ceil(1/(self.resolution*np.sqrt(self.dim)))*np.sqrt(self.dim)*self.resolution if use_expand else radius
         super().inflate_obstacles(radius)
-        if radius < float(self.resolution):
-            return
-        from scipy.ndimage import binary_dilation
-        obstacle = self.type_map.data == TYPES.OBSTACLE
-        ring = binary_dilation(obstacle, structure=np.ones((3,) * self.dim, dtype=bool))
-        self.type_map[ring & (self.type_map.data == TYPES.FREE)] = TYPES.INFLATION
 
-    def set_inflation_radius(self, radius: float):
+    def set_inflation_radius(self, radius: float, use_expand = True):
         self.inflation_radius = radius
-        self.inflate_obstacles(radius)
-        # inflate_obstacles calls update_esdf internally — mark cache valid.
+        self.inflate_obstacles(radius, use_expand)
         self._esdf_initialized = True
 
     def clear_data(self):

@@ -408,7 +408,7 @@ def process_single_case_graphs(args: Tuple[Path, dict]) -> Tuple[bool, Path]:
                 input_file, use_discrete_space=use_discrete_space,
                 sampling_dist_dict=sampling_dist_dict,
             )
-            map_.set_inflation_radius(radius=agent_radius+np.sqrt(2)/2*resolution)
+            map_.set_inflation_radius(radius=agent_radius)
             map_.set_parameters(
                 sample_num=num_samples,
                 num_neighbors=num_neighbors,

@@ -406,7 +406,7 @@ def create_map(param: Dict, generate_new_graph: bool = False,graph_file: Path =N
         
         obstacles = obstacles_world_to_grid(map_, obstacles_world, obs_size)
         map_.set_obstacles(obstacles=obstacles)
-        map_.set_inflation_radius(radius=param["agent_radius"]+np.sqrt(2)/2*param["resolution"])
+        map_.set_inflation_radius(radius=param["agent_radius"])
 
         agents_rt = agents_yaml_to_roadmap_frame(map_, agents)
         start = [a["start"] for a in agents_rt]
@@ -442,9 +442,6 @@ def create_map(param: Dict, generate_new_graph: bool = False,graph_file: Path =N
                 },
                 "num_nodes": len(map_.nodes),
                 "num_edges": len(map_.edges),
-                # Settings this pickle was built with; process_single_case_map_generation
-                # compares against them (not against the shared input.yaml, which only
-                # reflects the LAST roadmap type built) to decide whether a rebuild is needed.
                 "build_config": {k: param.get(k) for k in MAP_BUILD_KEYS},
             },
         )

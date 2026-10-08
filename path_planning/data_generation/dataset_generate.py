@@ -296,7 +296,7 @@ def process_single_case_graphs(args: Tuple[Path, dict]) -> Tuple[bool, Path]:
             map_ = read_graph_sampler_from_yaml(
                 input_file, use_discrete_space=use_discrete_space
             )
-            map_.set_inflation_radius(radius=agent_radius+np.sqrt(2)/2*resolution)
+            map_.set_inflation_radius(radius=agent_radius)
             map_.set_parameters(
                 sample_num=num_samples,
                 num_neighbors=num_neighbors,
