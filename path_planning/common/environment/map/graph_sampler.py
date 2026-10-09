@@ -20,6 +20,18 @@ def validate_roadmap_type(roadmap_type: str):
     if roadmap_type not in ROADMAP_TYPES:
         return False
     return True
+def snap_to_cell_centers(map_, points) -> np.ndarray:
+    """Vectorised map_to_world(world_to_map(p, discrete=True)): snap world points to
+    the centres of the cells containing them (clamped to the grid), the frame all
+    discrete-space roadmap nodes are stored in."""
+    pts = np.asarray(points, dtype=float)
+    b = np.asarray(map_.bounds, dtype=float)[:, 0]
+    res = float(map_.resolution)
+    idx = np.round((pts - b) / res - 0.5 + 1e-10)
+    idx = np.clip(idx, 0, np.asarray(map_.shape, dtype=float) - 1)
+    return b + res * (idx + 0.5)
+
+
 class GraphSampler(Grid):
     def __init__(self,*args,start,goal,sample_num=0,num_neighbors = 13.0, min_edge_len = 1e-10, max_edge_len = 30.0,goal_sample_rate=0.1,use_discrete_space=True,use_constraint_sweep=True,record_sweep=True,use_exact_collision_check=True,use_dijkstra=True,sampling_dist_dict = {},sweep_backend="auto",**kwargs):
         super().__init__(*args, **kwargs)
@@ -652,7 +664,6 @@ class GraphSampler(Grid):
             accepted_this_round = 0
             for ii in range(n_points):
                 if self.use_discrete_space:
-                    # Snap to cell center in world coords.
                     current = tuple(self.map_to_world(self.world_to_map(points[ii], discrete=True)))
                 else:
                     current = tuple(points[ii])
@@ -687,27 +698,21 @@ class GraphSampler(Grid):
                     samp_from_prob_map_ratio = max(0.0, min(1.0, samp_from_prob_map_ratio))
 
         if generate_grid_nodes:
-            # Iterate through all grid points in the mesh
-            # Get grid shape (number of cells in each dimension)
-            bounds = np.array(self.bounds)
-            resolution = getattr(self, 'resolution', 1.0)
-            grid_shape = tuple(int((bounds[d][1] - bounds[d][0]) / resolution) for d in range(self.dim))
-            
-            # Generate all grid coordinate combinations using itertools.product
+            # One node per free cell, placed at the cell CENTRE in world units
+            # (map_to_world); starts/goals and snapped samples use the same frame.
+            grid_shape = self.shape
             grid_ranges = [np.arange(grid_shape[d]) for d in range(self.dim)]
+            grid_points = np.array(np.meshgrid(*grid_ranges, indexing='ij'))
+            grid_points = [tuple[int, ...](int(p) for p in pt) for pt in grid_points.reshape(self.dim,-1).T]
+            world_grid_points = [self.map_to_world(pt) for pt in grid_points]
             
-            # Iterate through all combinations of grid coordinates
-            for grid_coords in product(*grid_ranges):
-                # Convert to tuple for indexing
-                grid_coords_tuple = tuple([bounds[d,0]+resolution*grid_coords[d] for d in range(self.dim)])
-                
-                # Check if this grid cell is expandable (not in collision)
-                if self.is_expandable(grid_coords):
-                    node = Node(grid_coords_tuple, None, 0, 0)
+            for grid_pt,world_pt in zip(grid_points,world_grid_points):
+                if self.is_expandable(grid_pt):
+                    node = Node(world_pt, None, 0, 0)
                     nodes.append(node)
                     self.node_index_dict[node] = len(nodes) - 1
                     self.grid_nodes_index[node] = len(nodes)-1
-                    self.grid_points.append(grid_coords_tuple)
+                    self.grid_points.append(world_pt)
 
         want_spacing = boundary_node_spacing is not None and boundary_node_spacing > 0
         if generate_boundary_nodes or want_spacing:
@@ -1095,12 +1100,8 @@ class GraphSampler(Grid):
         for ii in range(len(points)):
             pos = points[ii]
             if self.use_discrete_space:
-                # Snap to the corner lattice bounds[d,0] + resolution*i that
-                # grid nodes are generated on (map_to_world is center-based
-                # and would shift every node by resolution/2).
-                b = np.asarray(self.bounds, dtype=float)[:, 0]
-                idx = np.round((np.asarray(pos, dtype=float) - b) / self.resolution)
-                current = tuple(b + self.resolution * idx)
+                # Snap to the cell centre, the frame grid nodes are generated on.
+                current = tuple(self.map_to_world(self.world_to_map(tuple(pos), discrete=True)))
             else:
                 current = tuple(points[ii])
             node = Node(current,None,0,0)

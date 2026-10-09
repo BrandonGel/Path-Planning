@@ -49,16 +49,14 @@ class TestCoordinateContract(unittest.TestCase):
         ]
         rt = agents_yaml_to_roadmap_frame(m, agents)
         # The helper snaps world coordinates to the grid's discrete cell and then
-        # returns that cell's position on the node lattice in WORLD units
-        # (lo + resolution * index), which is the frame roadmap nodes are stored in.
-        lo = np.asarray(bounds, dtype=float)[:, 0]
-
-        def lattice_world(world_list):
+        # returns that cell's CENTRE in world units (map_to_world), which is the
+        # frame discrete roadmap nodes are stored in.
+        def center_world(world_list):
             cell = _discrete_cell_from_world_list(m, world_list)
-            return tuple(float(lo[d] + resolution * v) for d, v in enumerate(cell))
+            return tuple(float(v) for v in m.map_to_world(cell))
 
-        self.assertEqual(rt[0]["start"], lattice_world(start_list))
-        self.assertEqual(rt[0]["goal"], lattice_world(goal_list))
+        self.assertEqual(rt[0]["start"], center_world(start_list))
+        self.assertEqual(rt[0]["goal"], center_world(goal_list))
 
     def test_resolution_scaling_dimensions(self):
         bounds = [[0.0, 32.0], [0.0, 32.0]]

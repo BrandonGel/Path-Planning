@@ -24,7 +24,7 @@ import yaml
 from tqdm import tqdm
 
 from path_planning.cluster.CTopPRMpy.ctopprm import CTopPRM
-from path_planning.common.environment.map.graph_sampler import GraphSampler
+from path_planning.common.environment.map.graph_sampler import GraphSampler, snap_to_cell_centers
 from path_planning.data_generation.dataset_ground_truth_map import create_map
 from path_planning.data_generation.dataset_util import (
     generate_base_case_path,
@@ -82,12 +82,12 @@ def _build_setup_sampler(source_map: GraphSampler) -> GraphSampler:
 
 def _snap_points(sampler: GraphSampler, points: np.ndarray) -> np.ndarray:
     """Node coordinates generate_custom_nodes will store for ``points``
-    (identity in continuous space, corner-lattice snap in discrete space)."""
+    (identity in continuous space, cell-centre snap in discrete space, matching
+    map_to_world(world_to_map(p, discrete=True)))."""
     pts = np.asarray(points, dtype=float)
     if not sampler.use_discrete_space:
         return pts
-    b = np.asarray(sampler.bounds, dtype=float)[:, 0]
-    return b + sampler.resolution * np.round((pts - b) / sampler.resolution)
+    return snap_to_cell_centers(sampler, pts)
 
 
 def build_cluster_map(

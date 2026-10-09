@@ -6,7 +6,7 @@ python scripts/mapf/run_sipp.py
 from path_planning.utils.util import set_global_seed
 from path_planning.common.visualizer.visualizer_2d import Visualizer2D
 from path_planning.utils.util import write_to_yaml
-from path_planning.utils.util import read_graph_sampler_from_yaml, read_agents_from_yaml
+from path_planning.utils.util import read_graph_sampler_from_yaml, read_agents_from_yaml, agents_yaml_to_roadmap_frame
 from path_planning.multi_agent_planner.mapf_solver import solve_mapf
 from path_planning.utils.util import _to_native_yaml
 import numpy as np
@@ -35,8 +35,9 @@ if __name__ == "__main__":
                     sample_num=1000, num_neighbors=13.0, min_edge_len=0.0, max_edge_len=5.1
                 )
 
-            start = [agent["start"] for agent in agents]
-            goal = [agent["goal"] for agent in agents]
+            agents_rt = agents_yaml_to_roadmap_frame(map_, agents)  # discrete: snap to cell centres
+            start = [agent["start"] for agent in agents_rt]
+            goal = [agent["goal"] for agent in agents_rt]
             map_.set_start(start)
             map_.set_goal(goal)
             nodes = map_.generateRandomNodes(generate_grid_nodes=use_discrete_space)

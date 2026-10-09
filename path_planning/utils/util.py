@@ -361,17 +361,11 @@ def agents_yaml_to_roadmap_frame(map_: GraphSampler, agents: List[dict]) -> List
         if discrete:
             s = map_.world_to_map(_coord_to_tuple(a["start"], as_int=False), discrete=True)
             g = map_.world_to_map(_coord_to_tuple(a["goal"], as_int=False), discrete=True)
-            # Grid indices back to the node lattice's WORLD coordinates: roadmap
-            # nodes are stored in world units (lo + resolution * index). At
-            # resolution 1.0 with lo 0 the two frames coincide, which is why
-            # index-frame endpoints used to work; at other resolutions they
-            # landed off-lattice and never connected to the roadmap.
-            lo = np.asarray(map_.bounds, dtype=float)[:, 0]
-            res = float(map_.resolution)
-            s_t = tuple(float(lo[d] + res * v) for d, v in
-                        enumerate(_coord_to_tuple(s, as_int=True)))
-            g_t = tuple(float(lo[d] + res * v) for d, v in
-                        enumerate(_coord_to_tuple(g, as_int=True)))
+            # Grid indices back to WORLD coordinates of the cell CENTRE: discrete
+            # roadmap nodes (grid nodes and snapped samples) are stored at cell
+            # centres, lo + resolution * (index + 0.5), i.e. map_to_world(cell).
+            s_t = tuple(float(v) for v in map_.map_to_world(_coord_to_tuple(s, as_int=True)))
+            g_t = tuple(float(v) for v in map_.map_to_world(_coord_to_tuple(g, as_int=True)))
         else:
             s_t = _coord_to_tuple(a["start"], as_int=False)
             g_t = _coord_to_tuple(a["goal"], as_int=False)

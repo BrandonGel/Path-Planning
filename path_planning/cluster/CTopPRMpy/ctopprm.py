@@ -818,14 +818,13 @@ class CTopPRM:
                                   grads=self._grads)
         if not getattr(self.map, "use_discrete_space", False):
             return result
-        # Discrete maps: generate_custom_nodes snaps stored waypoints to the
-        # corner lattice (cluster_map._snap_points), silently changing the
-        # geometry the shorteners validated — snapped shortcuts can cut
-        # through obstacles. Snap here and re-validate exactly; fall back to
-        # the unshortened path (roadmap nodes, snap-stable) if it collides.
-        b = np.asarray(self.map.bounds, dtype=float)[:, 0]
-        res = float(self.map.resolution)
-        snapped = b + res * np.round((np.asarray(result, dtype=float) - b) / res)
+        # Discrete maps: generate_custom_nodes snaps stored waypoints to cell
+        # centres (cluster_map._snap_points), silently changing the geometry
+        # the shorteners validated — snapped shortcuts can cut through
+        # obstacles. Snap here and re-validate exactly; fall back to the
+        # unshortened path (roadmap nodes, snap-stable) if it collides.
+        from path_planning.common.environment.map.graph_sampler import snap_to_cell_centers
+        snapped = snap_to_cell_centers(self.map, result)
         keep = np.ones(len(snapped), dtype=bool)  # drop snap-collapsed duplicates
         keep[1:] = np.any(np.diff(snapped, axis=0) != 0, axis=1)
         snapped = snapped[keep]

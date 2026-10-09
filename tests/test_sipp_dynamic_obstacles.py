@@ -17,9 +17,10 @@ from path_planning.utils.util import read_graph_sampler_from_yaml, set_global_se
 MAP_YAML = "path_planning/maps/2d/2d.yaml"
 RADIUS = 1.0
 VELOCITY = 1.0
-# Two free grid cells 3 apart in the lower-left room of 2d.yaml.
-P = (5.0, 5.0)
-Q = (8.0, 5.0)
+# Two free grid cells 3 apart in the lower-left room of 2d.yaml, addressed by their
+# cell centres (discrete roadmap nodes sit at cell centres, +0.5 at resolution 1).
+P = (5.5, 5.5)
+Q = (8.5, 5.5)
 
 
 def _build_grid_map():
@@ -161,7 +162,7 @@ class TestOtherAgentSchedules(unittest.TestCase):
 
 
 class TestReachSegmentSafe(unittest.TestCase):
-    """Reach segment on the grid edge P=(5,5) -- (6,5) of 2d.yaml, RADIUS 1 (2r = 2)."""
+    """Reach segment on the grid edge P=(5.5,5.5) -- (6.5,5.5) of 2d.yaml, RADIUS 1 (2r = 2)."""
 
     @classmethod
     def setUpClass(cls):
@@ -177,31 +178,31 @@ class TestReachSegmentSafe(unittest.TestCase):
         obj.velocity = VELOCITY
         return obj
 
-    A = (5.5, 5.0)      # mid-edge actual position
-    START = (6.0, 5.0)  # snapped node ahead
-    OTHER = (5.0, 5.0)  # the edge's other endpoint
+    A = (6.0, 5.5)      # mid-edge actual position
+    START = (6.5, 5.5)  # snapped node ahead
+    OTHER = (5.5, 5.5)  # the edge's other endpoint
 
     def test_oncoming_agent_on_the_same_edge_is_unsafe(self):
-        # "o" drives (8,5) -> (5,5) over [0, 3]: its footprint sweeps our edge in the window.
-        sched = {"o": [_point((8, 5), 0.0), _point((5, 5), 3.0)]}
+        # "o" drives Q -> P over [0, 3]: its footprint sweeps our edge in the window.
+        sched = {"o": [_point(Q, 0.0), _point(P, 3.0)]}
         self.assertFalse(self._obj()._reach_segment_safe(self.A, self.START, self.OTHER, 0.5, sched, {"o": 1.0}))
 
     def test_agent_that_passes_later_is_safe(self):
         # Same sweep, but it only reaches the edge's neighbourhood after t_reach.
-        sched = {"o": [_point((12, 5), 0.0), _point((9, 5), 3.0), _point((5, 5), 7.0)]}
+        sched = {"o": [_point((12.5, 5.5), 0.0), _point((9.5, 5.5), 3.0), _point(P, 7.0)]}
         self.assertTrue(self._obj()._reach_segment_safe(self.A, self.START, self.OTHER, 0.5, sched, {"o": 1.0}))
 
     def test_resting_agent_on_the_edge_is_unsafe_and_moving_away_from_one_is_safe(self):
-        sched = {"o": [_point((7, 5), 0.0)]}  # rests forever 1 unit past START: inside 2r of the edge
+        sched = {"o": [_point((7.5, 5.5), 0.0)]}  # rests forever 1 unit past START: inside 2r of the edge
         self.assertFalse(self._obj()._reach_segment_safe(self.A, self.START, self.OTHER, 0.5, sched, {"o": None}))
-        # Held 0.5 from an idle agent at (5,5) and driving away toward (6,5): allowed.
-        sched = {"o": [_point((5, 5), 0.0)]}
+        # Held 0.5 from an idle agent at P and driving away toward START: allowed.
+        sched = {"o": [_point(P, 0.0)]}
         self.assertTrue(self._obj()._reach_segment_safe(self.A, self.START, self.OTHER, 0.5, sched, {"o": None}))
 
     def test_resting_agent_touching_the_edge_but_not_the_driven_part_is_safe(self):
-        # (4,5) rests forever: its 2r footprint covers the edge's (5,5) end, which the sweep
-        # reports, but not the sub-segment (5.5,5) -> (6,5) we actually drive.
-        sched = {"o": [_point((4, 5), 0.0)]}
+        # (4.5,5.5) rests forever: its 2r footprint covers the edge's P end, which the sweep
+        # reports, but not the sub-segment (6,5.5) -> (6.5,5.5) we actually drive.
+        sched = {"o": [_point((4.5, 5.5), 0.0)]}
         self.assertTrue(self._obj()._reach_segment_safe(self.A, self.START, self.OTHER, 0.5, sched, {"o": None}))
 
 
@@ -223,9 +224,9 @@ class TestStaticRoute(unittest.TestCase):
         obj = NeuralATTF.__new__(NeuralATTF)
         obj.graph_map = map_
         obj._node_kdtree = None
-        detour = obj._static_route(P, Q, blocked={(6.0, 5.0)})
-        self.assertTrue(detour and (6.0, 5.0) not in detour and detour[-1] == Q)
-        sealed = obj._static_route(P, Q, blocked={(6.0, 5.0), (6.0, 4.0), (6.0, 6.0), (5.0, 4.0), (5.0, 6.0), (4.0, 5.0)})
+        detour = obj._static_route(P, Q, blocked={(6.5, 5.5)})
+        self.assertTrue(detour and (6.5, 5.5) not in detour and detour[-1] == Q)
+        sealed = obj._static_route(P, Q, blocked={(6.5, 5.5), (6.5, 4.5), (6.5, 6.5), (5.5, 4.5), (5.5, 6.5), (4.5, 5.5)})
         self.assertEqual(sealed, [])
 
 
