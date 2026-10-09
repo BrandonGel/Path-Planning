@@ -131,6 +131,9 @@ class GraphSampler(Grid):
         mask = (self.type_map.data == TYPES.OBSTACLE) | (self.type_map.data == TYPES.INFLATION)
         return get_boundary(self, mask)
 
+    def get_inflated_obstacles(self):
+        return [tuple(int(p) for p in row) for row in np.argwhere(self.type_map.data == TYPES.INFLATION)]
+
     @staticmethod
     def resample_boundary(bnd_pts: np.ndarray, bnd_segs: np.ndarray, spacing: float) -> np.ndarray:
         """Boundary vertices plus points every ``spacing`` along each segment.
@@ -1309,20 +1312,11 @@ class GraphSampler(Grid):
         """Euclidean ESDF inflation plus the 8-connected (2^dim - 1) ring.
 
         ``Grid.inflate_obstacles`` marks a free cell when the center-to-center
-        ESDF is within ``radius``. Diagonal neighbours of an obstacle cell sit
-        at ``sqrt(dim) * resolution`` and are skipped by the usual
-        ``agent_radius + sqrt(2)/2 * resolution`` radius even though they
-        share a corner with the obstacle. Whenever the Euclidean mask reaches
-        the edge neighbours (``radius >= resolution``) the full 3^dim ring is
-        added so corners are blocked too. A radius that inflates nothing
-        (e.g. a point agent) still inflates nothing.
-
-        Note: ring-only cells are INFLATION in the type map but keep a
-        positive ``min_wall_distance`` (it subtracts ``radius`` from the
-        obstacle ESDF); collision queries use the type map, so this only
-        affects the Halton sampling weights and ``min_clearance > 0`` checks.
+        ESDF is within ``radius``. 
+        ``If use_expand is True, the radius will be expanded to the nearest integer multiple of the resolution,
+        allowing to capture diagonal neighbours of an obstacle cell.``
         """
-        radius = np.ceil(1/(self.resolution*np.sqrt(self.dim)))*np.sqrt(self.dim)*self.resolution if use_expand else radius
+        radius = np.ceil(1/(self.resolution*np.sqrt(self.dim)))*np.sqrt(self.dim)*self.resolution if use_expand and radius > 0 else radius
         super().inflate_obstacles(radius)
 
     def set_inflation_radius(self, radius: float, use_expand = True):

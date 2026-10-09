@@ -290,14 +290,10 @@ class InputFile:
                 occupied_positions.add(pos)
                 obstacles_grid.append(pos)
 
-        
-        if agent_radius > 0 and num_cells_to_inflate > 0:
-            offset_range = range(-num_cells_to_inflate, num_cells_to_inflate + 1)
-            for obs_pos in obstacles_grid:
-                for offset in product(*(offset_range for _ in range(num_dims))):
-                    inflated_obs_pos = tuple(obs_pos[j] + offset[j] for j in range(num_dims))
-                    occupied_positions.add(inflated_obs_pos)
-                
+        map_ = GraphSampler(bounds=bounds, resolution=resolution,start=[],goal=[],use_discrete_space=True)
+        map_.set_obstacles(obstacles=obstacles_grid)
+        map_.set_inflation_radius(radius=agent_radius)
+        occupied_positions.update(map_.get_inflated_obstacles())   
 
 
         # Start/goal samplers. Uniform keeps the original closure (identical RNG consumption, so
@@ -417,9 +413,6 @@ def create_map(param: Dict, generate_new_graph: bool = False,graph_file: Path =N
 
         generate_boundary_nodes = param.get("generate_boundary_nodes", False)
         boundary_node_spacing = param.get("boundary_node_spacing", None)
-        # roadmap_type must be passed through: without it the adaptive Halton
-        # sampler never activates and 'halton' silently degenerates into an
-        # exact duplicate of 'cdt' (uniform samples + CDT triangulation).
         if road_map_type == 'grid':
             nodes = map_.generateRandomNodes(generate_grid_nodes=True, generate_boundary_nodes=generate_boundary_nodes, boundary_node_spacing=boundary_node_spacing)
         else:
