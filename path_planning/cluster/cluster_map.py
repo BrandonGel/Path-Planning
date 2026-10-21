@@ -76,7 +76,11 @@ def _build_setup_sampler(source_map: GraphSampler) -> GraphSampler:
     fresh.obs_size = source_map.obs_size
     if len(source_map.obstacles):
         fresh.set_obstacles(np.asarray(source_map.obstacles, dtype=np.int64))
-    fresh.set_inflation_radius(source_map.inflation_radius)
+    # ``inflation_radius`` is the APPLIED mask radius: copy it verbatim.
+    fresh.set_inflation_radius(source_map.inflation_radius, use_expand=False)
+    fresh.requested_inflation_radius = float(
+        getattr(source_map, "requested_inflation_radius", source_map.inflation_radius)
+    )
     return fresh
 
 

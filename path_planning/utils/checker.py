@@ -1,4 +1,28 @@
 import numpy as np
+from typing import Mapping, Union
+
+# Agent radius spec: one scalar for every agent, or ``{agent_name: radius}`` for
+# heterogeneous agents. Two agents collide when their centre distance is
+# ``<= r_i + r_j`` (``2r`` for a scalar).
+RadiusSpec = Union[float, Mapping[str, float]]
+VelocitySpec = Union[float, Mapping[str, float], None]
+
+
+def _radius_for(r: RadiusSpec, name: str) -> float:
+    """Radius of ``name`` under spec ``r`` (scalar or per-name mapping)."""
+    if isinstance(r, Mapping):
+        if name not in r:
+            raise ValueError(f"no radius given for agent {name!r}")
+        return float(r[name])
+    return float(r)
+
+
+def _velocity_for(v: VelocitySpec, name: str):
+    if v is None:
+        return None
+    if isinstance(v, Mapping):
+        return float(v[name]) if name in v else None
+    return float(v)
 
 def check_time_anomaly(solution,verbose: bool = True):
     agents = {agent:np.array([[p['t'],p['x'], p['y']] for p in path] ) for agent,path in solution.items()}
@@ -14,7 +38,14 @@ def check_time_anomaly(solution,verbose: bool = True):
     return no_anomaly
 
 
-def check_velocity_anomaly(solution,is_using_constant_speed: bool = False,verbose: bool = True  ):
+def check_velocity_anomaly(solution,is_using_constant_speed: bool = False,verbose: bool = True, velocity: VelocitySpec = None, tol: float = 1e-6):
+    """Flag agents whose motion speed is inconsistent.
+
+    ``velocity`` (scalar or ``{agent_name: speed}``): when given and > 0 for an
+    agent, every moving segment of that agent must run at that nominal speed
+    (relative tolerance ``tol``); 0 / None keeps the historical median-based
+    constant-speed check driven by ``is_using_constant_speed``.
+    """
     agents = {agent:np.array([[p['t'],p['x'], p['y']] for p in path] ) for agent,path in solution.items()}
     no_anomaly = True
     for agent, path in agents.items():
@@ -24,6 +55,14 @@ def check_velocity_anomaly(solution,is_using_constant_speed: bool = False,verbos
         speed = np.linalg.norm(v_diff, axis=1)
         if speed.size == 0:
             # No motion segments for this agent (e.g., start==goal), so nothing to validate.
+            continue
+
+        v_nom = _velocity_for(velocity, agent)
+        if v_nom is not None and v_nom > 0:
+            moving = speed[speed > 1e-9]
+            if moving.size and np.any(np.abs(moving - v_nom) > tol * max(1.0, v_nom)):
+                print(f"Agent {agent} moves at {moving.min():.4f}..{moving.max():.4f}, nominal speed {v_nom:.4f}")
+                no_anomaly = False
             continue
 
         median_speed = np.median(speed)
@@ -38,14 +77,15 @@ def check_velocity_anomaly(solution,is_using_constant_speed: bool = False,verbos
     return no_anomaly
 
 
-def check_collision(solution, r, verbose: bool = True):
+def check_collision(solution, r: RadiusSpec, verbose: bool = True):
     """
     Check for collisions between all pairs of agents in a solution, and
     compute the time intervals during which they collide.
 
     `solution` is a dict: agent_name -> list of {"t", "x", "y"}.
-    Agents are modeled as discs of radius `r`; a collision occurs if
-    the distance between two agents is <= 2r at any time.
+    Agents are modeled as discs; ``r`` is either one radius for every agent or a
+    ``{agent_name: radius}`` mapping (heterogeneous agents). Two agents collide
+    when their centre distance is <= r_i + r_j (2r for a scalar) at any time.
 
     Returns
     -------
@@ -56,7 +96,6 @@ def check_collision(solution, r, verbose: bool = True):
     # Keep trajectories as lists of dicts for clarity
     agents = {name: path for name, path in solution.items()}
     agent_names = list(agents.keys())
-    collision_radius_sq = (2 * r) ** 2
     no_collision = True
     collisions = {}
 
@@ -91,6 +130,7 @@ def check_collision(solution, r, verbose: bool = True):
 
             pair_key = (name_i, name_j)
             pair_intervals = []
+            collision_radius_sq = (_radius_for(r, name_i) + _radius_for(r, name_j)) ** 2
 
             # Collect all unique time breakpoints from both trajectories
             times_i = [p["t"] for p in traj_i]
@@ -187,7 +227,7 @@ def check_solution(solution):
     check_collision(solution, 1.0)
 
 
-def is_conflict_free(solution, r, verbose: bool = False):
+def is_conflict_free(solution, r: RadiusSpec, verbose: bool = False):
     """
     Return True iff no pair of agents in `solution` collides.
 
@@ -195,8 +235,8 @@ def is_conflict_free(solution, r, verbose: bool = False):
     ----------
     solution : dict
         Mapping agent_name -> list of waypoints {"t", "x", "y"}.
-    r : float
-        Agent radius (agents are modeled as discs; collision if distance <= 2r).
+    r : float | Mapping[str, float]
+        Agent radius, or per-agent radii (collision if distance <= r_i + r_j).
     verbose : bool, optional
         Whether `check_collision` prints per-collision details.
 
@@ -212,9 +252,10 @@ def is_conflict_free(solution, r, verbose: bool = False):
 
 def check_solution_full(
     solution,
-    r: float,
+    r: RadiusSpec,
     is_using_constant_speed: bool = False,
     verbose: bool = True,
+    velocity: VelocitySpec = None,
 ):
     """
     Run all anomaly checks (time, velocity, collision) in one call.
@@ -244,6 +285,7 @@ def check_solution_full(
         solution,
         is_using_constant_speed=is_using_constant_speed,
         verbose=verbose,
+        velocity=velocity,
     )
     collisions = check_collision(solution, r, verbose=verbose)
 

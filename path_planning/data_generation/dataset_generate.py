@@ -17,7 +17,7 @@ from typing import List, Tuple
 from scipy.interpolate import RegularGridInterpolator
 from multiprocessing import Pool, cpu_count
 from scipy.ndimage import generic_filter,generate_binary_structure
-from path_planning.utils.util import set_global_seed
+from path_planning.utils.util import set_global_seed, max_agent_radius
 from path_planning.data_generation.dataset_util import *
 
 
@@ -296,7 +296,7 @@ def process_single_case_graphs(args: Tuple[Path, dict]) -> Tuple[bool, Path]:
             map_ = read_graph_sampler_from_yaml(
                 input_file, use_discrete_space=use_discrete_space
             )
-            map_.set_inflation_radius(radius=agent_radius)
+            map_.set_inflation_radius(radius=max_agent_radius(agents, agent_radius))
             map_.set_parameters(
                 sample_num=num_samples,
                 num_neighbors=num_neighbors,

@@ -15,6 +15,7 @@ from itertools import count,combinations
 import numpy as np
 from path_planning.common.environment.map.graph_sampler import GraphSampler
 from path_planning.multi_agent_planner.data_type import HEURISTIC_TYPE
+from path_planning.multi_agent_planner.agent_params import AgentParamsMixin
 
 class Location(object):
     def __init__(self, point:tuple = None):
@@ -102,10 +103,12 @@ class Constraints(object):
         return "VC: " + str([str(vc) for vc in self.vertex_constraints])  + \
             "EC: " + str([str(ec) for ec in self.edge_constraints])
 
-class Environment(object):
-    def __init__(self, graph_map:GraphSampler, agents, astar_max_iterations=10000, radius = 0.0, velocity = 0.0, use_constraint_sweep=True,heuristic_type: str = 'dijkstra'):
+class Environment(AgentParamsMixin):
+    def __init__(self, graph_map:GraphSampler, agents, astar_max_iterations=10000, radius = 0.0, velocity = 0.0, use_constraint_sweep=True,heuristic_type: str = 'dijkstra', agent_radii: dict | None = None, agent_velocities: dict | None = None):
         self.graph_map = graph_map
-        if radius > 0:
+        # Per-agent radius / speed (heterogeneous agents); scalars are the fallback.
+        self._init_agent_params(radius, velocity, agent_radii, agent_velocities, agents)
+        if self._max_radius() > 0:
             self.graph_map.set_constraint_sweep()
         self.agents = agents
         self.agent_dict = {}
@@ -119,11 +122,9 @@ class Environment(object):
         self.constraint_dict = {}
 
         self.a_star = AStar(self, astar_max_iterations)
-        self.radius = radius
-        self.velocity = velocity
         self.use_constraint_sweep = use_constraint_sweep
-        self._constraint_sweep_cache = {}  # (p1, p2, r) -> (nodes, edges, start_nodes)
-        self._constraint_segment_cache = {}  # (p1a, p1b, p2a, p2b, v, r) -> bool
+        self._constraint_sweep_cache = {}  # (p1, p2, v, r_sum) -> (nodes, edges, start_nodes)
+        self._constraint_segment_cache = {}  # (p1a, p1b, p2a, p2b, v1, v2, r_sum) -> bool
         self._dijkstra_cache = {}  # (start_idx, goal_idx) -> (states, cost)
         self._heuristic_cache = {}  # (location.point, agent_name) -> heuristic value
         self._goal_dist_maps = {}  # goal_idx -> {node_idx: shortest-path cost to goal}
@@ -252,10 +253,17 @@ class Environment(object):
         # at time t depends only on that agent's motion, not on the other
         # agent in the pair. Precompute once per (agent, t) so the pair loop
         # is pure set-membership instead of N^2 cache lookups.
+        # Pairwise clearance r_i + r_j (== 2r when homogeneous). A sweep of agent
+        # i is reused by every pair sharing the same clearance, so the homogeneous
+        # case computes exactly one sweep per (agent, t) as before.
+        pair_r = {(a1, a2): self._pair_clearance(a1, a2) for a1, a2 in agent_pairs}
         if self.radius > 0 and self.use_constraint_sweep:
+            needed = {agent: set() for agent in solution}
+            for (a1, a2), rs in pair_r.items():
+                needed[a1].add(rs)
+                needed[a2].add(rs)
             agent_edges = {agent: [] for agent in solution}
-            sweeps = {agent: [] for agent in solution}
-            two_r = 2 * self.radius
+            sweeps = {}
             for agent in solution:
                 for t in range(max_t):
                     sa = self.get_state(agent, solution, t)
@@ -263,9 +271,11 @@ class Environment(object):
                     pa = sa.location.point
                     pb = sb.location.point
                     agent_edges[agent].append((pa, pb))
-                    sweeps[agent].append(
-                        self._get_constraint_sweep_cached(pa, pb, self.velocity, two_r)
-                    )
+                for rs in needed[agent]:
+                    sweeps[(agent, rs)] = [
+                        self._get_constraint_sweep_cached(pa, pb, self.velocity, rs)
+                        for pa, pb in agent_edges[agent]
+                    ]
 
         for t in range(max_t):
             if self.radius == 0:
@@ -307,7 +317,10 @@ class Environment(object):
                     if self.use_constraint_sweep:
                         edge_1 = agent_edges[agent_1][t]
                         edge_2 = agent_edges[agent_2][t]
-                        sweep_conflict = edge_1 in sweeps[agent_2][t] or edge_2 in sweeps[agent_1][t]
+                        rs = pair_r[(agent_1, agent_2)]
+                        sweep_1 = sweeps[(agent_1, rs)][t]
+                        sweep_2 = sweeps[(agent_2, rs)][t]
+                        sweep_conflict = edge_1 in sweep_2 or edge_2 in sweep_1
                         loc_1_pt, loc_1_pt_f = edge_1
                         loc_2_pt, loc_2_pt_f = edge_2
                         if sweep_conflict:
@@ -317,17 +330,17 @@ class Environment(object):
                             c.agent_1 = agent_1
                             c.agent_2 = agent_2
                             c.location_1 = Location(loc_1_pt)
-                            for e in sweeps[agent_2][t]:
+                            for e in sweep_2:
                                 if e[0] == loc_1_pt:
                                     c.location_1_f.add(Location(e[1]))
-                            if edge_1 in sweeps[agent_2][t]:
+                            if edge_1 in sweep_2:
                                 c.location_1_f.add(Location(edge_1[1]))
 
                             c.location_2 = Location(loc_2_pt)
-                            for e in sweeps[agent_1][t]:
+                            for e in sweep_1:
                                 if e[0] == loc_2_pt:
                                     c.location_2_f.add(Location(e[1]))
-                            if edge_2 in sweeps[agent_1][t]:
+                            if edge_2 in sweep_1:
                                 c.location_2_f.add(Location(edge_2[1]))
                             if get_first_conflict:
                                 return c
@@ -344,7 +357,8 @@ class Environment(object):
                         sweep_conflict = self._get_constraint_segment_cached(
                             edge_1[0], edge_1[1],
                             edge_2[0], edge_2[1],
-                            self.velocity, self.radius,
+                            self._velocity_for(agent_1), self._velocity_for(agent_2),
+                            pair_r[(agent_1, agent_2)],
                         )
                         if sweep_conflict:
                             c = Conflict()
@@ -487,11 +501,11 @@ class Environment(object):
             self._constraint_sweep_cache[key] = self.graph_map.get_constraint_sweep(p1, p2,v, r)
         return self._constraint_sweep_cache[key]
 
-    def _get_constraint_segment_cached(self, p1a, p1b, p2a, p2b, v, r):
-        """Cached wrapper for get_constraint_sweep to avoid duplicate queries."""
-        key = (p1a, p1b, p2a, p2b, v, r)
+    def _get_constraint_segment_cached(self, p1a, p1b, p2a, p2b, v1, v2, r_sum):
+        """Cached wrapper for get_constraint_segment (``r_sum`` = r_1 + r_2)."""
+        key = (p1a, p1b, p2a, p2b, v1, v2, r_sum)
         if key not in self._constraint_segment_cache:
-            self._constraint_segment_cache[key] = self.graph_map.get_constraint_segment(p1a, p1b, p2a, p2b, v,r)
+            self._constraint_segment_cache[key] = self.graph_map.get_constraint_segment(p1a, p1b, p2a, p2b, v1, v2, r_sum)
         return self._constraint_segment_cache[key]
 
     def compute_solution(self):

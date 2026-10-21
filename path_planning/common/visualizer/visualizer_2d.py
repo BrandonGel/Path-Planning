@@ -4,7 +4,7 @@
 @update: 2026.01.19
 @description: Visualizer for 2D maps (fetch from python_motion_planning by Wu Maojia, Yang Haodong)
 """
-from typing import List
+from typing import List, Mapping
 from python_motion_planning.common.env import TYPES,  Grid,  Node
 from matplotlib.patches import Circle, RegularPolygon
 import matplotlib.pyplot as plt
@@ -385,7 +385,12 @@ class Visualizer2D(BaseVisualizer2D):
         # _ax_w_pts = self.figsize[0] * _right * 72.0
         # _marker_dia_pts = np.sqrt(RACK_S)
         # agent_radius_vis = (_marker_dia_pts / 2.0) * (_data_w / _ax_w_pts)
-        agent_radius_vis = radius
+        # ``radius``: one value for every agent, or ``{agent_name: radius}`` for
+        # heterogeneous agents (unknown names draw as points).
+        if isinstance(radius, Mapping):
+            _radius_of = lambda n: float(radius.get(n, 0.0))
+        else:
+            _radius_of = lambda n: float(radius)
 
         # Draw static map and paths
         if agent_colors is None:
@@ -437,7 +442,7 @@ class Visualizer2D(BaseVisualizer2D):
             x,y = start["x"], start["y"]
             color = Colors[ii%len(Colors)]
 
-            agents[name] = Circle((x, y), agent_radius_vis, facecolor=color, edgecolor='black',zorder=self.zorder['robot_circle'])
+            agents[name] = Circle((x, y), _radius_of(name), facecolor=color, edgecolor='black',zorder=self.zorder['robot_circle'])
             agents[name].original_face_color = color
             patches.append(agents[name])
 
@@ -480,13 +485,14 @@ class Visualizer2D(BaseVisualizer2D):
 
             # check drive-drive collisions
             agents_array = [agent for _,agent in agents.items()]
+            agent_names_arr = list(agents.keys())
             for i in range(0, len(agents_array)):
                 for j in range(i+1, len(agents_array)):
                     d1 = agents_array[i]
                     d2 = agents_array[j]
                     pos1 = np.array(d1.center)
                     pos2 = np.array(d2.center)
-                    if np.linalg.norm(pos1 - pos2) < 2*radius:
+                    if np.linalg.norm(pos1 - pos2) < _radius_of(agent_names_arr[i]) + _radius_of(agent_names_arr[j]):
                         d1.set_facecolor('red')
                         d2.set_facecolor('red')
                         print("COLLISION! (agent-agent) ({}, {})".format(i, j))

@@ -120,11 +120,11 @@ class Constraints(object):
             " MC: " + str([str(mc) for mc in self.move_constraints])
 
 class Environment(SippBaseEnvironment):
-    def __init__(self, graph_map: GraphSampler,dynamic_obstacles:dict = {},agents:list = [],sipp_max_iterations=10000,radius:float = 0.0,velocity:float = 0.0,use_constraint_sweep:bool = True,heuristic_type : str = 'manhattan',time_limit: float | None = None, max_iterations: int | None = None,verbose: bool = False):
+    def __init__(self, graph_map: GraphSampler,dynamic_obstacles:dict = {},agents:list = [],sipp_max_iterations=10000,radius:float = 0.0,velocity:float = 0.0,use_constraint_sweep:bool = True,heuristic_type : str = 'manhattan',time_limit: float | None = None, max_iterations: int | None = None,verbose: bool = False, agent_radii: dict | None = None, agent_velocities: dict | None = None):
         self.agents = agents
         self.agent_dict = {}
         self.make_agent_dict()
-        SippBaseEnvironment.__init__(self, graph_map, dynamic_obstacles,agents,radius,velocity,use_constraint_sweep,heuristic_type,time_limit,max_iterations,verbose)
+        SippBaseEnvironment.__init__(self, graph_map, dynamic_obstacles,agents,radius,velocity,use_constraint_sweep,heuristic_type,time_limit,max_iterations,verbose, agent_radii=agent_radii, agent_velocities=agent_velocities)
         assert radius >= 0, "Radius must be non-negative"
         assert velocity >= 0, "Velocity must be non-negative"
         self.sipp = SIPP(self, sipp_max_iterations=sipp_max_iterations, verbose=verbose)
@@ -209,15 +209,19 @@ class Environment(SippBaseEnvironment):
                 
         return successors, costs, time_taken
 
-    def check_collision(self, position_1a,velocity1, position_2a,velocity2,tdur):
+    def check_collision(self, position_1a,velocity1, position_2a,velocity2,tdur, r_sum: float | None = None):
+        """Collision window of two constant-velocity agents over ``[0, tdur]``.
+        ``r_sum`` is the pairwise clearance r_1 + r_2 (default ``2 * self.radius``)."""
+        if r_sum is None:
+            r_sum = self.radius*2
         pos1a2a = position_2a - position_1a
         vel12 = velocity2 - velocity1
         a = np.dot(vel12, vel12)
         b = 2*np.dot(pos1a2a, vel12)
-        # Subtract a small epsilon so grazing contact (dist == 2r) is treated
+        # Subtract a small epsilon so grazing contact (dist == r_sum) is treated
         # as a collision. This keeps detection conservative and consistent with
         # path_planning.utils.checker.check_collision.
-        c = np.dot(pos1a2a, pos1a2a) - (self.radius*2)**2 - 1e-10
+        c = np.dot(pos1a2a, pos1a2a) - r_sum**2 - 1e-10
         d = b**2 - 4*a*c
 
         if a == 0:
@@ -287,10 +291,15 @@ class Environment(SippBaseEnvironment):
             if len(all_t) < 2:
                 continue
 
+            # Pairwise clearance r_1 + r_2 (== 2*radius when homogeneous) and the
+            # two agents' own speeds (used for the sweep of each one's motion).
+            r_sum = self._pair_clearance(agent_1, agent_2)
+            vel_1 = self._velocity_for(agent_1)
+            vel_2 = self._velocity_for(agent_2)
             # Broad-phase prune: if the agents' bounding boxes are separated by
-            # more than the collision diameter (2*radius) along any axis, the
-            # discs can never touch, so skip the whole pair.
-            diameter = 2 * self.radius
+            # more than the collision clearance along any axis, the discs can
+            # never touch, so skip the whole pair.
+            diameter = r_sum
             if (np.any(d1["bbox_min"] - d2["bbox_max"] > diameter) or
                     np.any(d2["bbox_min"] - d1["bbox_max"] > diameter)):
                 continue
@@ -339,15 +348,15 @@ class Environment(SippBaseEnvironment):
                 # Get the overlapping vertices and edges for the two agents
                 overlapping_vertices_1_wait,overlapping_edges_1_wait = {},{}
                 if wait_cost_1 > 0:
-                    overlapping_vertices_1_wait,overlapping_edges_1_wait = self._get_constraint_sweep_locations_cached(v1_now, v1_now,self.velocity, 2*self.radius)
-                overlapping_vertices_1_move,overlapping_edges_1_move = self._get_constraint_sweep_locations_cached(v1_now, v1_next,self.velocity, 2*self.radius)
+                    overlapping_vertices_1_wait,overlapping_edges_1_wait = self._get_constraint_sweep_locations_cached(v1_now, v1_now, vel_1, r_sum)
+                overlapping_vertices_1_move,overlapping_edges_1_move = self._get_constraint_sweep_locations_cached(v1_now, v1_next, vel_1, r_sum)
                 overlapping_vertices_1 = [overlapping_vertices_1_wait,overlapping_vertices_1_move]
                 overlapping_edges_1 = [overlapping_edges_1_wait,overlapping_edges_1_move]
 
                 overlapping_vertices_2_wait,overlapping_edges_2_wait = {},{}
                 if wait_cost_2 > 0:
-                    overlapping_vertices_2_wait,overlapping_edges_2_wait = self._get_constraint_sweep_locations_cached(v2_now, v2_now,self.velocity, 2*self.radius)
-                overlapping_vertices_2_move,overlapping_edges_2_move = self._get_constraint_sweep_locations_cached(v2_now, v2_next,self.velocity, 2*self.radius)   
+                    overlapping_vertices_2_wait,overlapping_edges_2_wait = self._get_constraint_sweep_locations_cached(v2_now, v2_now, vel_2, r_sum)
+                overlapping_vertices_2_move,overlapping_edges_2_move = self._get_constraint_sweep_locations_cached(v2_now, v2_next, vel_2, r_sum)
                 overlapping_vertices_2 = [overlapping_vertices_2_wait,overlapping_vertices_2_move]
                 overlapping_edges_2 = [overlapping_edges_2_wait,overlapping_edges_2_move]
 
@@ -417,7 +426,7 @@ class Environment(SippBaseEnvironment):
                             v2_current = v2_now_arr + vel2_now * v2_delta_t
 
                             tdur = t_end - t_start
-                            collision_time= self.check_collision(v1_now_arr,0, v2_current,vel2_now,tdur)
+                            collision_time= self.check_collision(v1_now_arr,0, v2_current,vel2_now,tdur, r_sum=r_sum)
                             if not collision_time:
                                 continue
                             t1,t2,min_collision_time = collision_time
@@ -453,7 +462,7 @@ class Environment(SippBaseEnvironment):
                             v2_now_arr = v2_arr[t2_now_idx]
 
                             tdur = t_end - t_start
-                            collision_time = self.check_collision(v1_current,vel1_now, v2_now_arr,0,tdur)
+                            collision_time = self.check_collision(v1_current,vel1_now, v2_now_arr,0,tdur, r_sum=r_sum)
                             if not collision_time:
                                 continue
                             t1,t2,min_collision_time = collision_time
@@ -492,7 +501,7 @@ class Environment(SippBaseEnvironment):
                             v2_delta_t = t_start - t_depart2
                             v2_current = v2_now_arr + vel2_now * v2_delta_t
                             tdur = t_end - t_start
-                            collision_time = self.check_collision(v1_current,vel1_now, v2_current,vel2_now,tdur)
+                            collision_time = self.check_collision(v1_current,vel1_now, v2_current,vel2_now,tdur, r_sum=r_sum)
                             if not collision_time:
                                 continue
                             t1,t2,min_collision_time = collision_time

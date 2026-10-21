@@ -1,5 +1,6 @@
 from path_planning.common.environment.map.graph_sampler import GraphSampler
 from path_planning.common.environment.node import Node
+from path_planning.multi_agent_planner.agent_params import AgentParamsMixin
 from typing import Any, List, Tuple
 import bisect
 import math
@@ -227,8 +228,20 @@ def cached_constraint_sweep(graph_map, p1, p2, v, r):
     return hit
 
 
-class SippGraph(object):
-    def __init__(self, graph_map: GraphSampler,dynamic_obstacles:dict = {},radius:float = 0.0,velocity:float = 0.0,use_constraint_sweep:bool = True, heuristic_type: str = 'manhattan',time_limit: float | None = None, max_iterations: int | None = None,verbose: bool = False, obstacle_horizon: float | dict | None = None):
+class SippGraph(AgentParamsMixin):
+    """Safe-interval tables over a roadmap.
+
+    Heterogeneous agents: the unsafe windows written into a table depend on the
+    clearance ``r_plan + r_obstacle`` between the PLANNING agent and each obstacle
+    agent, so one table is valid for every planning agent with the same radius.
+    ``self.sipp_graphs`` maps ``r_plan -> table`` (built lazily, kept up to date by
+    :meth:`update_intervals`); ``self.sipp_graph`` is the table bound to the agent
+    currently being planned (the scalar ``radius`` until a planner binds one).
+    Homogeneous runs therefore use exactly one table, written in the same order
+    as before. Per-obstacle radius / speed come from ``agent_radii`` /
+    ``agent_velocities`` (``{name: value}``, scalars as fallback).
+    """
+    def __init__(self, graph_map: GraphSampler,dynamic_obstacles:dict = {},radius:float = 0.0,velocity:float = 0.0,use_constraint_sweep:bool = True, heuristic_type: str = 'manhattan',time_limit: float | None = None, max_iterations: int | None = None,verbose: bool = False, obstacle_horizon: float | dict | None = None, agent_radii: dict | None = None, agent_velocities: dict | None = None):
         self.graph_map = graph_map
         self.dyn_obstacles = {}
         # How long a dynamic obstacle's FINAL (resting) position blocks its footprint.
@@ -252,8 +265,7 @@ class SippGraph(object):
             if hasattr(self.graph_map, "use_constraint_sweep") and not self.graph_map.use_constraint_sweep:
                 self.graph_map.use_constraint_sweep = True
             self.graph_map.set_constraint_sweep()
-        self.radius = radius
-        self.velocity = velocity
+        self._init_agent_params(radius, velocity, agent_radii, agent_velocities)
         self.use_constraint_sweep = use_constraint_sweep
         self.heuristic_type = heuristic_type
         self.dynamic_obstacles = dynamic_obstacles
@@ -266,11 +278,14 @@ class SippGraph(object):
         self.total_iterations = 0
 
     def init_graph(self):
+        self._init_graph_into(self.sipp_graph)
+
+    def _init_graph_into(self, table: dict):
         for node in self.graph_map.nodes:
             node_sipp_dict = {node.current:SippNode()}
-            self.sipp_graph.update(node_sipp_dict)
+            table.update(node_sipp_dict)
             # Self-loop (wait) edge: the constraint sweep emits (p, p) edge keys.
-            self.sipp_graph[(node.current, node.current)] = SippEdge()
+            table[(node.current, node.current)] = SippEdge()
 
         # Initialize SIPP edges keyed by endpoint positions (p1, p2),
         # to match the keys returned by GraphSampler.get_constraint_sweep.
@@ -282,10 +297,10 @@ class SippGraph(object):
             # constructing (and discarding) a second SippEdge per undirected edge.
             # graph_map.edges usually lists both directions: construct each record
             # once (setdefault would build and discard a SippEdge per duplicate).
-            if (src_pos, tgt_pos) not in self.sipp_graph:
-                self.sipp_graph[(src_pos, tgt_pos)] = SippEdge()
-            if (tgt_pos, src_pos) not in self.sipp_graph:
-                self.sipp_graph[(tgt_pos, src_pos)] = SippEdge()
+            if (src_pos, tgt_pos) not in table:
+                table[(src_pos, tgt_pos)] = SippEdge()
+            if (tgt_pos, src_pos) not in table:
+                table[(tgt_pos, src_pos)] = SippEdge()
 
     @staticmethod
     def _norm_horizon(horizon) -> float:
@@ -297,7 +312,14 @@ class SippGraph(object):
         return self.obstacle_horizons.get(dyn_name, self.obstacle_horizon)
 
     def init_intervals(self,dyn_obstacles:dict = {}):
-        """Block the SIPP graph with other agents' timed schedules ``[{x, y, t}, ...]``.
+        """Block the bound table with other agents' timed schedules (see
+        :meth:`_apply_dyn_obstacles`)."""
+        self._apply_dyn_obstacles(self.sipp_graph, self.radius, dyn_obstacles)
+
+    def _apply_dyn_obstacles(self, table: dict, r_plan: float, dyn_obstacles: dict = {}):
+        """Block ``table`` (built for a planning agent of radius ``r_plan``) with other
+        agents' timed schedules ``[{x, y, t}, ...]``. Each obstacle ``name`` is swept
+        with clearance ``r_plan + agent_radii[name]`` at its own nominal speed.
 
         Per schedule entry (radius > 0):
         - final point: the resting footprint (vertices AND edges) is blocked for
@@ -314,8 +336,13 @@ class SippGraph(object):
         """
         if not dyn_obstacles or len(dyn_obstacles) == 0: return
         for dyn_name, schedule in dyn_obstacles.items():
-            self.dyn_obstacles[dyn_name] = np.array([State(position=(location["x"],location["y"]), t=location["t"]) for location in schedule])
+            if dyn_name not in self.dyn_obstacles:
+                self.dyn_obstacles[dyn_name] = np.array([State(position=(location["x"],location["y"]), t=location["t"]) for location in schedule])
             horizon = self._horizon_for(dyn_name)
+            # Pairwise clearance with this obstacle and its nominal speed
+            # (== 2 * radius / velocity when every agent is the same).
+            r_sum = r_plan + self._radius_for(dyn_name)
+            v_obs = self._velocity_for(dyn_name)
             n_points = len(schedule)
             for i in range(n_points):
                 location = schedule[i]
@@ -326,12 +353,12 @@ class SippGraph(object):
 
                 if self.radius > 0:
                     if last_t:
-                        overlapping_vertices,overlapping_edges = self._get_constraint_sweep_cached(position, position,self.velocity, 2*self.radius)
+                        overlapping_vertices,overlapping_edges = self._get_constraint_sweep_cached(position, position, v_obs, r_sum)
                         next_t = t + horizon  # inf -> blocks forever
                         for vertex_pos in overlapping_vertices:
-                            self.sipp_graph[vertex_pos].split_interval(t, next_t)
+                            table[vertex_pos].split_interval(t, next_t)
                         for edge_pos in overlapping_edges:
-                            self.sipp_graph[edge_pos].add_unsafe_interval(t, next_t)
+                            table[edge_pos].add_unsafe_interval(t, next_t)
                         continue
 
                     next_location = schedule[i + 1]
@@ -340,44 +367,56 @@ class SippGraph(object):
                     if next_position == position:
                         # Wait: block the footprint for the schedule's own window only.
                         if next_t - t > 1e-9:
-                            overlapping_vertices,overlapping_edges = self._get_constraint_sweep_cached(position, position,self.velocity, 2*self.radius)
+                            overlapping_vertices,overlapping_edges = self._get_constraint_sweep_cached(position, position, v_obs, r_sum)
                             for vertex_pos in overlapping_vertices:
-                                self.sipp_graph[vertex_pos].split_interval(t, next_t)
+                                table[vertex_pos].split_interval(t, next_t)
                             for edge_pos in overlapping_edges:
-                                self.sipp_graph[edge_pos].add_unsafe_interval(t, next_t)
+                                table[edge_pos].add_unsafe_interval(t, next_t)
                         continue
 
                     # Move: sweep at the speed the schedule implies (falls back to the
                     # nominal velocity when they agree, to keep the sweep cache warm).
-                    sweep_velocity = self.velocity
+                    sweep_velocity = v_obs
                     duration = next_t - t
-                    if self.velocity > 0 and duration > 1e-9:
+                    if v_obs > 0 and duration > 1e-9:
                         implied = math.dist(position, next_position) / duration
-                        if abs(implied - self.velocity) > 1e-6:
+                        if abs(implied - v_obs) > 1e-6:
                             sweep_velocity = implied
-                    overlapping_vertices, overlapping_edges = self._get_constraint_sweep_cached(position, next_position, sweep_velocity, 2 * self.radius)
+                    overlapping_vertices, overlapping_edges = self._get_constraint_sweep_cached(position, next_position, sweep_velocity, r_sum)
                     for vertex_pos, vertex_interval in overlapping_vertices.items():
                         t_start,t_end = vertex_interval
                         t1 = t+t_start
                         t2 = t+t_end
-                        self.sipp_graph[vertex_pos].split_interval(t1, t2)
+                        table[vertex_pos].split_interval(t1, t2)
                     for edge_pos, edge_interval in overlapping_edges.items():
                         # edge_interval is a 2-tuple (t_start, t_end) from
                         # get_constraint_sweep(get_time_interval=True); mirror the
                         # (correct) edge handling in update_intervals.
                         t_start, t_end = edge_interval
-                        self.sipp_graph[edge_pos].add_unsafe_interval(t + t_start, t + t_end)
+                        table[edge_pos].add_unsafe_interval(t + t_start, t + t_end)
                 else:
                     t1 = t
                     t2 = t1 + 1 if not last_t else (t1 + horizon)
-                    self.sipp_graph[position].split_interval(t1, t2,1)
+                    table[position].split_interval(t1, t2,1)
 
         # Update the intervals of the SIPP graph based on the agent's plan (treated as dynamic obstacles)
    
     def update_intervals(self,plans: List[List[State]] | List[State] | State,action_costs: List[List[Tuple[float,float]]] | List[Tuple[float,float]] | Tuple[float,float],dyn_names: List[str]):
+        """Treat committed ``plans`` as dynamic obstacles in EVERY safe-interval table
+        (one per planning radius; tables built later replay ``self._committed``)."""
         if not plans or len(plans) == 0: return
         self._graph_fresh = False
         for plan,action_cost,dyn_name in zip(plans,action_costs,dyn_names):
+            self._committed.append((plan, action_cost, dyn_name))
+            for r_plan, table in self.sipp_graphs.items():
+                self._apply_plan(table, r_plan, plan, action_cost, dyn_name)
+
+    def _apply_plan(self, table: dict, r_plan: float, plan, action_cost, dyn_name):
+        """Block ``table`` with one committed plan of agent ``dyn_name`` (clearance
+        ``r_plan + agent_radii[dyn_name]``, swept at that agent's speed)."""
+        r_sum = r_plan + self._radius_for(dyn_name)
+        v_obs = self._velocity_for(dyn_name)
+        if True:
             for i in range(len(plan)):
                 location = plan[i]
                 position = location.position
@@ -387,12 +426,12 @@ class SippGraph(object):
                 if self.radius > 0:
                     # Last time step
                     if last_t:
-                        overlapping_vertices,overlapping_edges = self._get_constraint_sweep_cached(position, position,self.velocity, 2*self.radius)
+                        overlapping_vertices,overlapping_edges = self._get_constraint_sweep_cached(position, position, v_obs, r_sum)
                         next_t = float('inf')
                         for vertex_pos, vertex_interval in overlapping_vertices.items():
-                            self.sipp_graph[vertex_pos].split_interval(t, next_t)
+                            table[vertex_pos].split_interval(t, next_t)
                         for edge_pos, edge_interval in overlapping_edges.items():
-                            self.sipp_graph[edge_pos].add_unsafe_interval(t, float('inf'))
+                            table[edge_pos].add_unsafe_interval(t, float('inf'))
                         continue
                     
                     # Intermediate time step between two locations
@@ -402,31 +441,31 @@ class SippGraph(object):
                     wait_time, move_time = action_cost[i]
                     if wait_time > 1e-10:
                         t0 = t+wait_time
-                        overlapping_vertices,overlapping_edges = self._get_constraint_sweep_cached(position, position,self.velocity, 2*self.radius)
+                        overlapping_vertices,overlapping_edges = self._get_constraint_sweep_cached(position, position, v_obs, r_sum)
                         for vertex_pos, vertex_interval in overlapping_vertices.items():
-                            self.sipp_graph[vertex_pos].split_interval(t, t0)
+                            table[vertex_pos].split_interval(t, t0)
                         for edge_pos, edge_interval in overlapping_edges.items():
-                            self.sipp_graph[edge_pos].add_unsafe_interval(t, t0)
+                            table[edge_pos].add_unsafe_interval(t, t0)
                     else:
                         t0 = t
-                    overlapping_vertices,overlapping_edges = self._get_constraint_sweep_cached(position, next_position,self.velocity, 2*self.radius)
+                    overlapping_vertices,overlapping_edges = self._get_constraint_sweep_cached(position, next_position, v_obs, r_sum)
                     for vertex_pos, vertex_interval in overlapping_vertices.items():
                         t_start,t_end = vertex_interval
                         t1 = t0+t_start
                         t2 = t0+t_end 
-                        self.sipp_graph[vertex_pos].split_interval(t1, t2)
+                        table[vertex_pos].split_interval(t1, t2)
                     for edge_pos, edge_interval in overlapping_edges.items():
                         t_start,t_end = edge_interval
-                        self.sipp_graph[edge_pos].add_unsafe_interval(t0+t_start, t0+t_end)
+                        table[edge_pos].add_unsafe_interval(t0+t_start, t0+t_end)
 
                     
                 else:
                     t1 = t
-                    if self.velocity > 0:
-                        t2 = t1 + 1/self.velocity
+                    if v_obs > 0:
+                        t2 = t1 + 1/v_obs
                     else:
                         t2 = t1 + 1 if not last_t else float('inf')
-                    self.sipp_graph[position].split_interval(t1, t2,1)
+                    table[position].split_interval(t1, t2,1)
 
     def is_valid_position(self, position):
         return not self.graph_map.in_collision_point(position)
@@ -448,9 +487,30 @@ class SippGraph(object):
         return cached_constraint_sweep(self.graph_map, p1, p2, v, r)
 
     def reset_graph(self):
-        self.sipp_graph = {}
-        self.init_graph()
-        self.init_intervals(self.dynamic_obstacles)
+        self.sipp_graphs = {}
+        self._committed = []
+        self.dyn_obstacles = {}
+        self.sipp_graph = self._table_for(self.radius)
         # Fresh: only dynamic obstacles are in it. compute_plan skips its own
         # reset while this holds (a planner built and used once pays one build).
         self._graph_fresh = True
+
+    def _table_for(self, r_plan: float) -> dict:
+        """Safe-interval table for a planning agent of radius ``r_plan`` (lazily
+        built: roadmap records, dynamic obstacles, then every committed plan)."""
+        r_plan = float(r_plan)
+        table = self.sipp_graphs.get(r_plan)
+        if table is not None:
+            return table
+        table = {}
+        self._init_graph_into(table)
+        self._apply_dyn_obstacles(table, r_plan, self.dynamic_obstacles)
+        for plan, action_cost, dyn_name in self._committed:
+            self._apply_plan(table, r_plan, plan, action_cost, dyn_name)
+        self.sipp_graphs[r_plan] = table
+        return table
+
+    def _bind_table(self, agent_name) -> dict:
+        """Point ``self.sipp_graph`` at the table of ``agent_name``'s radius."""
+        self.sipp_graph = self._table_for(self._radius_for(agent_name))
+        return self.sipp_graph

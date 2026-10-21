@@ -47,7 +47,11 @@ class GraphSampler(Grid):
         self.boundary_points = []
         self.obstacles = []
         self.obs_size = 0.5
+        # Effective (applied) obstacle-inflation radius, i.e. the ESDF mask radius;
+        # ``requested_inflation_radius`` is the value the caller asked for before
+        # rounding (see ``expanded_inflation_radius``).
         self.inflation_radius = 0.0
+        self.requested_inflation_radius = 0.0
         self.sample_num = sample_num
         self.num_total_nodes = self.sample_num + len(self.start) + len(self.goal)
         self.num_neighbors = num_neighbors
@@ -1263,24 +1267,34 @@ class GraphSampler(Grid):
             cache[cache_key] = edges_locations
         return edges_locations
 
-    def get_constraint_segment(self, p1a: Tuple[float, ...],p1b: Tuple[float, ...],p2a: Tuple[float, ...],p2b: Tuple[float, ...],v: float = 0.0,r: float = 0.5) -> bool:
+    def get_constraint_segment(self, p1a: Tuple[float, ...],p1b: Tuple[float, ...],p2a: Tuple[float, ...],p2b: Tuple[float, ...],v1: float = 0.0,v2: float | None = None,r_sum: float = 1.0) -> bool:
+        """Closest-approach test of two agents moving ``p1a->p1b`` (speed ``v1``) and
+        ``p2a->p2b`` (speed ``v2``, defaults to ``v1``) that start at the same moment.
+
+        ``r_sum`` is the COMBINED clearance ``r_1 + r_2`` (``2r`` for equal radii).
+        ``v1 == 0`` means unit-time steps for both agents. For ``v1 > 0`` the test
+        covers the shorter of the two traversals (existing approximation).
+        """
         p1a = np.array(p1a)
         p2a = np.array(p2a)
         p1b = np.array(p1b)
         p2b = np.array(p2b)
-        if v == 0.0:
+        v2 = v1 if v2 is None else v2
+        if v1 == 0.0:
             v1 = p1b-p1a
             v2 = p2b-p2a
             t_dur = 1.0
         else:
             dist1 = np.linalg.norm(p1b-p1a)
             dist2 = np.linalg.norm(p2b-p2a)
-            t_dur1 = dist1/v
-            t_dur2 = dist2/v
+            t_dur1 = dist1/v1 if v1 > 0.0 else float("inf")
+            t_dur2 = dist2/v2 if v2 > 0.0 else float("inf")
             t_dur = min(t_dur1, t_dur2)
-            v1 = (p1b-p1a)/t_dur1 if dist1 > 0.0 else np.zeros(self.dim)
-            v2 = (p2b-p2a)/t_dur2 if dist2 > 0.0 else np.zeros(self.dim)
-        r = 2*r
+            if not np.isfinite(t_dur):
+                t_dur = 1.0
+            v1 = (p1b-p1a)/t_dur1 if dist1 > 0.0 and np.isfinite(t_dur1) else np.zeros(self.dim)
+            v2 = (p2b-p2a)/t_dur2 if dist2 > 0.0 and np.isfinite(t_dur2) else np.zeros(self.dim)
+        r = r_sum
         r_vec = p2a-p1a
         vel = v2-v1
         tmin = np.clip(-np.dot(vel,r_vec)/(np.dot(vel,vel)+1e-10),0.0,t_dur)
@@ -1309,19 +1323,40 @@ class GraphSampler(Grid):
         self.obstacles = [tuple[Any, ...](obs) for obs in obstacles]
         self.set_obstacle_map(obstacles)
 
-    def inflate_obstacles(self, radius: float = 1.0, use_expand = True) -> None:
-        """Euclidean ESDF inflation plus the 8-connected (2^dim - 1) ring.
+    def expanded_inflation_radius(self, radius: float, use_expand: bool = True) -> float:
+        """Round ``radius`` UP to a multiple of ``sqrt(dim) * resolution``.
 
-        ``Grid.inflate_obstacles`` marks a free cell when the center-to-center
-        ESDF is within ``radius``. 
-        ``If use_expand is True, the radius will be expanded to the nearest integer multiple of the resolution,
-        allowing to capture diagonal neighbours of an obstacle cell.``
+        A multiple of the cell diagonal guarantees that an inflated cell also
+        captures the diagonal neighbours of an obstacle cell. The 1e-9 slack keeps
+        the rounding idempotent (re-applying an already expanded radius, e.g. on
+        reload, returns the same value instead of the next multiple). Returns
+        ``radius`` verbatim when ``use_expand`` is False or ``radius <= 0``.
         """
-        radius = np.ceil(1/(self.resolution*np.sqrt(self.dim)))*np.sqrt(self.dim)*self.resolution if use_expand and radius > 0 else radius
-        super().inflate_obstacles(radius)
+        if not use_expand or radius <= 0:
+            return float(radius)
+        step = float(np.sqrt(self.dim) * self.resolution)
+        return float(np.ceil(radius / step - 1e-9) * step)
+
+    def inflate_obstacles(self, radius: float = 1.0, use_expand = True) -> None:
+        """Euclidean ESDF inflation of the obstacle cells.
+
+        ``Grid.inflate_obstacles`` marks a free cell as INFLATION when the
+        center-to-center ESDF is within the applied radius. With ``use_expand``
+        the requested radius is first rounded up to a multiple of
+        ``sqrt(dim) * resolution`` (see :meth:`expanded_inflation_radius`).
+        Afterwards ``self.inflation_radius`` holds the APPLIED radius (what
+        ``min_wall_distance`` and the saved pickle need) and
+        ``self.requested_inflation_radius`` the value passed in. For
+        heterogeneous agents callers pass the largest agent radius.
+        """
+        self.requested_inflation_radius = float(radius)
+        effective = self.expanded_inflation_radius(radius, use_expand)
+        super().inflate_obstacles(effective)
+        # The parent returns early (without recording the radius) on a map
+        # without obstacles; keep the attribute consistent either way.
+        self.inflation_radius = effective
 
     def set_inflation_radius(self, radius: float, use_expand = True):
-        self.inflation_radius = radius
         self.inflate_obstacles(radius, use_expand)
         self._esdf_initialized = True
 
@@ -1344,6 +1379,7 @@ class GraphSampler(Grid):
         self.cost_matrix = None
         self.obstacles = []
         self.inflation_radius = 0.0
+        self.requested_inflation_radius = 0.0
         self._esdf_initialized = False
 
     def save_graph_sampler(self, path: str):
@@ -1364,6 +1400,7 @@ class GraphSampler(Grid):
                          else [],
             "obs_size": self.obs_size,
             "inflation_radius": self.inflation_radius,
+            "requested_inflation_radius": self.requested_inflation_radius,
             "track_with_link": self.track_with_link,
             "road_map": self.road_map,
             "road_map_edge_weights": self.road_map_edge_weights,
@@ -1395,9 +1432,12 @@ class GraphSampler(Grid):
         self.nodes = data["nodes"]
         self.obstacles = data["obstacles"]
         self.obs_size = data["obs_size"] if "obs_size" in data else 0.5
-        self.inflation_radius = data["inflation_radius"]
         self.set_obstacles(self.obstacles)
-        self.set_inflation_radius(self.inflation_radius)
+        # The pickle stores the APPLIED radius: re-apply it verbatim (no re-rounding)
+        # so the mask matches the one the roadmap was built with. Legacy pickles
+        # without the requested value fall back to the applied one.
+        self.set_inflation_radius(data["inflation_radius"], use_expand=False)
+        self.requested_inflation_radius = float(data.get("requested_inflation_radius", self.inflation_radius))
         self.track_with_link = data["track_with_link"]
         self.grid_points = data["grid_points"]
         self.boundary_points = data.get("boundary_points", [])
@@ -1638,6 +1678,7 @@ class GraphSampler(Grid):
             "nodes": pruned_nodes,
             "obstacles": self.obstacles,
             "inflation_radius": self.inflation_radius,
+            "requested_inflation_radius": self.requested_inflation_radius,
             "track_with_link": self.track_with_link,
             "road_map": pruned_road_map,
             "road_map_edge_weights": pruned_road_map_edge_weights,

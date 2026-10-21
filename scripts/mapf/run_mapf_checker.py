@@ -4,7 +4,10 @@ If velocity is 0.0, then the agent is reaching the next waypoint in 1 second
 Or the time to travel between two waypoints is 1 second.
 
 For LaCAM, LaCAM_random,
-For radii 0.5 (no yet implemented with different radii)
+For radii 0.5
+
+Solutions that record per-agent ``agent_radii`` / ``agent_velocities`` (heterogeneous
+agents) are checked with r_i + r_j per pair and each agent's own nominal speed.
 
 For CBS, ICBS, & SIPP,
 For radii 0.0, 1.0, 2.0.
@@ -23,9 +26,11 @@ def check_mapf_solution(file,radius: float = 0.0,velocity: float = 0.0,verbose: 
         data = yaml.safe_load(f)
     solution = data['schedule']
     print(file)
+    radii = data.get('agent_radii') or radius
+    velocities = data.get('agent_velocities')
     check_time_anomaly(solution,verbose)
-    check_velocity_anomaly(solution,is_using_constant_speed=(velocity != 0),verbose=verbose)
-    check_collision(solution, radius,verbose)
+    check_velocity_anomaly(solution,is_using_constant_speed=(velocity != 0),verbose=verbose,velocity=velocities)
+    check_collision(solution, radii,verbose)
 
 if __name__ == "__main__":
     for ii in [0.0,1.0,2.0]:

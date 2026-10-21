@@ -47,7 +47,7 @@ def process_single_permutation(args: Tuple) -> Tuple[bool, int]:
     # Generate solution
     roadmap_path.mkdir(parents=True, exist_ok=True)
     agents = [
-        {"start": tuple(agent['start']), "name": agent["name"], "goal": tuple(agent['goal'])}
+        {**agent, "start": tuple(agent['start']), "name": agent["name"], "goal": tuple(agent['goal'])}
         for i, agent in enumerate(param["agents"])
     ]
 

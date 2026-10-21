@@ -11,7 +11,8 @@ from typing import List, Tuple
 import numpy as np
 import time
 from path_planning.utils.checker import check_collision
-from path_planning.utils.util import agents_yaml_to_roadmap_frame
+from path_planning.utils.util import agents_yaml_to_roadmap_frame, agent_radii_dict, agent_velocities_dict, is_heterogeneous
+from typing import Mapping
 
 
 def _snap_agents_to_nodes(map_, agents_rt):
@@ -67,6 +68,13 @@ def solve_mapf(map_, agents,mapf_solver_config:dict) -> Tuple[dict, float]:
     mapf_solver_name = mapf_solver_config['mapf_solver_name'].lower()
     agent_radius = mapf_solver_config['agent_radius']
     agent_velocity = mapf_solver_config['agent_velocity']
+    # Heterogeneous agents: per-agent ``radius`` / ``velocity`` keys on the agent
+    # dicts (scalars as fallback). Planners get the dicts; the scalar radius they
+    # also receive is the LARGEST one (the ``radius > 0`` gate and the radius the
+    # roadmap was inflated with). Collision checks use r_i + r_j per pair.
+    agent_radii = agent_radii_dict(agents, agent_radius)
+    agent_velocities = agent_velocities_dict(agents, agent_velocity)
+    planner_radius = max([float(agent_radius)] + list(agent_radii.values()))
     time_limit = mapf_solver_config['time_limit']
     max_iterations = mapf_solver_config['max_iterations']
     heuristic_type = mapf_solver_config['heuristic_type']
@@ -94,8 +102,8 @@ def solve_mapf(map_, agents,mapf_solver_config:dict) -> Tuple[dict, float]:
                 "low_level_iterations": 0,
                 "failure_reason": "start/goal not a roadmap node: " + "; ".join(off_nodes),
             }
-            solution_info = check_solution_collision({}, agent_radius, solution_info)
-            return summarize_solution({}, solution_info, mapf_solver_config, map_)
+            solution_info = check_solution_collision({}, agent_radii, solution_info)
+            return summarize_solution({}, solution_info, mapf_solver_config, map_, agents=agents)
     else:
         # cdt/rrg/prm roadmaps may not include the exact start/goal as nodes; snap to the
         # nearest node so CBS/ICBS/LaCAM/CCBS have an on-node start/goal. No-op for
@@ -121,9 +129,11 @@ def solve_mapf(map_, agents,mapf_solver_config:dict) -> Tuple[dict, float]:
             map_,
             agents_rt,
             astar_max_iterations=low_level_astar_max_iterations,
-            radius=agent_radius,
+            radius=planner_radius,
             use_constraint_sweep=True,
             heuristic_type=heuristic_type,
+            agent_radii=agent_radii,
+            agent_velocities=agent_velocities,
         )
         cbs = CBS(env,time_limit=time_limit,max_iterations=max_iterations,verbose=False)
         solution,solution_info = cbs.search()
@@ -132,9 +142,11 @@ def solve_mapf(map_, agents,mapf_solver_config:dict) -> Tuple[dict, float]:
             map_,
             agents_rt,
             astar_max_iterations=low_level_astar_max_iterations,
-            radius=agent_radius,
+            radius=planner_radius,
             use_constraint_sweep=True,
             heuristic_type=heuristic_type,
+            agent_radii=agent_radii,
+            agent_velocities=agent_velocities,
         )
         icbs = ICBS(
             env,
@@ -146,6 +158,8 @@ def solve_mapf(map_, agents,mapf_solver_config:dict) -> Tuple[dict, float]:
         )
         solution, solution_info = icbs.search()
     elif mapf_solver_name == 'lacam':
+        if is_heterogeneous(agent_radii) or is_heterogeneous(agent_velocities):
+            print("[solve_mapf] warning: LaCAM ignores per-agent radius / velocity")
         starts, goals = set_starts_goals_config(
             [a["start"] for a in agents_rt],
             [a["goal"] for a in agents_rt],
@@ -163,20 +177,20 @@ def solve_mapf(map_, agents,mapf_solver_config:dict) -> Tuple[dict, float]:
         solution, solution_info = planner.get_solution_dict(solution_config)
     elif mapf_solver_name == 'sipp':
         dynamic_obstacles = dict()
-        sipp_planner = SippPlanner(map_,dynamic_obstacles,agents_rt,agent_radius,agent_velocity,heuristic_type=heuristic_type,time_limit=time_limit,max_iterations=max_iterations)
+        sipp_planner = SippPlanner(map_,dynamic_obstacles,agents_rt,planner_radius,agent_velocity,heuristic_type=heuristic_type,time_limit=time_limit,max_iterations=max_iterations,agent_radii=agent_radii,agent_velocities=agent_velocities)
         solution,solution_info = sipp_planner.compute_plan()
     elif mapf_solver_name == 'ccbs':
-        env = CCBS_Environment(map_,{}, agents_rt, radius=agent_radius, velocity=agent_velocity, use_constraint_sweep=True,heuristic_type=heuristic_type)
+        env = CCBS_Environment(map_,{}, agents_rt, radius=planner_radius, velocity=agent_velocity, use_constraint_sweep=True,heuristic_type=heuristic_type, agent_radii=agent_radii, agent_velocities=agent_velocities)
         ccbs = CCBS(env,time_limit=time_limit,max_iterations=max_iterations,verbose=False)
         solution, solution_info = ccbs.search()
     elif mapf_solver_name == 'iccbs':
-        env = CCBS_Environment(map_,{}, agents_rt, radius=agent_radius, velocity=agent_velocity, use_constraint_sweep=True,heuristic_type=heuristic_type)
+        env = CCBS_Environment(map_,{}, agents_rt, radius=planner_radius, velocity=agent_velocity, use_constraint_sweep=True,heuristic_type=heuristic_type, agent_radii=agent_radii, agent_velocities=agent_velocities)
         iccbs = ICCBS(env,time_limit=time_limit,max_iterations=max_iterations,verbose=False)
         solution, solution_info = iccbs.search()
     else:
         raise ValueError(f"Invalid algorithm: {mapf_solver_name}")
-    solution_info = check_solution_collision(solution,agent_radius,solution_info)
-    summary = summarize_solution(solution,solution_info,mapf_solver_config,map_)
+    solution_info = check_solution_collision(solution,agent_radii,solution_info)
+    summary = summarize_solution(solution,solution_info,mapf_solver_config,map_,agents=agents)
     return summary
 
 
@@ -244,16 +258,18 @@ def computer_solution_cost(solution:dict):
     return cost_dict, all_cost_dict
 
 def check_solution_collision(solution,agent_radius,solution_info):
+    """``agent_radius``: one scalar or ``{agent_name: radius}`` (collision at r_i + r_j)."""
     solution_info_collision = solution_info.copy()
     solution_info_collision["collision"] = False
-    if agent_radius != 0 and solution_info["success"]:
+    max_r = max(agent_radius.values(), default=0.0) if isinstance(agent_radius, Mapping) else agent_radius
+    if max_r != 0 and solution_info["success"]:
         collisions = check_collision(solution, agent_radius, verbose=False)
         if collisions:
             solution_info_collision["success"] = False
             solution_info_collision["collision"] = True
     return solution_info_collision
 
-def summarize_solution(solution,solution_info,mapf_solver_config,map_):
+def summarize_solution(solution,solution_info,mapf_solver_config,map_,agents=None):
     agent_cost, total_cost = computer_solution_cost(solution)
     summary = {}
     summary["schedule"] = solution
@@ -263,6 +279,10 @@ def summarize_solution(solution,solution_info,mapf_solver_config,map_):
     summary["mapf_solver_name"] = mapf_solver_config["mapf_solver_name"]
     summary["agent_radius"] = mapf_solver_config["agent_radius"]
     summary["agent_velocity"] = mapf_solver_config["agent_velocity"]
+    if agents is not None:
+        # Per-agent values (== the scalars for homogeneous instances).
+        summary["agent_radii"] = agent_radii_dict(agents, mapf_solver_config["agent_radius"])
+        summary["agent_velocities"] = agent_velocities_dict(agents, mapf_solver_config["agent_velocity"])
     summary["time_limit"] = mapf_solver_config["time_limit"]
     summary["max_iterations"] = mapf_solver_config["max_iterations"]
     summary["heuristic_type"] = mapf_solver_config["heuristic_type"]

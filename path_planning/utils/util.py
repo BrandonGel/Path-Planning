@@ -9,7 +9,7 @@ import yaml
 import os
 import argparse
 from pathlib import Path
-from typing import List, Optional, Sequence
+from typing import Dict, List, Mapping, Optional, Sequence
 import math
 import random
 from multiprocessing import cpu_count
@@ -301,11 +301,12 @@ def read_agents_from_yaml(filename: str):
     Args:
         filename: The filename of the YAML file to read.
     Returns:
-        agents: A list of agent dicts (``name``, ``start``, ``goal``).
+        agents: A list of agent dicts (``name``, ``start``, ``goal`` and the
+            optional per-agent ``radius`` / ``velocity``).
     """
     with open(filename, 'r') as yaml_file:
         yaml_data = yaml.load(yaml_file, Loader=yaml.FullLoader)
-    return yaml_data['agents']
+    return normalize_agent_specs(yaml_data['agents'])
 
 
 def read_agents_for_map(map_yaml: str, *, fallback_agents_yaml: Optional[str] = None) -> List[dict]:
@@ -324,7 +325,7 @@ def read_agents_for_map(map_yaml: str, *, fallback_agents_yaml: Optional[str] = 
         yaml_data = yaml.load(yaml_file, Loader=yaml.FullLoader)
     agents = yaml_data.get("agents")
     if agents:
-        return agents
+        return normalize_agent_specs(agents)
     if fallback_agents_yaml:
         return read_agents_from_yaml(fallback_agents_yaml)
     return []
@@ -336,6 +337,86 @@ def _coord_to_tuple(v, *, as_int: bool) -> tuple:
     if as_int:
         return tuple(int(x) for x in arr.tolist())
     return tuple(float(x) for x in arr.tolist())
+
+
+# ---------------------------------------------------------------------------
+# Heterogeneous agent specs
+#
+# An agent dict may carry an optional per-agent ``radius`` (half the body width,
+# world units) and ``velocity`` (world units per second). Missing keys fall back
+# to the global scalar ``agent_radius`` / ``agent_velocity`` config, so every
+# existing YAML keeps its meaning. Pairwise agent-agent clearance is r_i + r_j
+# (== 2r in the homogeneous case); roadmap obstacle inflation uses the LARGEST
+# agent radius (see :func:`max_agent_radius`).
+# ---------------------------------------------------------------------------
+AGENT_RADIUS_KEY = "radius"
+AGENT_VELOCITY_KEY = "velocity"
+
+
+def _agent_name(agent: dict, index: int) -> str:
+    return agent.get("name", f"agent{index}")
+
+
+def agent_radius_of(agent: dict, default: float = 0.0) -> float:
+    """Per-agent ``radius`` when present (and not None), else ``default``."""
+    r = agent.get(AGENT_RADIUS_KEY)
+    return float(default) if r is None else float(r)
+
+
+def agent_velocity_of(agent: dict, default: float = 0.0) -> float:
+    """Per-agent ``velocity`` when present (and not None), else ``default``."""
+    v = agent.get(AGENT_VELOCITY_KEY)
+    return float(default) if v is None else float(v)
+
+
+def max_agent_radius(agents: Sequence[dict], default: float = 0.0) -> float:
+    """Largest radius over ``agents`` (each falling back to ``default``); ``default`` when empty.
+
+    This is the radius roadmap/waypoint generation must inflate obstacles with so
+    that every agent, including the biggest one, can traverse every edge.
+    """
+    return max([float(default)] + [agent_radius_of(a, default) for a in agents])
+
+
+def agent_radii_dict(agents: Sequence[dict], default: float = 0.0) -> Dict[str, float]:
+    """``{agent name: radius}`` with the scalar ``default`` for agents without a key."""
+    return {_agent_name(a, i): agent_radius_of(a, default) for i, a in enumerate(agents)}
+
+
+def agent_velocities_dict(agents: Sequence[dict], default: float = 0.0) -> Dict[str, float]:
+    """``{agent name: velocity}`` with the scalar ``default`` for agents without a key."""
+    return {_agent_name(a, i): agent_velocity_of(a, default) for i, a in enumerate(agents)}
+
+
+def is_heterogeneous(values: Mapping[str, float], tol: float = 1e-12) -> bool:
+    """True when ``values`` holds more than one distinct number."""
+    vals = [float(v) for v in values.values()]
+    if len(vals) < 2:
+        return False
+    return (max(vals) - min(vals)) > tol
+
+
+def normalize_agent_specs(agents: Sequence[dict]) -> List[dict]:
+    """Copies of ``agents`` with ``radius`` / ``velocity`` coerced to float.
+
+    ``None`` values are dropped (so the scalar fallback applies) and negative
+    values raise ``ValueError``. All other keys are passed through untouched.
+    """
+    out: List[dict] = []
+    for i, a in enumerate(agents or []):
+        b = dict(a)
+        for key in (AGENT_RADIUS_KEY, AGENT_VELOCITY_KEY):
+            if key not in b:
+                continue
+            if b[key] is None:
+                del b[key]
+                continue
+            val = float(b[key])
+            if val < 0.0:
+                raise ValueError(f"agent {_agent_name(a, i)!r}: {key} must be non-negative, got {val}")
+            b[key] = val
+        out.append(b)
+    return out
 
 
 def agents_yaml_to_roadmap_frame(map_: GraphSampler, agents: List[dict]) -> List[dict]:
@@ -369,7 +450,8 @@ def agents_yaml_to_roadmap_frame(map_: GraphSampler, agents: List[dict]) -> List
         else:
             s_t = _coord_to_tuple(a["start"], as_int=False)
             g_t = _coord_to_tuple(a["goal"], as_int=False)
-        out.append({"name": name, "start": s_t, "goal": g_t})
+        # Keep every other key (e.g. per-agent ``radius`` / ``velocity``).
+        out.append({**a, "name": name, "start": s_t, "goal": g_t})
     return out
 
 
@@ -427,7 +509,7 @@ def read_mapd_from_yaml(filename: str) -> dict:
         yaml_data = yaml.load(yaml_file, Loader=yaml.FullLoader)
     map_block = yaml_data.get('map', {})
     return {
-        'agents': yaml_data.get('agents', []),
+        'agents': normalize_agent_specs(yaml_data.get('agents', [])),
         'tasks': yaml_data.get('tasks', []),
         'non_task_endpoints': map_block.get('non_task_endpoints', []),
         'start_locations': map_block.get('start_locations', []),
@@ -450,11 +532,12 @@ def mapd_agents_to_roadmap_frame(map_: GraphSampler, agents: List[dict]) -> List
             :func:`read_mapd_from_yaml`.
 
     Returns:
-        New list of ``{name, start}`` dicts with ``start`` in roadmap-native frame.
+        New list of ``{name, start, ...}`` dicts with ``start`` in roadmap-native
+        frame; other keys (e.g. ``radius`` / ``velocity``) are kept.
     """
     starts = points_to_roadmap_frame(map_, [a["start"] for a in agents])
     return [
-        {"name": a.get("name", f"agent{i}"), "start": s}
+        {**a, "name": a.get("name", f"agent{i}"), "start": s}
         for i, (a, s) in enumerate(zip(agents, starts))
     ]
 
@@ -572,6 +655,11 @@ def set_map_config(map_config: dict = None,args: argparse.Namespace = None):
         map_config['agent_velocity'] = args.agent_velocity
     else:
         map_config['agent_velocity'] = map_config['agent_velocity'] if map_config['agent_velocity'] is not None else 0.0
+
+    # Optional per-agent lists (heterogeneous agents): cycled over the agents of a
+    # generated instance by ``gen_input``; None keeps every agent at the scalar.
+    map_config['agent_radii'] = args_dict.get('agent_radii') or map_config.get('agent_radii')
+    map_config['agent_velocities'] = args_dict.get('agent_velocities') or map_config.get('agent_velocities')
 
     # Setting the num cases
     if args_dict.get('num_cases') is not None:

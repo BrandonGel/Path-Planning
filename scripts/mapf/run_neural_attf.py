@@ -43,6 +43,7 @@ from path_planning.utils.util import (
     read_mapd_from_yaml,
     set_global_seed,
     write_to_yaml,
+    max_agent_radius, agent_radii_dict, agent_velocities_dict,
 )
 
 
@@ -102,12 +103,11 @@ def _make_map_mapd(map_yaml: str, use_discrete_space: bool, agent_radius: float,
     print(f"roadmap_type: {roadmap_type}")
     map_ = read_graph_sampler_from_yaml(map_yaml, use_discrete_space=use_discrete_space, sweep_backend=sweep_backend)
     mapd = read_mapd_from_yaml(map_yaml)
-    # Inflate obstacles by the agent footprint. NOTE: the ESDF is quantized to grid
-    # steps, so the nearest free cell to an obstacle sits at distance 1.0 — an
-    # inflation radius < 1.0 marks no cells at all. With the +sqrt(2)/2 buffer this
-    # means ``agent_radius`` must be >= ~0.293 for any inflation to appear; a point
-    # agent (agent_radius=0 -> radius 0.707) intentionally inflates nothing.
-    map_.inflate_obstacles(radius=agent_radius + np.sqrt(2) / 2)
+    # Inflate obstacles by the LARGEST agent footprint (per-agent ``radius`` keys in
+    # the MAPD YAML, else ``agent_radius``). ``inflate_obstacles`` rounds the radius
+    # up to a multiple of the cell diagonal, so a positive radius always marks at
+    # least the 8-connected ring; a point agent (radius 0) inflates nothing.
+    map_.inflate_obstacles(radius=max_agent_radius(mapd["agents"], agent_radius) + np.sqrt(2) / 2)
 
     if use_discrete_space:
         map_.set_parameters(sample_num=0, num_neighbors=4.0, min_edge_len=0.0, max_edge_len=1.1)
@@ -234,7 +234,10 @@ def _solve_and_save(
     and the random/continuous runners. ``agent_radius``/``velocity`` give the planner
     a radius-aware (CGAL swept) agent–agent footprint; ``delay_probability`` is the
     per-step probability that an agent is held in place by ``Simulation``.
+    Agents may carry their own ``radius`` / ``velocity`` (heterogeneous agents);
+    the scalar handed to the planner is then the largest radius.
     """
+    agent_radius = max_agent_radius(agents, agent_radius)
     planner = NeuralATTF(
         graph_map=map_,
         agents=agents,
@@ -276,6 +279,8 @@ def _solve_and_save(
         "horizon": horizon,
         "use_discrete_space": use_discrete_space,
         "agent_radius": agent_radius,
+        "agent_radii": agent_radii_dict(agents, agent_radius),
+        "agent_velocities": agent_velocities_dict(agents, velocity),
         "num_nodes": len(map_.nodes),
         "num_edges": len(map_.edges),
         "runtime": wall,

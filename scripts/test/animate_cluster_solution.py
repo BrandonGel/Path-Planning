@@ -25,7 +25,8 @@ import yaml
 from python_motion_planning.common import TYPES
 
 from path_planning.utils.util import (read_agents_from_yaml, agents_yaml_to_roadmap_frame,
-                                      read_graph_sampler_from_yaml)
+                                      read_graph_sampler_from_yaml, agent_radii_dict,
+                                      max_agent_radius)
 from path_planning.common.visualizer.visualizer_2d import Visualizer2D
 
 DATA = Path('/home/bho36/Dropbox/Team_Path_Planning/brandon_graph_data/test_cluster')
@@ -115,11 +116,11 @@ def main():
         skip_frames=1,
         intermediate_frames=args.intermediate_frames,
         speed=args.speed,
-        radius=args.agent_radius,
+        radius=agent_radii_dict(agents, args.agent_radius),
         map_frame=map_.use_discrete_space,
         agent_colors=path_colors,
         extra_special_specs=extra_special_specs,
-        special_patch_radius=args.agent_radius,
+        special_patch_radius=max_agent_radius(agents, args.agent_radius),
         dpi=args.dpi,
     )
     vis.close()

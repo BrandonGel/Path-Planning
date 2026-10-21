@@ -19,7 +19,7 @@ import numpy as np
 from typing import Any, Dict, List, Tuple, Optional
 from path_planning.multi_agent_planner.mapf_solver import solve_mapf
 from path_planning.common.environment.map.graph_sampler import GraphSampler
-from path_planning.utils.util import set_global_seed
+from path_planning.utils.util import set_global_seed, max_agent_radius
 import math
 import time
 from tqdm import tqdm
@@ -48,7 +48,7 @@ CASE_KEYS = ("bounds", "resolution", "nb_obstacles", "nb_agents", "obs_size")
 # parameter directory encodes it: a case copied from another radius folder
 # must be inflated with the radius of the folder it lives in.
 MAP_BUILD_KEYS = (
-    "agent_radius", "road_map_type", "use_discrete_space", "sample_num",
+    "agent_radius", "max_agent_radius", "road_map_type", "use_discrete_space", "sample_num",
     "num_neighbors", "min_edge_len", "max_edge_len", "generate_boundary_nodes",
     "boundary_node_spacing", "sampling_dist_dict",
 )
@@ -193,6 +193,12 @@ class InputFile:
         min_edge_len = kwargs.get("min_edge_len", 1e-10)
         max_edge_len = kwargs.get("max_edge_len", 1 + 1e-10)
         agent_radius = kwargs.get("agent_radius", 0.0)
+        # Heterogeneous agents (optional): per-agent radius / velocity lists, cycled
+        # over the agents. The roadmap is inflated with the largest radius.
+        agent_radii = kwargs.get("agent_radii") or None
+        agent_velocities = kwargs.get("agent_velocities") or None
+        radius_of = lambda i: float(agent_radii[i % len(agent_radii)]) if agent_radii else float(agent_radius)
+        velocity_of = lambda i: float(agent_velocities[i % len(agent_velocities)]) if agent_velocities else None
         nb_obstacles = kwargs.get("nb_obstacles", 0.1)
         nb_agents = kwargs.get("nb_agents", 4)
         obs_size = kwargs.get("obs_size", 0.5) # size of the obstacle in pixels
@@ -228,11 +234,15 @@ class InputFile:
         }
         total_cells = int(math.prod(dimensions))
         num_dims = len(dimensions)
-        
-        # Take the ceiling of the agent diameter in cells
-        num_cells_to_inflate = (
-            math.ceil(2.0 * agent_radius / resolution) if resolution > 0 else 0
-        )
+
+        # Largest agent radius: obstacle inflation and the agent-agent footprint
+        # blocking below are sized against it (r_i + r_max per agent; == 2r when
+        # every agent is the same size, so existing datasets reproduce exactly).
+        r_max = max([float(agent_radius)] + [radius_of(i) for i in range(nb_agents)])
+        input_dict["max_agent_radius"] = r_max
+
+        def cells_to_inflate(r_i: float) -> int:
+            return math.ceil((r_i + r_max) / resolution) if resolution > 0 else 0
 
         if 0 < nb_obstacles < 1:
             nb_obstacles = int(total_cells * nb_obstacles)
@@ -292,7 +302,7 @@ class InputFile:
 
         map_ = GraphSampler(bounds=bounds, resolution=resolution,start=[],goal=[],use_discrete_space=True)
         map_.set_obstacles(obstacles=obstacles_grid)
-        map_.set_inflation_radius(radius=agent_radius)
+        map_.set_inflation_radius(radius=r_max)
         occupied_positions.update(map_.get_inflated_obstacles())   
 
 
@@ -308,12 +318,14 @@ class InputFile:
 
         # Place agents
         for agent_id in range(nb_agents):
+            r_i = radius_of(agent_id)
+            num_cells_to_inflate = cells_to_inflate(r_i)
             # Get start position
             start_pos = start_sampler(occupied_positions)
             if start_pos is None:
                 assert False, f"Failed to place agent {agent_id} start position"
             occupied_positions.add(start_pos)
-            if agent_radius > 0 and num_cells_to_inflate > 0:
+            if r_i > 0 and num_cells_to_inflate > 0:
                 offset_range = range(-num_cells_to_inflate, num_cells_to_inflate + 1)
                 for offset in product(*(offset_range for _ in range(num_dims))):
                     inflated_obs_pos = tuple(start_pos[j] + offset[j] for j in range(num_dims))
@@ -324,7 +336,7 @@ class InputFile:
             if goal_pos is None:
                 assert False, f"Failed to place agent {agent_id} goal position"
             occupied_positions.add(goal_pos)
-            if agent_radius > 0 and num_cells_to_inflate > 0:
+            if r_i > 0 and num_cells_to_inflate > 0:
                 offset_range = range(-num_cells_to_inflate, num_cells_to_inflate + 1)
                 for offset in product(*(offset_range for _ in range(num_dims))):
                     inflated_obs_pos = tuple(goal_pos[j] + offset[j] for j in range(num_dims))
@@ -337,13 +349,19 @@ class InputFile:
             goal_w = map_.map_to_world(goal_grid)
             start_world = [float(x) for x in np.asarray(start_w).reshape(-1)]
             goal_world = [float(x) for x in np.asarray(goal_w).reshape(-1)]
-            input_dict["agents"].append(
-                {
-                    "start": start_world,
-                    "goal": goal_world,
-                    "name": f"agent{agent_id}",
-                }
-            )
+            agent_entry = {
+                "start": start_world,
+                "goal": goal_world,
+                "name": f"agent{agent_id}",
+            }
+            # Per-agent keys only when heterogeneous lists were supplied, so the
+            # input.yaml of a homogeneous instance is byte-identical to before.
+            if agent_radii:
+                agent_entry["radius"] = r_i
+            v_i = velocity_of(agent_id)
+            if v_i is not None:
+                agent_entry["velocity"] = v_i
+            input_dict["agents"].append(agent_entry)
 
         return input_dict
 
@@ -402,7 +420,10 @@ def create_map(param: Dict, generate_new_graph: bool = False,graph_file: Path =N
         
         obstacles = obstacles_world_to_grid(map_, obstacles_world, obs_size)
         map_.set_obstacles(obstacles=obstacles)
-        map_.set_inflation_radius(radius=param["agent_radius"])
+        # Heterogeneous agents: inflate with the largest agent radius.
+        r_max = max_agent_radius(agents, param["agent_radius"])
+        param["max_agent_radius"] = r_max
+        map_.set_inflation_radius(radius=r_max)
 
         agents_rt = agents_yaml_to_roadmap_frame(map_, agents)
         start = [a["start"] for a in agents_rt]
@@ -581,6 +602,10 @@ def process_single_case_map_generation(args: Tuple) -> Optional[int]:
     # the case from scratch, i.e. NEW obstacles and agents).
     rebuild_graph = False
     if inpt and not generate_new_graph:
+        # The roadmap is inflated with the largest agent radius of the case, so a
+        # changed per-agent radius must trigger a rebuild like ``agent_radius``.
+        config = dict(config)
+        config["max_agent_radius"] = max_agent_radius(inpt.get("agents", []), config.get("agent_radius", 0.0))
         case_diff = {
             k: (inpt.get(k), config[k]) for k in CASE_KEYS
             if k in config and inpt.get(k) is not None and inpt.get(k) != config[k]
@@ -600,6 +625,9 @@ def process_single_case_map_generation(args: Tuple) -> Optional[int]:
             # its runtime sidecar); a legacy pickle without that record is rebuilt.
             built_with = _read_build_config(Path(graph_file))
             if Path(graph_file).exists() and built_with is not None:
+                # Legacy sidecars (homogeneous) have no max_agent_radius record.
+                built_with = dict(built_with)
+                built_with.setdefault("max_agent_radius", built_with.get("agent_radius"))
                 stale = {
                     k: (built_with.get(k), config[k]) for k in MAP_BUILD_KEYS
                     if k in config and (built_with.get(k) or None) != (config[k] or None)

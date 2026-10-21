@@ -44,9 +44,10 @@ def check_solution_worker(args):
         solution = data["schedule"]
         result = check_solution_full(
             solution,
-            r=radius,
+            r=data.get("agent_radii") or radius,
             is_using_constant_speed=(velocity != 0),
             verbose=verbose,
+            velocity=data.get("agent_velocities"),
         )
 
         has_anomaly = (

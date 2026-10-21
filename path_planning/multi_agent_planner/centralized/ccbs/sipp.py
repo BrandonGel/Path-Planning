@@ -32,6 +32,8 @@ class SIPP():
         """
         Modified low level search with conflict-aware tie-breaking.
         """
+        # Heterogeneous agents: move times / heuristic use this agent's speed.
+        self.env._set_active_agent(agent_name)
         goal_state = self.agent_dict[agent_name]["goal"]
         initial_state = self.get_initial_state(self.agent_dict[agent_name]["start"].position)
         initial_state_key = (initial_state.position, initial_state.interval)
@@ -198,7 +200,8 @@ class SIPP():
                     pos2_start = pos2_0 + vel2 * dt2
 
                     res = self.env.check_collision(
-                        pos1_start, vel1, pos2_start, vel2, tdur
+                        pos1_start, vel1, pos2_start, vel2, tdur,
+                        r_sum=self.env._pair_clearance(agent_name, other_name),
                     )
                     if res:
                         count += 1

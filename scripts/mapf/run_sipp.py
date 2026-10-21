@@ -3,7 +3,7 @@ Run SIPP for MAPF algorithms with different agent radii (0.0, 1.0, 2.0) in discr
 python scripts/mapf/run_sipp.py 
 """
 
-from path_planning.utils.util import set_global_seed
+from path_planning.utils.util import set_global_seed, max_agent_radius, agent_radii_dict
 from path_planning.common.visualizer.visualizer_2d import Visualizer2D
 from path_planning.utils.util import write_to_yaml
 from path_planning.utils.util import read_graph_sampler_from_yaml, read_agents_from_yaml, agents_yaml_to_roadmap_frame
@@ -24,7 +24,7 @@ if __name__ == "__main__":
         for agent_velocity,agent_radius in [(0.0, 0.0), (1.0, 0.0), (0.0, 2.0),(1.0, 0.0), (1.0, 1.0)]:
             map_ = read_graph_sampler_from_yaml("path_planning/maps/2d/2d.yaml",use_discrete_space=use_discrete_space)
             agents = read_agents_from_yaml("path_planning/maps/2d/2d.yaml")
-            map_.inflate_obstacles(radius=agent_radius+np.sqrt(2)/2)
+            map_.inflate_obstacles(radius=max_agent_radius(agents, agent_radius) + np.sqrt(2) / 2)  # largest agent
 
             if use_discrete_space:
                 map_.set_parameters(
@@ -46,7 +46,7 @@ if __name__ == "__main__":
             start = [s.current for s in map_.get_start_nodes()]
             goal = [g.current for g in map_.get_goal_nodes()]
             agents = [
-                {"start": start[i], "name": agent["name"], "goal": goal[i]}
+                {**agent, "start": start[i], "name": agent["name"], "goal": goal[i]}
                 for i, agent in enumerate(agents)
             ]
 
@@ -104,7 +104,7 @@ if __name__ == "__main__":
                 skip_frames=1,
                 intermediate_frames=3,
                 speed=3,
-                radius=agent_radius,
+                radius=agent_radii_dict(agents, agent_radius),
                 map_frame=use_discrete_space,
             )
             print(f"Animation saved to: {gif_filename}")

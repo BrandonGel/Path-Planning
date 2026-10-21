@@ -39,6 +39,7 @@ from path_planning.utils.util import (
     read_agents_from_yaml,
     read_graph_sampler_from_yaml,
     set_global_seed,
+    max_agent_radius,
 )
 from run_neural_attf import _make_map_mapd
 
@@ -60,7 +61,7 @@ def _build_mapf_map(backend: str, agent_radius: float):
     set_global_seed(42)
     map_ = read_graph_sampler_from_yaml(MAPF_YAML, use_discrete_space=False, sweep_backend=backend)
     agents = read_agents_from_yaml(MAPF_YAML)
-    map_.inflate_obstacles(radius=agent_radius + np.sqrt(2) / 2)
+    map_.inflate_obstacles(radius=max_agent_radius(agents, agent_radius) + np.sqrt(2) / 2)
     map_.set_parameters(sample_num=800, num_neighbors=10.0, min_edge_len=0.0, max_edge_len=4.0)
     map_.set_start([a["start"] for a in agents])
     map_.set_goal([a["goal"] for a in agents])
@@ -68,7 +69,7 @@ def _build_mapf_map(backend: str, agent_radius: float):
     map_.generate_roadmap(nodes)
     start = [s.current for s in map_.get_start_nodes()]
     goal = [g.current for g in map_.get_goal_nodes()]
-    agents = [{"start": start[i], "name": a["name"], "goal": goal[i]} for i, a in enumerate(agents)]
+    agents = [{**a, "start": start[i], "name": a["name"], "goal": goal[i]} for i, a in enumerate(agents)]
     map_.set_constraint_sweep()
     return map_, agents
 

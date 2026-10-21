@@ -19,7 +19,7 @@ from scipy.interpolate import RegularGridInterpolator
 from scipy.spatial import cKDTree
 from multiprocessing import Pool, cpu_count
 from scipy.ndimage import generic_filter,generate_binary_structure
-from path_planning.utils.util import set_global_seed
+from path_planning.utils.util import set_global_seed, max_agent_radius
 from path_planning.data_generation.dataset_util import *
 
 
@@ -408,7 +408,7 @@ def process_single_case_graphs(args: Tuple[Path, dict]) -> Tuple[bool, Path]:
                 input_file, use_discrete_space=use_discrete_space,
                 sampling_dist_dict=sampling_dist_dict,
             )
-            map_.set_inflation_radius(radius=agent_radius)
+            map_.set_inflation_radius(radius=max_agent_radius(agents, agent_radius))
             map_.set_parameters(
                 sample_num=num_samples,
                 num_neighbors=num_neighbors,

@@ -21,8 +21,17 @@ from path_planning.multi_agent_planner.data_type import HEURISTIC_TYPE
 from path_planning.multi_agent_planner.centralized.sipp.graph_generation import SippNode
 
 class SippPlanner(SippGraph):
-    def __init__(self, graph_map: GraphSampler,dynamic_obstacles:dict = {},agents:list = [],radius:float = 0.0,velocity:float = 0.0,use_constraint_sweep:bool = True, heuristic_type: str = 'manhattan',time_limit: float | None = None, max_iterations: int | None = None,verbose: bool = False,sipp_max_iterations: int = 10000, obstacle_horizon: float | dict | None = None, require_goal_safe_forever: bool = True, goal_safe_until=None):
-        SippGraph.__init__(self,graph_map,dynamic_obstacles,radius,velocity,use_constraint_sweep,heuristic_type,time_limit,max_iterations,verbose,obstacle_horizon)
+    def __init__(self, graph_map: GraphSampler,dynamic_obstacles:dict = {},agents:list = [],radius:float = 0.0,velocity:float = 0.0,use_constraint_sweep:bool = True, heuristic_type: str = 'manhattan',time_limit: float | None = None, max_iterations: int | None = None,verbose: bool = False,sipp_max_iterations: int = 10000, obstacle_horizon: float | dict | None = None, require_goal_safe_forever: bool = True, goal_safe_until=None, agent_radii: dict | None = None, agent_velocities: dict | None = None):
+        # Per-agent radius / speed: explicit dicts win, else the agents' own
+        # ``radius`` / ``velocity`` keys, else the scalars. The dicts must be known
+        # before the first table is built (``reset_graph`` inside SippGraph).
+        if agent_radii is None:
+            agent_radii = {a["name"]: a["radius"] for a in agents if a.get("radius") is not None}
+        if agent_velocities is None:
+            agent_velocities = {a["name"]: a["velocity"] for a in agents if a.get("velocity") is not None}
+        self._active_agent = None
+        self._active_velocity = float(velocity)
+        SippGraph.__init__(self,graph_map,dynamic_obstacles,radius,velocity,use_constraint_sweep,heuristic_type,time_limit,max_iterations,verbose,obstacle_horizon,agent_radii,agent_velocities)
         self.agents = agents
         # A finished agent occupies its goal for all future time, so a goal
         # arrival is only truly collision-free if the accepted safe interval
@@ -62,15 +71,24 @@ class SippPlanner(SippGraph):
     def shuffle_agents(self):
         random.shuffle(self.agents)
 
+    def _set_active_agent(self, agent_name):
+        """Make ``agent_name`` the agent being searched for: its own speed drives
+        move times and the heuristic. (The table is bound separately, see
+        ``_bind_table``; CCBS keeps its constraints elsewhere.)"""
+        self._active_agent = agent_name
+        self._active_velocity = self._velocity_for(agent_name)
+
     def get_mtime(self, position1, position2):
-        if (position1, position2) in self._mtime_cache:
-            return self._mtime_cache[(position1, position2)]
+        v = getattr(self, "_active_velocity", self.velocity)
+        key = (position1, position2, v)
+        if key in self._mtime_cache:
+            return self._mtime_cache[key]
         m_cost = float(self.graph_map.get_cost(Node(tuple(position1)), Node(tuple(position2))))
-        if self.velocity > 0:
-            m_time = m_cost / self.velocity
+        if v > 0:
+            m_time = m_cost / v
         else:
             m_time = 1.0
-        self._mtime_cache[(position1, position2)] = m_time
+        self._mtime_cache[key] = m_time
         return m_time
 
     def get_earliest_no_collision_arrival_time_point(self, start_t, interval, start_pos, neighbour):
@@ -184,7 +202,8 @@ class SippPlanner(SippGraph):
             dist = self._dijkstra_heuristic(position, goal)
         else:
             raise ValueError(f"Invalid heuristic type: {self.heuristic_type}")
-        return dist if self.velocity == 0 else dist / self.velocity
+        v = getattr(self, "_active_velocity", self.velocity)
+        return dist if v == 0 else dist / v
 
     def _goal_distance_map(self, goal_idx: int):
         """Single-source Dijkstra from the goal over the roadmap.
@@ -271,6 +290,10 @@ class SippPlanner(SippGraph):
             for ii, agent in enumerate(self.agents):
                 start = tuple(agent["start"])
                 goal = tuple(agent["goal"])
+                # Heterogeneous agents: search with this agent's speed on the
+                # safe-interval table of its radius (one shared table when all equal).
+                self._set_active_agent(agent["name"])
+                self._bind_table(agent["name"])
 
                 if len(self.sipp_graph[start].interval_list) == 0 or len(self.sipp_graph[goal].interval_list) == 0:
                     success = False

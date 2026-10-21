@@ -21,6 +21,8 @@ class IEnvironment(Environment):
         velocity=0.0,
         use_constraint_sweep=True,
         heuristic_type: str = 'dijkstra',
+        agent_radii: dict | None = None,
+        agent_velocities: dict | None = None,
     ):
         super().__init__(
             graph_map,
@@ -30,6 +32,8 @@ class IEnvironment(Environment):
             velocity,
             use_constraint_sweep,
             heuristic_type,
+            agent_radii=agent_radii,
+            agent_velocities=agent_velocities,
         )
         self.a_star = AStar(self, astar_max_iterations,radius)
 

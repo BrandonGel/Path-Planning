@@ -25,7 +25,7 @@ import math
 import random
 import time
 from collections import defaultdict
-from typing import Dict, Iterable, List
+from typing import Dict, Iterable, List, Mapping
 
 
 def _point_to_dict(t: int, pt) -> dict:
@@ -44,6 +44,8 @@ class Simulation:
         velocity: float = 0.0,
         timestep_duration: float = 1.0,
         agent_radius: float = 0.0,
+        agent_velocities: Mapping[str, float] | None = None,
+        agent_radii: Mapping[str, float] | None = None,
     ):
         self.tasks = list(tasks)
         self.agents = agents
@@ -59,6 +61,21 @@ class Simulation:
         # Body radius for the radius-aware hold backstop (see time_forward). 0 ->
         # taken from the planner (``algorithm.agent_radius``) when it has one.
         self.agent_radius = float(agent_radius)
+        # Heterogeneous agents: per-agent speed / radius. Resolution order: the
+        # explicit dicts, then the agent dict's own ``velocity`` / ``radius`` key,
+        # then the scalars above. ``arc_budgets`` is the per-agent arc length per
+        # tick (the scalar ``arc_budget`` stays the default for unknown names).
+        self.agent_velocities: Dict[str, float] = {}
+        self.agent_radii: Dict[str, float] = {}
+        for agent in self.agents:
+            name = agent["name"]
+            v = (agent_velocities or {}).get(name, agent.get("velocity"))
+            r = (agent_radii or {}).get(name, agent.get("radius"))
+            self.agent_velocities[name] = self.velocity if v is None else float(v)
+            self.agent_radii[name] = self.agent_radius if r is None else float(r)
+        self.arc_budgets: Dict[str, float] = {
+            name: v * self.timestep_duration for name, v in self.agent_velocities.items()
+        }
 
         self.time = 0
         self.delayed_agents: set = set()
@@ -132,7 +149,7 @@ class Simulation:
                 self.times_agent_delayed[name] += 1
             else:
                 # Advance up to one tick's worth of arc length (multiple fine waypoints).
-                n, traversed, fracs = self._advance_plan(planned, self.arc_budget)
+                n, traversed, fracs = self._advance_plan(planned, self.arc_budgets.get(name, self.arc_budget))
                 agent_plan[name] = (n, traversed, fracs)
                 agent_pos_next[name] = traversed[-1] if traversed else cur
 
@@ -171,17 +188,26 @@ class Simulation:
         # Anyone whose motion this tick sweeps within 2r of an agent that is standing
         # still is therefore held too - and reported as delayed, so the planner
         # re-syncs its path next tick - instead of driving through a stopped body.
-        # Consistent plans never bring a mover within 2r of a resting agent, so this
+        # Consistent plans never bring a mover within r_i + r_j of a resting agent, so this
         # only fires when a hold has already broken the plan. A mover that already
         # stands within 2r (it was held inside the footprint, or the two were parked
         # next to each other) is only held if its motion brings it CLOSER than it
         # starts - moving away is the escape the planner just computed for it.
-        radius = self.agent_radius
-        if radius <= 0.0:
-            radius = float(getattr(algorithm, "agent_radius", 0.0) or 0.0)
-        if radius > 0.0:
-            clearance = 2.0 * radius - 1e-9
-            names = [a["name"] for a in agents_to_move]
+        # Per-agent radii: the simulation's own values, else the planner's
+        # (``algorithm.agent_radii`` / ``algorithm.agent_radius``). Pairwise
+        # clearance is r_i + r_j (== 2r when every agent is the same size).
+        names = [a["name"] for a in agents_to_move]
+        algo_radii = getattr(algorithm, "agent_radii", None) or {}
+        algo_radius = float(getattr(algorithm, "agent_radius", 0.0) or 0.0)
+
+        def _radius_of(n):
+            r = self.agent_radii.get(n, self.agent_radius)
+            if r <= 0.0:
+                r = float(algo_radii.get(n, algo_radius))
+            return r
+
+        radii = {n: _radius_of(n) for n in names}
+        if any(r > 0.0 for r in radii.values()):
             changed = True
             while changed:
                 changed = False
@@ -199,6 +225,7 @@ class Simulation:
                             continue
                         d_min = self._polyline_point_dist(legs, agents_pos_now[other])
                         d_start = math.dist(agents_pos_now[name], agents_pos_now[other])
+                        clearance = radii[name] + radii[other] - 1e-9
                         if d_min < clearance and d_min < d_start - 1e-9:
                             delayed.add(name)
                             agent_pos_next[name] = agents_pos_now[name]
