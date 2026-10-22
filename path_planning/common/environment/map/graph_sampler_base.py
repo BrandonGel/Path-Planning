@@ -12,7 +12,7 @@ from path_planning.common.environment.map.cdt import get_boundary, get_planar_gr
 from path_planning.global_planner.sample_search.rrg import RRG
 from python_motion_planning.common.env.map.grid import _njit, _grid_line_of_sight, _grid_in_collision, _grid_is_expandable, _grid_path_map_to_world, _grid_world_to_map_int, _grid_path_world_to_map_int, _grid_path_world_to_map_float
 from path_planning.common.environment.map.numbaUtil import _world_line_of_sight, _world_in_collision, _grid_vector_is_expandable, convert_np_to_tuple, _world_min_wall_distance
-from path_planning.common.environment.map.node_sampling import sample_grid_nodes, sample_boundary_nodes, sample_halton_nodes
+from path_planning.common.environment.map.node_sampling import sample_grid_nodes, sample_boundary_nodes, sample_halton_nodes, random_sampling, distributed_sampling
 import faiss
 import pickle
 
@@ -532,8 +532,10 @@ class GraphSamplerBase(Grid):
                     oversample=oversample,
                     halton_sampler=halton_sampler,
                 )
+            elif prob_map is not None:
+                points,num_weighted_samples = distributed_sampling(self, self.sample_num, prob_map, samp_from_prob_map_ratio)
             else:
-                points,num_weighted_samples = self.sample_from_prob_map(prob_map,samp_from_prob_map_ratio)
+                points = random_sampling(self, self.sample_num)
             n_points = len(points)
             pixels = [self.world_to_map(point,discrete=True) for point in points]
             accepted_this_round = 0

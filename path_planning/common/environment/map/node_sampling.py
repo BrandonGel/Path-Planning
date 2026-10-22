@@ -1,6 +1,7 @@
 import numpy as np
 from itertools import product
 from path_planning.common.environment.map.numbaUtil import _world_min_wall_distance
+from python_motion_planning.common.env.map.grid import _grid_path_map_to_world
 from path_planning.common.environment.node import Node
 from python_motion_planning.common import TYPES
 from typing import List
@@ -109,6 +110,65 @@ def get_random_nodes(self) -> List[Node]:
     print("Warning: number of nodes is less than sample num")
     return self.nodes
 
+def random_sampling(graph_map: "GraphSamplerBase",
+    n_samples,
+):
+    bounds = np.asarray(graph_map.bounds, dtype=float)
+    dim = graph_map.dim
+    normalized_points = np.random.random((n_samples,dim))
+    points = normalized_points * (bounds[:,1] - bounds[:,0]) + bounds[:,0]
+    return points
+
+def distributed_sampling(graph_map: "GraphSamplerBase",
+    n_samples,
+    prob_map: np.ndarray,
+    samp_from_prob_map_ratio: float = 0.5,
+):
+    """``n_samples`` world points: a ``samp_from_prob_map_ratio`` share drawn
+    from ``prob_map`` (one weight per cell), the rest from its complement
+    ``1 - p`` so under-weighted cells are still covered.
+
+    Each sample is the chosen cell's centre plus a uniform jitter of
+    +-0.5 cell on every axis, so it stays inside that cell at any resolution.
+
+    Returns:
+        (points, num_prob_map_samples): (N, dim) float array with the
+        prob-map samples first, and how many of them there are.
+    """
+    bounds = np.asarray(graph_map.bounds, dtype=float)
+    dim = graph_map.dim
+    n_samples = int(n_samples)
+    num_prob_map_samples = int(n_samples * samp_from_prob_map_ratio)
+    num_unchosen_samples = n_samples - num_prob_map_samples
+
+    prob_map = np.asarray(prob_map, dtype=np.float64)
+    if prob_map.shape != tuple(graph_map.shape):
+        raise ValueError(f"prob_map shape {prob_map.shape} does not match map shape {tuple(graph_map.shape)}")
+    prob_map_flat = prob_map.ravel()
+    prob_map_flat = prob_map_flat / prob_map_flat.sum()
+
+    weighted_points = np.zeros((0, dim))
+    if num_prob_map_samples > 0:
+        idx = np.random.choice(prob_map_flat.size, size=num_prob_map_samples, p=prob_map_flat)
+        cells = np.column_stack(np.unravel_index(idx, prob_map.shape)).astype(np.float64)
+        jitter = np.random.random((num_prob_map_samples, dim)) - 0.5
+        weighted_points = _grid_path_map_to_world(cells + jitter, bounds, graph_map.resolution)
+
+    unchosen_points = np.zeros((0, dim))
+    if num_unchosen_samples > 0:
+        unchosen_flat = 1.0 - prob_map_flat
+        total = unchosen_flat.sum()
+        # Complement is all zeros only when a single cell holds all the mass;
+        # fall back to uniform rather than dividing by zero.
+        unchosen_flat = unchosen_flat / total if total > 0 else np.full_like(prob_map_flat, 1.0 / prob_map_flat.size)
+        idx = np.random.choice(prob_map_flat.size, size=num_unchosen_samples, p=unchosen_flat)
+        cells = np.column_stack(np.unravel_index(idx, prob_map.shape)).astype(np.float64)
+        jitter = np.random.random((num_unchosen_samples, dim)) - 0.5
+        unchosen_points = _grid_path_map_to_world(cells + jitter, bounds, graph_map.resolution)
+
+    points = np.concatenate((weighted_points, unchosen_points))
+    return points, num_prob_map_samples
+
 def sample_halton_nodes(graph_map: "GraphSamplerBase",
         n_samples,
         d_min=0.3,
@@ -134,10 +194,6 @@ def sample_halton_nodes(graph_map: "GraphSamplerBase",
     raw = halton_sampler.random(n_draw)
     samples = qmc.scale(raw, bounds[:, 0], bounds[:, 1])
 
-    # d_min <= 0 only removes the hard cutoff near the inflation; the
-    # Gaussian preference (d_opt / sigma / floor) still shapes the density.
-    # Numba kernel: (N, dim) float64 points, flattened ESDF (the lazy property
-    # keeps it current), applied inflation radius, float64 bounds, int64 shape.
     dists = _world_min_wall_distance(
         np.ascontiguousarray(samples, dtype=np.float64),
         graph_map._esdf_flat(),
