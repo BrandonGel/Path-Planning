@@ -16,7 +16,7 @@ from python_motion_planning.common.env.map.grid import _njit, _grid_line_of_sigh
 from path_planning.common.environment.map.numbaUtil import _world_line_of_sight, _world_in_collision, _grid_vector_is_expandable
 
 
-from path_planning.common.environment.map.node_sampling import sample_grid_nodes
+from path_planning.common.environment.map.node_sampling import sample_grid_nodes, sample_boundary_nodes
 import faiss
 import pickle
 
@@ -597,24 +597,24 @@ class GraphSamplerBase(Grid):
                 self.grid_nodes_index[node] = len(nodes) - 1
                 self.grid_points.append(world_pt)
 
-        want_spacing = boundary_node_spacing is not None and boundary_node_spacing > 0
-        if generate_boundary_nodes or want_spacing:
-            # Obstacle/map boundary vertices (merged wall corners/junctions)
-            # from the CDT boundary extraction. They lie ON the obstacle
-            # outline — same as the CDT roadmap's own boundary nodes — so no
-            # expandability filter is applied; edge-level collision checks in
-            # the roadmap builders decide connectivity.
-            # With ``boundary_node_spacing`` the merged wall segments are
-            # resampled every ``spacing`` world units (spacing == resolution
-            # -> one node per boundary cell), corners first.
-            bnd_pts, bnd_segs, _ = self.get_obstacle_boundary()
-            if want_spacing:
-                bnd_pts = self.resample_boundary(bnd_pts, bnd_segs, boundary_node_spacing)
-            for point in bnd_pts:
-                current = tuple(float(v) for v in point)
-                node = Node(current, None, 0, 0)
+
+        if generate_boundary_nodes:
+            # Vertices on the outline of free space (sample_boundary_nodes):
+            # the corners of the free/blocked interface and one point every
+            # resolution along its edges, in world units on the interface
+            # itself (not on the cell-centre lattice). They are not filtered
+            # for expandability; edge-level collision checks in the roadmap
+            # builders decide connectivity. ``boundary_node_spacing`` only
+            # triggers this block; the spacing itself is the map resolution.
+            boundary_nodes, _ = sample_boundary_nodes(self)
+            for node in boundary_nodes:
+                current = node.current
                 if node in self.node_index_dict:
+                    # Cell already registered (grid node / snapped sample):
+                    # reuse it, but still record it as a boundary point so
+                    # save/load rebuilds boundary_nodes_index identically.
                     self.boundary_nodes_index[node] = self.node_index_dict[node]
+                    self.boundary_points.append(current)
                     continue
                 nodes.append(node)
                 self.node_index_dict[node] = len(nodes) - 1
@@ -1192,17 +1192,32 @@ class GraphSamplerBase(Grid):
         self.obstacles = [tuple[Any, ...](obs) for obs in obstacles]
         self.set_obstacle_map(obstacles)
 
-    def inflate_obstacles(self, radius: float = 1.0, use_expand = True) -> None:
-        """Euclidean ESDF inflation plus the 8-connected (2^dim - 1) ring.
+    def expanded_inflation_radius(self, radius: float, use_expand: bool = True) -> float:
+        """Radius actually applied by ``inflate_obstacles``.
 
-        ``Grid.inflate_obstacles`` marks a free cell when the center-to-center
-        ESDF is within ``radius``. 
-        ``If use_expand is True, the radius will be expanded to the nearest integer multiple of the resolution,
-        allowing to capture diagonal neighbours of an obstacle cell.``
+        With ``use_expand`` the requested radius is rounded UP to the nearest
+        multiple of ``sqrt(dim) * resolution`` (the centre-to-centre distance
+        of a diagonal neighbour), so an inflated band always includes the
+        diagonal neighbours of its outermost obstacle cells. The 1e-9 slack
+        makes it idempotent: re-applying an already expanded radius (reload,
+        ``cluster_map``) returns the same value.
         """
+        if not use_expand or radius <= 0:
+            return float(radius)
+        step = np.sqrt(self.dim) * self.resolution
+        return float(np.ceil(radius / step - 1e-9) * step)
+
+    def inflate_obstacles(self, radius: float = 1.0, use_expand = True) -> None:
+        """Euclidean ESDF inflation, see ``expanded_inflation_radius`` for how
+        ``radius`` is rounded when ``use_expand`` is True. ``self.inflation_radius``
+        ends up holding the applied (expanded) radius.
+        """
+        radius = self.expanded_inflation_radius(radius, use_expand)
         if len(self.obstacles) == 0:
+            # Nothing to inflate; Grid.inflate_obstacles would still record the
+            # radius, so keep that behaviour for min_wall_distance & co.
+            self.inflation_radius = radius
             return
-        radius = np.ceil(1/(self.resolution*np.sqrt(self.dim)))*np.sqrt(self.dim)*self.resolution if use_expand and radius > 0 else radius
         super().inflate_obstacles(radius)
 
     def set_inflation_radius(self, radius: float, use_expand = True):
