@@ -1,9 +1,7 @@
 from typing import Any, List, Tuple
 import heapq
 import numpy as np
-from path_planning.common.environment.map.halton import halton_sampling
 from scipy.spatial import KDTree, Delaunay
-from scipy.ndimage import map_coordinates
 from path_planning.common.environment.node import Node
 from python_motion_planning.common.env.map.grid import Grid, GridTypeMap
 from scipy.spatial.distance import cdist
@@ -13,10 +11,8 @@ from path_planning.utils.cgal_sweep import CGAL_Sweep
 from path_planning.common.environment.map.cdt import get_boundary, get_planar_graph
 from path_planning.global_planner.sample_search.rrg import RRG
 from python_motion_planning.common.env.map.grid import _njit, _grid_line_of_sight, _grid_in_collision, _grid_is_expandable, _grid_path_map_to_world, _grid_world_to_map_int, _grid_path_world_to_map_int, _grid_path_world_to_map_float
-from path_planning.common.environment.map.numbaUtil import _world_line_of_sight, _world_in_collision, _grid_vector_is_expandable, convert_np_to_tuple
-
-
-from path_planning.common.environment.map.node_sampling import sample_grid_nodes, sample_boundary_nodes
+from path_planning.common.environment.map.numbaUtil import _world_line_of_sight, _world_in_collision, _grid_vector_is_expandable, convert_np_to_tuple, _world_min_wall_distance
+from path_planning.common.environment.map.node_sampling import sample_grid_nodes, sample_boundary_nodes, sample_halton_nodes
 import faiss
 import pickle
 
@@ -459,59 +455,6 @@ class GraphSamplerBase(Grid):
             points = np.concatenate((weighted_points,unchosen_prob_map_indices_weighted_points))
             return points,num_prob_map_samples
 
-    # Return the minimum distance from a point to the nearest obstacle or inflation
-    def min_wall_distance(self, p):
-        """
-        World-unit distance from a world-coordinate point (or batch of points) to
-        the nearest OBSTACLE-or-INFLATION cell.
-
-        Uses the precomputed Euclidean Signed Distance Field (`_esdf`).
-        `_esdf` is built with `sampling=self.resolution`, so values are already
-        in world units. Inflation cells are exactly the free cells with
-        0 < esdf <= inflation_radius, so subtracting `inflation_radius` and
-        clipping to >= 0 collapses both obstacles and inflation to distance 0.
-
-        The ESDF is sampled with **linear interpolation** (bilinear in 2D,
-        trilinear in 3D) at the point's continuous grid coordinate. This avoids
-        the up-to-`sqrt(dim) * resolution/2` quantization error of evaluating
-        at the containing cell center, and makes the rejection probability
-        used by the Halton sampler vary smoothly with position.
-
-        Out-of-bounds points are reported as distance 0.
-
-        Args:
-            p: a single world point as a tuple/1-D array of length `dim`,
-               or a (N, dim) array of points.
-        Returns:
-            float if `p` is 1-D, else (N,) numpy array of floats.
-        """
-        if not getattr(self, "_esdf_initialized", False):
-            self.update_esdf()
-            self._esdf_initialized = True
-
-        arr = np.asarray(p, dtype=float)
-        single = arr.ndim == 1
-        pts = np.atleast_2d(arr)
-
-        bounds_lo = np.asarray(self.bounds, dtype=float)[:, 0]
-        inv_res = 1.0 / float(self.resolution)
-        # Continuous grid coords; cell centers are at integer indices.
-        grid_f = (pts - bounds_lo) * inv_res - 0.5
-
-        shape = np.asarray(self.shape, dtype=int)
-        in_bounds = np.all(
-            (grid_f >= -0.5) & (grid_f <= shape.astype(float) - 0.5), axis=1
-        )
-
-        # map_coordinates wants (D, N); order=1 = linear, cval=0 -> outside is wall.
-        esdf_at_pts = map_coordinates(
-            self._esdf, grid_f.T, order=1, mode="nearest"
-        ).astype(float)
-        raw = esdf_at_pts - float(self.inflation_radius)
-        dists = np.where(in_bounds, np.clip(raw, 0.0, None), 0.0)
-
-        return float(dists[0]) if single else dists
-
     def is_expandable(self, point, src_point = None) -> bool | np.ndarray:
         """
         Check if a point is expandable.
@@ -565,9 +508,9 @@ class GraphSamplerBase(Grid):
         rejected_weighted_samples = []
         halton_sampler = None
         is_halton = roadmap_type is not None and 'halton' in roadmap_type
-        oversample = 1
         max_outer_iters = 20
         outer_iter = 0
+        oversample=1
         while num_nodes < self.sample_num:
             outer_iter += 1
             if outer_iter > max_outer_iters:
@@ -579,16 +522,15 @@ class GraphSamplerBase(Grid):
             if is_halton:
                 halton_cfg = self.sampling_dist_dict.get('halton', {})
                 needed = self.sample_num - num_nodes
-                points, halton_sampler = halton_sampling(
+                points, halton_sampler = sample_halton_nodes(
+                    self,
                     needed,
-                    self.min_wall_distance,
-                    bounds,
-                    d_min=halton_cfg.get('d_min', 0.3),
-                    d_opt=halton_cfg.get('d_opt', 0.4),
-                    sigma=halton_cfg.get('sigma', 0.5),
-                    floor=halton_cfg.get('floor', 0.2),
-                    halton_sampler=halton_sampler,
+                    halton_cfg.get('d_min', 0.3),
+                    halton_cfg.get('d_opt', 0.4),
+                    halton_cfg.get('sigma', 0.5),
+                    halton_cfg.get('floor', 0.2),
                     oversample=oversample,
+                    halton_sampler=halton_sampler,
                 )
             else:
                 points,num_weighted_samples = self.sample_from_prob_map(prob_map,samp_from_prob_map_ratio)

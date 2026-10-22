@@ -1,41 +1,17 @@
 import numpy as np
 from itertools import product
+from path_planning.common.environment.map.numbaUtil import _world_min_wall_distance
 from path_planning.common.environment.node import Node
 from python_motion_planning.common import TYPES
 from typing import List
 from typing import TYPE_CHECKING
+from scipy.stats import qmc
 
 if TYPE_CHECKING:
     from path_planning.common.environment.map.graph_sampler_base import GraphSamplerBase 
 
-    
-def get_random_nodes(self) -> List[Node]:
-    if len(self.nodes) >= self.sample_num:
-        return self.nodes[:self.sample_num]
-    print("Warning: number of nodes is less than sample num")
-    return self.nodes
 
-def sample_grid_nodes(graph_map: "GraphSamplerBase"):
-
-    grid_shape = graph_map.shape
-    grid_ranges = [np.arange(grid_shape[d]) for d in range(graph_map.dim)]
-    grid_points = np.array(np.meshgrid(*grid_ranges, indexing='ij')).reshape(graph_map.dim,-1).T
-    world_grid_points = graph_map.path_map_to_world(grid_points)
-    num_grid_points = len(world_grid_points)
-    
-    expandable_mask = graph_map.is_expandable(grid_points)
-    accepted_nodes = []
-    accepted_world_grid_points = []
-    for ii in range(num_grid_points):
-        if expandable_mask[ii]:
-            node = Node(world_grid_points[ii], None, 0, 0)
-            accepted_nodes.append(node)
-            accepted_world_grid_points.append(world_grid_points[ii])
-
-    return accepted_nodes, accepted_world_grid_points
-
-
-def boundary_vertices(graph_map: "GraphSamplerBase", include_map_edge: bool = True):
+def boundary_vertices(type_map: np.ndarray, include_map_edge: bool = True):
     """Lattice vertices on the outline of free space, with a corner flag.
 
     The outline of free space is the set of cell faces between a free cell
@@ -62,7 +38,6 @@ def boundary_vertices(graph_map: "GraphSamplerBase", include_map_edge: bool = Tr
         free_dir: (K, dim) int in {-1, 0, +1}, the direction from the vertex
             into free space (wall normal on an edge, diagonal at a corner).
     """
-    type_map = graph_map.type_map.data
     blocked = (type_map == TYPES.OBSTACLE) | (type_map == TYPES.INFLATION)
     dim = blocked.ndim
     # Pad by one cell: outside the map counts as blocked (map edge is part of
@@ -117,6 +92,90 @@ def boundary_vertices(graph_map: "GraphSamplerBase", include_map_edge: bool = Tr
     return vertices, is_corner, free_dir
 
 
+def density_probability(d, d_min, d_opt, sigma, floor):
+    """Vectorized Gaussian-shaped probability of accepting a sample with wall distance `d`.
+    Returns 0 wherever d < d_min."""
+    d_arr = np.asarray(d, dtype=float)
+    prob = floor + (1.0 - floor) * np.exp(-((d_arr - d_opt) ** 2) / (2.0 * sigma ** 2))
+    prob = np.where(d_arr < d_min, 0.0, prob)
+    if np.isscalar(d) or np.ndim(d) == 0:
+        return float(prob)
+    return prob
+
+
+def get_random_nodes(self) -> List[Node]:
+    if len(self.nodes) >= self.sample_num:
+        return self.nodes[:self.sample_num]
+    print("Warning: number of nodes is less than sample num")
+    return self.nodes
+
+def sample_halton_nodes(graph_map: "GraphSamplerBase",
+        n_samples,
+        d_min=0.3,
+        d_opt=0.4,
+        sigma=0.5,
+        floor=0.2,
+        halton_sampler=None,
+        oversample=1,
+    ):
+    """Draw `n_samples` Halton points scaled to `bounds`, then apply distance-based
+    rejection sampling so points near obstacles/inflation are unlikely to be kept.
+
+    The Halton sampler is persisted across calls — pass the returned sampler back
+    in to continue the deterministic sequence (otherwise repeated calls would
+    return the same points).
+    """
+    bounds = np.asarray(graph_map.bounds, dtype=float)
+    dim = graph_map.dim
+    if halton_sampler is None:
+        halton_sampler = qmc.Halton(d=dim, scramble=False)
+
+    n_draw = int(max(1, n_samples * max(1, oversample)))
+    raw = halton_sampler.random(n_draw)
+    samples = qmc.scale(raw, bounds[:, 0], bounds[:, 1])
+
+    # d_min <= 0 only removes the hard cutoff near the inflation; the
+    # Gaussian preference (d_opt / sigma / floor) still shapes the density.
+    # Numba kernel: (N, dim) float64 points, flattened ESDF (the lazy property
+    # keeps it current), applied inflation radius, float64 bounds, int64 shape.
+    dists = _world_min_wall_distance(
+        np.ascontiguousarray(samples, dtype=np.float64),
+        graph_map._esdf_flat(),
+        float(graph_map.inflation_radius),
+        bounds,
+        float(graph_map.resolution),
+        graph_map._shape_array,
+    )
+    probs = density_probability(dists, d_min, d_opt, sigma, floor)
+    accept = np.random.random(len(samples)) < probs
+
+    # accepted_nodes = []
+    # for point in samples[accept]:
+    #     if graph_map.is_expandable(point):
+    #         node = Node(point, None, 0, 0)
+    #         accepted_nodes.append(node)
+
+    return samples[accept], halton_sampler
+
+def sample_grid_nodes(graph_map: "GraphSamplerBase"):
+
+    grid_shape = graph_map.shape
+    grid_ranges = [np.arange(grid_shape[d]) for d in range(graph_map.dim)]
+    grid_points = np.array(np.meshgrid(*grid_ranges, indexing='ij')).reshape(graph_map.dim,-1).T
+    world_grid_points = graph_map.path_map_to_world(grid_points)
+    num_grid_points = len(world_grid_points)
+    
+    expandable_mask = graph_map.is_expandable(grid_points)
+    accepted_nodes = []
+    accepted_world_grid_points = []
+    for ii in range(num_grid_points):
+        if expandable_mask[ii]:
+            node = Node(world_grid_points[ii], None, 0, 0)
+            accepted_nodes.append(node)
+            accepted_world_grid_points.append(world_grid_points[ii])
+
+    return accepted_nodes, accepted_world_grid_points
+
 def sample_boundary_nodes(graph_map: "GraphSamplerBase", include_map_edge: bool = True,
                           corners_only: bool = False, inset: float = 1e-3):
     """Nodes on the outline of free space: its corners and the points every
@@ -134,7 +193,7 @@ def sample_boundary_nodes(graph_map: "GraphSamplerBase", include_map_edge: bool 
     Returns:
         (nodes, world_points): parallel lists, one entry per kept vertex.
     """
-    vertices, is_corner, free_dir = boundary_vertices(graph_map, include_map_edge)
+    vertices, is_corner, free_dir = boundary_vertices(graph_map.type_map.data, include_map_edge)
     if corners_only:
         vertices, free_dir = vertices[is_corner], free_dir[is_corner]
     if vertices.shape[0] == 0:

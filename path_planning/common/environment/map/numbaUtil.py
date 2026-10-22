@@ -4,6 +4,7 @@ import time
 
 import numpy as np
 from scipy import ndimage
+from scipy.ndimage import map_coordinates
 
 try:
     from numba import njit as _numba_njit
@@ -234,3 +235,72 @@ def _grid_vector_is_expandable(
         )
 
     return mask
+
+
+
+@_njit(cache=True)
+def _world_min_wall_distance(pts: np.ndarray, esdf: np.ndarray, inflation_radius: float,
+                             bounds: np.ndarray, resolution: float, shape: np.ndarray) -> np.ndarray:
+    """World-unit distance from (N, dim) world points to the nearest
+    OBSTACLE-or-INFLATION cell, numba kernel behind
+    ``GraphSamplerBase.min_wall_distance``.
+
+    The ESDF (world units, cell centres at integer grid coordinates) is
+    sampled with multilinear interpolation (bilinear in 2-D, trilinear in
+    3-D) at each point's continuous grid coordinate, clamping the corner
+    indices to the map like ``scipy.ndimage.map_coordinates(order=1,
+    mode="nearest")``. Subtracting ``inflation_radius`` and clipping at 0
+    collapses obstacle and inflation cells to distance 0. Points outside the
+    map (more than half a cell past the outermost centres) get distance 0.
+
+    ``esdf`` must be flattened C-order (``grid._esdf_flat()``); ``shape`` is
+    the map shape as an int64 array.
+    """
+    n, dim = pts.shape
+    out = np.zeros(n, dtype=np.float64)
+    inv_res = 1.0 / resolution
+    n_corners = 1 << dim
+    lo = np.empty(dim, dtype=np.int64)
+    frac = np.empty(dim, dtype=np.float64)
+
+    # C-order strides of the flattened esdf
+    strides = np.empty(dim, dtype=np.int64)
+    acc = 1
+    for d in range(dim - 1, -1, -1):
+        strides[d] = acc
+        acc *= shape[d]
+
+    for i in range(n):
+        inside = True
+        for d in range(dim):
+            g = (pts[i, d] - bounds[d, 0]) * inv_res - 0.5      # continuous grid coordinate
+            if g < -0.5 or g > shape[d] - 0.5:
+                inside = False
+                break
+            f = np.floor(g)
+            lo[d] = np.int64(f)
+            frac[d] = g - f
+        if not inside:
+            continue                                            # out of bounds -> 0
+
+        value = 0.0
+        for c in range(n_corners):
+            w = 1.0
+            flat = 0
+            for d in range(dim):
+                if (c >> d) & 1:
+                    idx = lo[d] + 1
+                    w *= frac[d]
+                else:
+                    idx = lo[d]
+                    w *= 1.0 - frac[d]
+                if idx < 0:                                     # mode="nearest"
+                    idx = 0
+                elif idx >= shape[d]:
+                    idx = shape[d] - 1
+                flat += idx * strides[d]
+            value += w * esdf[flat]
+
+        dist = value - inflation_radius
+        out[i] = dist if dist > 0.0 else 0.0
+    return out
