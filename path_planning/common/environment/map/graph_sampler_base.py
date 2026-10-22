@@ -932,7 +932,7 @@ class GraphSamplerBase(Grid):
     def generate_custom_nodes(self,points: List[int],filter_points: bool = True):
         # filter_points=False keeps every point (preserving the caller's edge
         # indexing) -- for points taken from an already-validated roadmap,
-        # which may legally contain nodes point_expandable rejects (e.g. RRG
+        # which may legally contain nodes in_collision rejects (e.g. RRG
         # nodes slightly outside the bounds); load_graph_sampler never
         # filters such nodes either.
         num_nodes = 0
@@ -946,7 +946,7 @@ class GraphSamplerBase(Grid):
             else:
                 current = tuple(points[ii])
             node = Node(current,None,0,0)
-            if not filter_points or self.point_expandable(tuple(pos)):
+            if not filter_points or not self.in_collision(tuple(pos)):
                 nodes.append(node)
                 self.node_index_dict[node] = len(nodes) - 1
                 num_nodes += 1

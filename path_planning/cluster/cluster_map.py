@@ -128,7 +128,7 @@ def build_cluster_map(
     fresh.set_start(starts)  # before generate_custom_nodes: it appends/dedupes
     fresh.set_goal(goals)    # endpoint nodes against start/goal itself
     # filter_points=False: the points come from the source map's validated
-    # roadmap, which may legally hold nodes point_expandable rejects (e.g.
+    # roadmap, which may legally hold nodes in_collision rejects (e.g.
     # RRG nodes slightly outside the bounds); dropping any would shift every
     # later index and corrupt the edge list.
     nodes = fresh.generate_custom_nodes(points, filter_points=False)
@@ -137,7 +137,7 @@ def build_cluster_map(
     got = np.asarray([n.current for n in nodes[: len(points)]], dtype=float)
     if len(nodes) < len(points) or not np.allclose(got, expected, atol=1e-9):
         raise RuntimeError(
-            f"{method}: distilled points rejected by point_expandable "
+            f"{method}: distilled points rejected by in_collision "
             f"({len(nodes)} nodes for {len(points)} points); refusing to save "
             f"a roadmap with misaligned edge indices"
         )

@@ -429,7 +429,7 @@ class SippGraph(object):
                     self.sipp_graph[position].split_interval(t1, t2,1)
 
     def is_valid_position(self, position):
-        return not self.graph_map.in_collision_point(position)
+        return not self.graph_map.in_collision(position)
 
     def get_valid_neighbours(self, position):
         neighbors = []

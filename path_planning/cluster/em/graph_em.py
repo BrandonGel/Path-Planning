@@ -18,7 +18,7 @@ components:
 - FREE components: additional clusters whose center tracks the
   responsibility-weighted mean of the node coordinates. The continuous
   centroid is kept when it lies in free space (boundary-inclusive
-  ``GraphSampler.point_expandable``); otherwise the center falls back to
+  ``GraphSampler.in_collision``); otherwise the center falls back to
   the member node nearest the mean, so a center never sits inside an
   obstacle.
 
@@ -635,7 +635,7 @@ class GraphEM:
             new_sources[k] = nearest
             taken.add(nearest)
             placed.append(self._points[nearest])
-            if self.map.point_expandable(tuple(mean)):
+            if not self.map.in_collision(tuple(mean)):
                 centers[k] = mean
                 snapped[k] = False
             else:

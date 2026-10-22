@@ -145,7 +145,7 @@ class TestGraphEM(unittest.TestCase):
                     em.centers[k], em._points[em.center_node_indices[k]]
                 )
             else:
-                self.assertTrue(self.map_.point_expandable(tuple(em.centers[k])))
+                self.assertFalse(self.map_.in_collision(tuple(em.centers[k])))
 
     def test_convergence(self):
         em = self.em

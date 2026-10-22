@@ -8,7 +8,7 @@ Dijkstra) instead of Euclidean space, with two kinds of centers:
   endpoint seeds.
 - FREE centers: additional clusters whose center tracks the mean of the
   member node coordinates. The continuous centroid is kept when it lies in
-  free space (boundary-inclusive ``GraphSampler.point_expandable``);
+  free space (``GraphSampler.in_collision``);
   otherwise the center falls back to the member node nearest the mean, so a
   center never sits inside an obstacle.
 
@@ -348,7 +348,7 @@ class GraphKMeans:
             )
             new_sources[k] = nearest
             taken.add(nearest)
-            if self.map.point_expandable(tuple(mean)):
+            if not self.map.in_collision(tuple(mean)):
                 new_center = mean
                 snapped[k] = False
             else:

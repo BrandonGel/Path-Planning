@@ -100,7 +100,7 @@ class TestGraphKMeans(unittest.TestCase):
                     km.centers[k], km._points[km.center_node_indices[k]]
                 )
             else:
-                self.assertTrue(self.map_.point_expandable(tuple(km.centers[k])))
+                self.assertFalse(self.map_.in_collision(tuple(km.centers[k])))
 
     def test_convergence(self):
         km = self.km

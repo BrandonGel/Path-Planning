@@ -171,7 +171,7 @@ def is_valid_coord(graph_map: GraphSampler, coord: Coord) -> bool:
         True if the coordinate is within bounds and represents a passable cell,
         False otherwise.
     """
-    return not graph_map.in_collision_point(coord)
+    return not graph_map.in_collision(coord)
 
 def get_neighbors(graph_map: GraphSampler, coord: Coord) -> list[Coord]:
     """Get all valid neighboring coordinates (4-connected).

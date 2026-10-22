@@ -9,7 +9,7 @@ token-passing logic operates on any roadmap exposed by
 grid, PRM, CDT, RRG, etc.
 
 Spatial primitives are point tuples taken from ``Node.current``. Obstacles are
-checked through ``graph_map.in_collision_point``. The heuristic is Euclidean
+checked through ``graph_map.in_collision``. The heuristic is Euclidean
 over node points. The neural-encoder guidance path is optional and goes through
 a ``GridOverlay`` so the U-Net can still run on non-grid graphs (the encoder
 itself stays 2D-image-based).
@@ -1213,7 +1213,7 @@ class NeuralATTF:
             d = float(np.linalg.norm(np.asarray(cand) - pt))
             if d <= 1e-9:
                 continue
-            if self.graph_map.in_collision_point(cand):
+            if self.graph_map.in_collision(cand):
                 continue
             if fp_tree is not None and fp_tree.query_ball_point(np.asarray(cand, dtype=float), clearance):
                 continue

@@ -439,7 +439,7 @@ def build_gnn_cluster_map(source_map: GraphSampler, agents: List[dict], model,
     got = np.asarray([n.current for n in nodes[: len(points)]], dtype=float)
     if len(nodes) < len(points) or not np.allclose(got, expected, atol=1e-9):
         raise RuntimeError(
-            f"{embedding_method}: distilled points rejected by point_expandable "
+            f"{embedding_method}: distilled points rejected by in_collision "
             f"({len(nodes)} nodes for {len(points)} points); refusing to save "
             f"a roadmap with misaligned edge indices"
         )

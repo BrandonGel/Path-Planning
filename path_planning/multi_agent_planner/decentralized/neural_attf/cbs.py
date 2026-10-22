@@ -9,7 +9,7 @@ Wraps the GraphSampler-based centralized CBS Environment with:
     across token-passing iterations.
 
 Bounds and static collision are inherited from the base via
-``graph_map.in_collision_point``; we do not re-check rectangular bounds.
+``graph_map.in_collision``; we do not re-check rectangular bounds.
 """
 
 from typing import Callable, Iterable, Optional, Union
@@ -83,7 +83,7 @@ class Environment(EnvironmentBase):
             return False
         if (pt[0], pt[1], state.time) in self.moving_obstacles:
             return False
-        if self.graph_map.in_collision_point(pt):
+        if self.graph_map.in_collision(pt):
             return False
         return VertexConstraint(state.time, state.location) not in self.constraints.vertex_constraints
 

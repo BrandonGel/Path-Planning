@@ -118,13 +118,13 @@ def point_free(map_, point: np.ndarray, cfg: GeometryConfig) -> bool:
 def points_free(map_, pts: np.ndarray, cfg: GeometryConfig) -> np.ndarray:
     """Vectorized free-point check over an (N, dim) batch.
 
-    The inflation-mode branch does the ``in_collision_point``-style
+    The inflation-mode branch does the ``in_collision``-style
     OBSTACLE/INFLATION type-map lookup in one numpy pass, but is
     **boundary-inclusive**: a point lying exactly on a cell boundary touches
     up to ``2^dim`` cells and counts as free if ANY of them is free.
     ``generate_planar_map`` (CDT) places roadmap nodes exactly on the
     free/blocked cell boundary (e.g. corner vertices like (49.0, 2.0)), and
-    plain ``in_collision_point`` rounding drops them into the blocked cell —
+    plain ``in_collision`` rounding drops them into the blocked cell —
     while the map's DDA edge checks accept them. Out-of-bounds points count
     as not free.
     """
