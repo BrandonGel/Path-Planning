@@ -10,11 +10,19 @@ try:
 except Exception:  # pragma: no cover - keeps import compatibility without numba.
     _numba_njit = None
 
-from python_motion_planning.common.env.map.base_map import BaseMap
-from python_motion_planning.common.env import Node, TYPES
-from python_motion_planning.common.utils.geometry import Geometry
 from python_motion_planning.common.env.map.grid import _njit, _grid_world_to_map_int, _grid_is_expandable
 
+def convert_np_to_tuple(array: np.ndarray) -> list:
+    """(N, dim) array -> list of N tuples of Python scalars.
+
+    ``tolist()`` converts every element in C in one call; transposing first
+    makes ``zip`` regroup the columns back into one tuple per row. ~5x faster
+    than a per-element generator.
+    """
+    array = np.asarray(array)
+    if array.ndim != 2:
+        raise ValueError(f"expected an (N, dim) array, got shape {array.shape}")
+    return list(zip(*array.T.tolist()))
 
 @_njit(cache=True)
 def _world_line_of_sight(p1: np.ndarray, p2: np.ndarray, bounds: np.ndarray, resolution: float, shape: np.ndarray) -> np.ndarray:

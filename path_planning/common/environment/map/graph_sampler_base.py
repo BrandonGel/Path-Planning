@@ -12,8 +12,8 @@ from python_motion_planning.common import TYPES
 from path_planning.utils.cgal_sweep import CGAL_Sweep
 from path_planning.common.environment.map.cdt import get_boundary, get_planar_graph
 from path_planning.global_planner.sample_search.rrg import RRG
-from python_motion_planning.common.env.map.grid import _njit, _grid_line_of_sight, _grid_in_collision, _grid_is_expandable
-from path_planning.common.environment.map.numbaUtil import _world_line_of_sight, _world_in_collision, _grid_vector_is_expandable
+from python_motion_planning.common.env.map.grid import _njit, _grid_line_of_sight, _grid_in_collision, _grid_is_expandable, _grid_path_map_to_world, _grid_world_to_map_int, _grid_path_world_to_map_int, _grid_path_world_to_map_float
+from path_planning.common.environment.map.numbaUtil import _world_line_of_sight, _world_in_collision, _grid_vector_is_expandable, convert_np_to_tuple
 
 
 from path_planning.common.environment.map.node_sampling import sample_grid_nodes, sample_boundary_nodes
@@ -377,6 +377,53 @@ class GraphSamplerBase(Grid):
             TYPES.INFLATION,
             self.strict_collision
         )
+
+    def path_map_to_world(self, path) -> List[Tuple[float, ...]]:
+        """
+        Convert path from map coordinates to world coordinates.
+
+        Same contract as ``Grid.path_map_to_world`` (cell (r, c) -> its centre),
+        but the (N, dim) result is converted with ``convert_np_to_tuple``
+        instead of a per-element generator.
+
+        Args:
+            path: a list of map coordinates, or an (N, dim) array
+        
+        Returns:
+            path: a list of world coordinates
+        """
+        points = np.asarray(path, dtype=np.float64)
+        if points.size == 0:
+            return []
+        if points.ndim != 2 or points.shape[1] != self.dim:
+            raise ValueError("Point dimension does not match map dimension.")
+
+        path_world = _grid_path_map_to_world(points, self.bounds, self.resolution)
+        return convert_np_to_tuple(path_world)
+
+    def path_world_to_map(self, path: List[Tuple[float, ...]], discrete: bool = True) -> List[tuple]:
+        """
+        Convert path from world coordinates to map coordinates
+
+        Args:
+            path: a list of world coordinates
+            discrete: whether to round the coordinates to the nearest integer
+        
+        Returns:
+            path: a list of map coordinates
+        """
+        points = np.asarray(path, dtype=np.float64)
+        if points.size == 0:
+            return []
+        if points.ndim != 2 or points.shape[1] != self.dim:
+            raise ValueError("Point dimension does not match map dimension.")
+
+        if discrete:
+            path_map = _grid_path_world_to_map_int(points, self.bounds, self.resolution, self._shape_array)
+            return convert_np_to_tuple(path_map)
+        else:
+            path_map = _grid_path_world_to_map_float(points, self.bounds, self.resolution)
+            return convert_np_to_tuple(path_map)
 
     # Sample points from the probability map if provided, and the rest from uniform distribution
     # Cumulative sum of the probability map is 1

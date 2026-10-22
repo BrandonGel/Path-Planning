@@ -8,11 +8,6 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from path_planning.common.environment.map.graph_sampler_base import GraphSamplerBase 
 
-# def convert_np_to_tuple(array: np.ndarray) -> tuple:
-#     grid_points = [tuple[int, ...](int(p) for p in pt) for pt in grid_points.reshape(self.dim,-1).T]
-#     return tuple(int(p) for p in array)
-
-
     
 def get_random_nodes(self) -> List[Node]:
     if len(self.nodes) >= self.sample_num:
