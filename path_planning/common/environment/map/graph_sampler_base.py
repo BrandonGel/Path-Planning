@@ -12,7 +12,8 @@ from python_motion_planning.common import TYPES
 from path_planning.utils.cgal_sweep import CGAL_Sweep
 from path_planning.common.environment.map.cdt import get_boundary, get_planar_graph
 from path_planning.global_planner.sample_search.rrg import RRG
-from path_planning.common.environment.map.numbaUtil import line_of_sight
+from python_motion_planning.common.env.map.grid import _njit, _grid_line_of_sight, _grid_in_collision
+from path_planning.common.environment.map.numbaUtil import _world_line_of_sight, _world_in_collision
 import faiss
 import pickle
 
@@ -332,16 +333,7 @@ class GraphSamplerBase(Grid):
 
     def line_of_sight(self, p1: Tuple[float, ...], p2: Tuple[float, ...]) -> List[Tuple[int, ...]]:
         """
-        Cells crossed by the line of sight between two world points (DDA).
-
-        Runs Amanatides-Woo DDA in continuous grid-index space. When the segment
-        passes exactly through a cell corner (equal tMax on several axes) the
-        traversal steps along all tied axes at once, i.e. diagonally through the
-        corner, so the result is symmetric in p1/p2. Cells touched only at that
-        corner point are not reported, which lets a segment pass between two
-        obstacle cells that touch only at a corner. Traversal stops at the first
-        non-expandable cell, which is kept in the result.
-
+        Check if two world points are in line of sight.
         Args:
             p1: Start point of the line (world coordinates).
             p2: End point of the line (world coordinates).
@@ -349,210 +341,39 @@ class GraphSamplerBase(Grid):
         Returns:
             cells: Grid indices crossed by the segment, start cell first.
         """
-        dim = self.dim
-        if len(p1) != dim or len(p2) != dim:
-            raise ValueError(f"Points must have dimension {dim}")
-
-        # DDA runs in continuous grid-index space where each cell occupies the
-        # unit interval [k, k+1]. Transforming world coords up front keeps the
-        # existing integer-boundary traversal correct under non-unit resolution
-        # and non-zero bounds origin.
-        inv_res = 1.0 / float(self.resolution)
-        bounds_lo = np.asarray(self.bounds, dtype=float)[:, 0]
-        p1_arr = (np.array(p1, dtype=float) - bounds_lo) * inv_res
-        p2_arr = (np.array(p2, dtype=float) - bounds_lo) * inv_res
-
-        # Start/end cells use the same world->cell convention as the rest of
-        # the map (world_to_map rounds to the nearest cell centre and clips).
-        p1_grid = np.array(self.world_to_map(tuple(p1), discrete=True), dtype=int)
-        p2_grid = np.array(self.world_to_map(tuple(p2), discrete=True), dtype=int)
-        current_tile = p1_grid.copy()
-        
-        # Calculate deltas
-        delta = p2_arr - p1_arr
-        
-        # Calculate step direction
-        step = np.sign(delta).astype(int)
-        step[delta == 0] = 0
-        
-        # Distance from p1 to the next boundary of its *cell* along each axis.
-        # Measured against p1_grid (not ceil/floor of p1_arr) so the traversal
-        # stays consistent with the chosen start cell, including when p1 lies
-        # exactly on a cell boundary.
-        offset = np.where(delta > 0, 
-                         (p1_grid + 1) - p1_arr,
-                         p1_arr - p1_grid)
-        
-        # Calculate tMax and tDelta (vectorized)
-        abs_delta = np.abs(delta)
-        non_zero_mask = abs_delta > 1e-10
-        
-        tMax = np.full(dim, float('inf'), dtype=float)
-        tDelta = np.full(dim, float('inf'), dtype=float)
-        
-        tMax[non_zero_mask] = offset[non_zero_mask] / abs_delta[non_zero_mask]
-        tDelta[non_zero_mask] = 1.0 / abs_delta[non_zero_mask]
-        
-        # Every iteration advances at least one axis by one cell, so the
-        # Manhattan distance bounds the number of iterations.
-        dist = int(np.sum(np.abs(p2_grid - p1_grid)))
-        tie_eps = 1e-9
-        
-        # Track visited tiles in traversal order
-        visited = [tuple(int(x) for x in current_tile)]
-        seen = {visited[0]}
-        
-        # Traverse with early termination
-        for _ in range(dist):
-            if np.array_equal(current_tile, p2_grid):
-                break
-            t_min = np.min(tMax)
-            if not np.isfinite(t_min):
-                break
-            
-            # All axes whose boundary is hit at (numerically) the same parameter.
-            # A single axis is the normal case; several axes mean the segment
-            # passes exactly through a corner and we step diagonally through it.
-            tied = np.flatnonzero(tMax <= t_min + tie_eps)
-            # Never step an axis past its end cell: a crossing at exactly t=1
-            # (end point on a boundary) must not enter the cell beyond p2.
-            tied = tied[current_tile[tied] != p2_grid[tied]]
-            if tied.size == 0:
-                break
-            current_tile[tied] += step[tied]
-            tMax[tied] += tDelta[tied]
-            
-            # Check collision immediately (early termination)
-            tile_tuple = tuple(int(x) for x in current_tile)
-            if tile_tuple not in seen:
-                seen.add(tile_tuple)
-                visited.append(tile_tuple)
-                if not self.is_expandable(tile_tuple):
-                    break # Found collision, terminate early
-        return visited
-
-    def in_collision_point(self, point: Tuple[float, ...]) -> bool:
-        """
-        Check if the point is in collision.
-        """
-        return not self.is_expandable(self.world_to_map(point,discrete=True))
-
-    def point_expandable(self, point: Tuple[float, ...]) -> bool:
-        """
-        Check if the point is expandable.
-        """
-        inv_res = 1.0 / float(self.resolution)
-        eps = 1e-9
-        cands = []
-        for d in range(self.dim):
-            c = (float(point[d]) - float(self.bounds[d, 0])) * inv_res - 0.5
-            lo, hi = int(round(c - eps)), int(round(c + eps))
-            cands.append((lo,) if lo == hi else (lo, hi))
-        return any(self.is_expandable(idx) for idx in product(*cands))
+        p1_array = np.asarray(p1, dtype=np.float64)
+        p2_array = np.asarray(p2, dtype=np.float64)
+        points = _world_line_of_sight(p1_array, p2_array, np.asarray(self.bounds, dtype=np.float64), self.resolution, np.asarray(self.shape, dtype=int))
+        return [tuple(int(x) for x in points[i]) for i in range(points.shape[0])]
 
     def in_collision(self, p1: Tuple[float, ...], p2 : Tuple[float, ...] = None) -> bool:
         """
-        Check if the line of sight between two continuous (world) points is in collision
-        using DDA (Digital Differential Analyzer) grid traversal to check all tiles the line crosses.
-        Optimized version with early termination on first collision.
+        Check if the line of sight between two points is in collision.
         
         Args:
-            p1: Start point in continuous (world) coordinates
-            p2: End point in continuous (world) coordinates
+            p1: Start point of the line.
+            p2: End point of the line.
         
         Returns:
-            in_collision: True if any tile along the line is in collision, False otherwise
+            in_collision: True if the line of sight is in collision, False otherwise.
         """
-        
-        # Check if start point has the correct dimension
-        dim = self.dim
-
+        p1_array = np.asarray(p1, dtype=np.float64)
         if p2 is None:
-            return not self.is_expandable(self.world_to_map(p1,discrete=True))
-        
-        # Check if end point has the correct dimension
-        if  len(p1) != dim and len(p2) != dim:
-            raise ValueError(f"End point must have dimension {dim}")
+            p2 = p1
+        p2_array = np.asarray(p2, dtype=np.float64)
 
-        # DDA runs in continuous grid-index space where each cell occupies the
-        # unit interval [k, k+1]. Transforming world coords up front keeps the
-        # existing integer-boundary traversal correct under non-unit resolution
-        # and non-zero bounds origin.
-        inv_res = 1.0 / float(self.resolution)
-        bounds_lo = np.asarray(self.bounds, dtype=float)[:, 0]
-        p1_arr = (np.array(p1, dtype=float) - bounds_lo) * inv_res
-        p2_arr = (np.array(p2, dtype=float) - bounds_lo) * inv_res
-
-        shape_arr = np.asarray(self.shape, dtype=int)
-        p1_grid = np.clip(np.floor(p1_arr).astype(int), 0, shape_arr - 1)
-        p2_grid = np.clip(np.floor(p2_arr).astype(int), 0, shape_arr - 1)
-        
-        # Calculate deltas
-        delta = p2_arr - p1_arr
-        
-        # Calculate step direction
-        step = np.sign(delta).astype(int)
-        step[delta == 0] = 0
-        
-        # Calculate offsets to next grid boundary (vectorized)
-        # Need to account for how the map converts coordinates
-        # For DDA, we need the offset in world space to the next grid cell
-        offset = np.where(delta > 0, 
-                         np.ceil(p1_arr) - p1_arr,
-                         p1_arr - np.floor(p1_arr))
-        
-        # Calculate tMax and tDelta (vectorized)
-        abs_delta = np.abs(delta)
-        non_zero_mask = abs_delta > 1e-10
-        
-        tMax = np.full(dim, float('inf'), dtype=float)
-        tDelta = np.full(dim, float('inf'), dtype=float)
-        
-        tMax[non_zero_mask] = offset[non_zero_mask] / abs_delta[non_zero_mask]
-        tDelta[non_zero_mask] = 1.0 / abs_delta[non_zero_mask]
-        if np.all(np.abs(tMax) < 1e-10):
-            tMax = abs_delta*1e-10
-        
-        # Calculate distance (Manhattan distance in grid space)
-        dist = int(np.sum(np.abs(p2_grid - p1_grid)))
-        
-        # Track seen tiles to avoid checking duplicates
-        current_tile = p1_grid.copy()
-        seen = {tuple(current_tile)}
-        
-        # Traverse with early termination
-        for _ in range(dist):
-            # Find dimension with minimum tMax
-            valid_dims = np.isfinite(tMax)
-            if not np.any(valid_dims):
-                break
-            
-            valid_tMax = np.where(valid_dims, tMax, np.inf)
-            min_dim = np.argmin(valid_tMax)
-
-            tied_dims = np.where(np.abs(tMax - tMax[min_dim]) < 1e-10)[0]
-            if len(tied_dims) > 1:
-                diff = p2_grid - current_tile
-                min_dim = np.argmax(np.abs(diff))
-            
-            # Step in that dimension
-            current_tile[min_dim] += step[min_dim]
-            
-            # Update tMax
-            if tDelta[min_dim] != float('inf'):
-                tMax[min_dim] += tDelta[min_dim]
-            
-            # Check collision immediately (early termination)
-            tile_tuple = tuple(current_tile)
-            if tile_tuple not in seen:
-                seen.add(tile_tuple)
-                if not self.is_expandable(tile_tuple):
-                    return True  # Found collision, terminate early
-
-            if tile_tuple == tuple(p2_grid):
-                return False
-        
-        return False  # No collision found
+        return _world_in_collision(
+            p1_array,
+            p2_array,
+            np.asarray(self.bounds, dtype=np.float64),
+            self.resolution,
+            np.asarray(self.shape, dtype=int),
+            self._type_map_flat(),
+            self._esdf_flat(),
+            TYPES.OBSTACLE,
+            TYPES.INFLATION,
+            self.strict_collision
+        )
 
     # Sample points from the probability map if provided, and the rest from uniform distribution
     # Cumulative sum of the probability map is 1
