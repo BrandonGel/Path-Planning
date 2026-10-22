@@ -193,3 +193,36 @@ def _world_in_collision(p1: np.ndarray, p2: np.ndarray, bounds: np.ndarray, reso
         if not _grid_is_expandable(current, prev, True, shape, type_map, esdf, obstacle_type, inflation_type, strict_collision):
             return True
     return False
+
+
+@_njit(cache=True)
+def _grid_vector_is_expandable(
+    points: np.ndarray,
+    src_points: np.ndarray,
+    has_src_point: bool,
+    shape: np.ndarray,
+    type_map: np.ndarray,
+    esdf: np.ndarray,
+    obstacle_type: int,
+    inflation_type: int,
+    strict_collision: bool,
+) -> np.ndarray:
+    node_num = points.shape[0]
+    mask = np.zeros(node_num, dtype=np.bool_)
+
+    assert points.shape == src_points.shape, "Points and src_points must have the same shape"
+
+    for i in range(node_num):
+        mask[i] = _grid_is_expandable(
+            points[i],
+            src_points[i],
+            has_src_point,
+            shape,
+            type_map,
+            esdf,
+            obstacle_type,
+            inflation_type,
+            strict_collision,
+        )
+
+    return mask

@@ -12,8 +12,11 @@ from python_motion_planning.common import TYPES
 from path_planning.utils.cgal_sweep import CGAL_Sweep
 from path_planning.common.environment.map.cdt import get_boundary, get_planar_graph
 from path_planning.global_planner.sample_search.rrg import RRG
-from python_motion_planning.common.env.map.grid import _njit, _grid_line_of_sight, _grid_in_collision
-from path_planning.common.environment.map.numbaUtil import _world_line_of_sight, _world_in_collision
+from python_motion_planning.common.env.map.grid import _njit, _grid_line_of_sight, _grid_in_collision, _grid_is_expandable
+from path_planning.common.environment.map.numbaUtil import _world_line_of_sight, _world_in_collision, _grid_vector_is_expandable
+
+
+from path_planning.common.environment.map.node_sampling import sample_grid_nodes
 import faiss
 import pickle
 
@@ -462,6 +465,48 @@ class GraphSamplerBase(Grid):
 
         return float(dists[0]) if single else dists
 
+    def is_expandable(self, point, src_point = None) -> bool | np.ndarray:
+        """
+        Check if a point is expandable.
+        
+        Args:
+            point: Point to check.
+            src_point: Source point.
+        
+        Returns:
+            expandable: True if the point is expandable, False otherwise.
+        """
+        has_src_point = src_point is not None
+        if isinstance(point, np.ndarray):
+            assert point.dtype == np.int64, "Point array must be int64"
+            assert src_point is None or src_point.dtype == np.int64, "Src array must be int64"
+            point_array = point.reshape(-1, self.dim)
+            src_array = point_array if src_point is None else src_point.reshape(-1, self.dim)
+            return _grid_vector_is_expandable(  
+                point_array,
+                src_array,
+                has_src_point,
+                self._shape_array,
+                self._type_map_flat(),
+                self._esdf_flat(),
+                TYPES.OBSTACLE,
+                TYPES.INFLATION,
+                self.strict_collision,
+            )
+        point_array = np.asarray(point, dtype=np.int64)
+        src_array = point_array if src_point is None else np.asarray(src_point, dtype=np.int64)
+        return _grid_is_expandable(
+            point_array,
+            src_array,
+            has_src_point,
+            self._shape_array,
+            self._type_map_flat(),
+            self._esdf_flat(),
+            TYPES.OBSTACLE,
+            TYPES.INFLATION,
+            self.strict_collision,
+        )
+
     def generateRandomNodes(self, generate_grid_nodes = False,generate_boundary_nodes = False,prob_map = None,samp_from_prob_map_ratio = 0.5,roadmap_type:str=None,boundary_node_spacing: float | None = None):
         if roadmap_type == 'rrg':
             return []
@@ -539,21 +584,18 @@ class GraphSamplerBase(Grid):
                     samp_from_prob_map_ratio = max(0.0, min(1.0, samp_from_prob_map_ratio))
 
         if generate_grid_nodes:
-            # One node per free cell, placed at the cell CENTRE in world units
-            # (map_to_world); starts/goals and snapped samples use the same frame.
-            grid_shape = self.shape
-            grid_ranges = [np.arange(grid_shape[d]) for d in range(self.dim)]
-            grid_points = np.array(np.meshgrid(*grid_ranges, indexing='ij'))
-            grid_points = [tuple[int, ...](int(p) for p in pt) for pt in grid_points.reshape(self.dim,-1).T]
-            world_grid_points = [self.map_to_world(pt) for pt in grid_points]
-            
-            for grid_pt,world_pt in zip(grid_points,world_grid_points):
-                if self.is_expandable(grid_pt):
-                    node = Node(world_pt, None, 0, 0)
-                    nodes.append(node)
-                    self.node_index_dict[node] = len(nodes) - 1
-                    self.grid_nodes_index[node] = len(nodes)-1
+            grid_nodes, world_grid_points = sample_grid_nodes(self)
+            for node, world_pt in zip(grid_nodes, world_grid_points):
+                if node in self.node_index_dict:
+                    # A snapped random sample already occupies this cell:
+                    # reuse it as the grid node instead of adding a duplicate.
+                    self.grid_nodes_index[node] = self.node_index_dict[node]
                     self.grid_points.append(world_pt)
+                    continue
+                nodes.append(node)
+                self.node_index_dict[node] = len(nodes) - 1
+                self.grid_nodes_index[node] = len(nodes) - 1
+                self.grid_points.append(world_pt)
 
         want_spacing = boundary_node_spacing is not None and boundary_node_spacing > 0
         if generate_boundary_nodes or want_spacing:
