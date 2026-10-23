@@ -80,6 +80,8 @@ class GraphSamplerBase(Grid):
         self.sample_kd_tree = None
         self.use_dijkstra = use_dijkstra
         self.sampling_dist_dict = sampling_dist_dict if sampling_dist_dict else {}
+        self._inflated_esdf = None          # cache for the inflated_esdf property
+        self._inflated_esdf_source = None   # the esdf array it was computed from
         # Task endpoints, world coords. Visualization-only metadata (no roadmap
         # side effects), populated via set_endpoints() for e.g. MAPD demos.
         self.pickups = []
@@ -92,6 +94,23 @@ class GraphSamplerBase(Grid):
     @property
     def size(self) -> int:
         return int(np.prod(self.type_map.shape))
+
+    @property
+    def inflated_esdf(self) -> np.ndarray:
+        """Largest object radius that can occupy each cell: the largest multiple
+        of ``sqrt(dim) * resolution`` strictly below the cell's wall distance,
+        since ``inflate_obstacles`` rounds the radius up to that step and blocks
+        ``esdf <= radius``. Zero inside obstacles and where nothing fits.
+
+        Cached; recomputed only when ``esdf`` is a new array, which is what
+        every ESDF update (lazy recompute, rotation) produces.
+        """
+        esdf = self.esdf
+        if self._inflated_esdf_source is not esdf:
+            step = np.sqrt(self.dim) * self.resolution
+            self._inflated_esdf = np.maximum(0.0, np.ceil(esdf / step - 1e-9) - 1) * step
+            self._inflated_esdf_source = esdf
+        return self._inflated_esdf
 
     def set_parameters(self, sample_num, num_neighbors, min_edge_len=1e-10, max_edge_len=1.0+1e-10):
         self.sample_num = sample_num
