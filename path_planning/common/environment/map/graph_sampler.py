@@ -1,7 +1,6 @@
 from typing import Any, List, Tuple
 import heapq
 import numpy as np
-from path_planning.common.environment.map.halton import halton_sampling
 from scipy.spatial import KDTree, Delaunay
 from scipy.ndimage import map_coordinates
 from path_planning.common.environment.node import Node
