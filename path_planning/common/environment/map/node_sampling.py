@@ -1,7 +1,7 @@
 import numpy as np
 from itertools import product
-from path_planning.common.environment.map.numbaUtil import _world_min_wall_distance
-from python_motion_planning.common.env.map.grid import _grid_path_map_to_world
+from path_planning.common.environment.map.numbaUtil import _world_min_wall_distance, convert_np_to_tuple
+from python_motion_planning.common.env.map.grid import _grid_path_map_to_world, _grid_path_world_to_map_int, _grid_path_world_to_map_float
 from path_planning.common.environment.node import Node
 from python_motion_planning.common import TYPES
 from typing import List
@@ -116,8 +116,14 @@ def random_sampling(graph_map: "GraphSamplerBase",
     bounds = np.asarray(graph_map.bounds, dtype=float)
     dim = graph_map.dim
     normalized_points = np.random.random((n_samples,dim))
-    points = normalized_points * (bounds[:,1] - bounds[:,0]) + bounds[:,0]
-    return points
+    world_points = normalized_points * (bounds[:,1] - bounds[:,0]) + bounds[:,0]
+    grid_points = graph_map.path_world_to_map(world_points)
+    expandable_mask = graph_map.is_expandable(grid_points)
+
+    accepted_points = graph_map.path_map_to_world(grid_points[expandable_mask]) if graph_map.use_discrete_space else world_points[expandable_mask] 
+    accepted_points = convert_np_to_tuple(accepted_points)
+    accepted_nodes = [Node(point, None, 0, 0) for point in accepted_points]
+    return accepted_nodes, accepted_points
 
 def distributed_sampling(graph_map: "GraphSamplerBase",
     n_samples,
@@ -132,10 +138,10 @@ def distributed_sampling(graph_map: "GraphSamplerBase",
     +-0.5 cell on every axis, so it stays inside that cell at any resolution.
 
     Returns:
-        (points, num_prob_map_samples): (N, dim) float array with the
-        prob-map samples first, and how many of them there are.
+        (nodes, points, num_rejected_weighted): the accepted (collision-free)
+        nodes and their world points as tuples, prob-map samples first, and
+        how many of the prob-map samples were rejected.
     """
-    bounds = np.asarray(graph_map.bounds, dtype=float)
     dim = graph_map.dim
     n_samples = int(n_samples)
     num_prob_map_samples = int(n_samples * samp_from_prob_map_ratio)
@@ -147,27 +153,36 @@ def distributed_sampling(graph_map: "GraphSamplerBase",
     prob_map_flat = prob_map.ravel()
     prob_map_flat = prob_map_flat / prob_map_flat.sum()
 
-    weighted_points = np.zeros((0, dim))
+    cells = np.zeros((n_samples, dim), dtype=np.int64)
     if num_prob_map_samples > 0:
         idx = np.random.choice(prob_map_flat.size, size=num_prob_map_samples, p=prob_map_flat)
-        cells = np.column_stack(np.unravel_index(idx, prob_map.shape)).astype(np.float64)
-        jitter = np.random.random((num_prob_map_samples, dim)) - 0.5
-        weighted_points = _grid_path_map_to_world(cells + jitter, bounds, graph_map.resolution)
+        cells[:num_prob_map_samples] = np.column_stack(np.unravel_index(idx, prob_map.shape))
 
-    unchosen_points = np.zeros((0, dim))
     if num_unchosen_samples > 0:
         unchosen_flat = 1.0 - prob_map_flat
         total = unchosen_flat.sum()
-        # Complement is all zeros only when a single cell holds all the mass;
-        # fall back to uniform rather than dividing by zero.
         unchosen_flat = unchosen_flat / total if total > 0 else np.full_like(prob_map_flat, 1.0 / prob_map_flat.size)
         idx = np.random.choice(prob_map_flat.size, size=num_unchosen_samples, p=unchosen_flat)
-        cells = np.column_stack(np.unravel_index(idx, prob_map.shape)).astype(np.float64)
-        jitter = np.random.random((num_unchosen_samples, dim)) - 0.5
-        unchosen_points = _grid_path_map_to_world(cells + jitter, bounds, graph_map.resolution)
+        cells[num_prob_map_samples:] = np.column_stack(np.unravel_index(idx, prob_map.shape))
 
-    points = np.concatenate((weighted_points, unchosen_points))
-    return points, num_prob_map_samples
+    expandable_mask = graph_map.is_expandable(cells)
+    accepted_cells = cells[expandable_mask]
+    # Number of prob-map samples that were rejected; the caller uses it to
+    # re-balance samp_from_prob_map_ratio for the next round.
+    num_rejected_weighted = int(num_prob_map_samples - expandable_mask[:num_prob_map_samples].sum())
+
+    if graph_map.use_discrete_space:
+        # Discrete nodes sit on the cell centres.
+        accepted_points = graph_map.path_map_to_world(accepted_cells)
+    else:
+        # Continuous nodes get a uniform +-0.5 cell jitter so they cover the
+        # whole cell rather than only its centre.
+        jitter = np.random.random((len(accepted_cells), dim)) - 0.5
+        accepted_points = graph_map.path_map_to_world(accepted_cells + jitter)
+    accepted_points = convert_np_to_tuple(accepted_points)
+    accepted_nodes = [Node(point, None, 0, 0) for point in accepted_points]
+
+    return accepted_nodes, accepted_points, num_rejected_weighted
 
 def sample_halton_nodes(graph_map: "GraphSamplerBase",
         n_samples,
@@ -191,11 +206,11 @@ def sample_halton_nodes(graph_map: "GraphSamplerBase",
         halton_sampler = qmc.Halton(d=dim, scramble=False)
 
     n_draw = int(max(1, n_samples * max(1, oversample)))
-    raw = halton_sampler.random(n_draw)
-    samples = qmc.scale(raw, bounds[:, 0], bounds[:, 1])
+    raw_samples = halton_sampler.random(n_draw)
+    world_point_samples = qmc.scale(raw_samples, bounds[:, 0], bounds[:, 1])
 
     dists = _world_min_wall_distance(
-        np.ascontiguousarray(samples, dtype=np.float64),
+        np.ascontiguousarray(world_point_samples, dtype=np.float64),
         graph_map._esdf_flat(),
         float(graph_map.inflation_radius),
         bounds,
@@ -203,15 +218,16 @@ def sample_halton_nodes(graph_map: "GraphSamplerBase",
         graph_map._shape_array,
     )
     probs = density_probability(dists, d_min, d_opt, sigma, floor)
-    accept = np.random.random(len(samples)) < probs
+    halton_accept = np.random.random(len(world_point_samples)) < probs
+    world_points = world_point_samples[halton_accept]
+    grid_points = graph_map.path_world_to_map(world_points)
+    expandable_mask = graph_map.is_expandable(grid_points)
 
-    # accepted_nodes = []
-    # for point in samples[accept]:
-    #     if graph_map.is_expandable(point):
-    #         node = Node(point, None, 0, 0)
-    #         accepted_nodes.append(node)
+    accepted_points = graph_map.path_map_to_world(grid_points[expandable_mask]) if graph_map.use_discrete_space else world_points[expandable_mask] 
+    accepted_points = convert_np_to_tuple(accepted_points)
+    accepted_nodes = [Node(point, None, 0, 0) for point in accepted_points]
 
-    return samples[accept], halton_sampler
+    return accepted_nodes, accepted_points, halton_sampler
 
 def sample_grid_nodes(graph_map: "GraphSamplerBase"):
 
@@ -219,18 +235,11 @@ def sample_grid_nodes(graph_map: "GraphSamplerBase"):
     grid_ranges = [np.arange(grid_shape[d]) for d in range(graph_map.dim)]
     grid_points = np.array(np.meshgrid(*grid_ranges, indexing='ij')).reshape(graph_map.dim,-1).T
     world_grid_points = graph_map.path_map_to_world(grid_points)
-    num_grid_points = len(world_grid_points)
-    
-    expandable_mask = graph_map.is_expandable(grid_points)
-    accepted_nodes = []
-    accepted_world_grid_points = []
-    for ii in range(num_grid_points):
-        if expandable_mask[ii]:
-            node = Node(world_grid_points[ii], None, 0, 0)
-            accepted_nodes.append(node)
-            accepted_world_grid_points.append(world_grid_points[ii])
 
-    return accepted_nodes, accepted_world_grid_points
+    expandable_mask = graph_map.is_expandable(grid_points)
+    accepted_points = convert_np_to_tuple(world_grid_points[expandable_mask])
+    accepted_nodes = [Node(point, None, 0, 0) for point in accepted_points]
+    return accepted_nodes, accepted_points
 
 def sample_boundary_nodes(graph_map: "GraphSamplerBase", include_map_edge: bool = True,
                           corners_only: bool = False, inset: float = 1e-3):
@@ -257,5 +266,6 @@ def sample_boundary_nodes(graph_map: "GraphSamplerBase", include_map_edge: bool 
 
     # Vertices are in the map frame; the inset is a fraction of a cell there too.
     world_points = graph_map.path_map_to_world(vertices + inset * free_dir)
+    world_points = convert_np_to_tuple(world_points)
     accepted_nodes = [Node(point, None, 0, 0) for point in world_points]
     return accepted_nodes, world_points

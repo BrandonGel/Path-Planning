@@ -203,7 +203,6 @@ def _world_in_collision(p1: np.ndarray, p2: np.ndarray, bounds: np.ndarray, reso
             return True
     return False
 
-
 @_njit(cache=True)
 def _grid_vector_is_expandable(
     points: np.ndarray,
@@ -235,8 +234,6 @@ def _grid_vector_is_expandable(
         )
 
     return mask
-
-
 
 @_njit(cache=True)
 def _world_min_wall_distance(pts: np.ndarray, esdf: np.ndarray, inflation_radius: float,

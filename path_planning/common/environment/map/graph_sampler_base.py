@@ -388,13 +388,16 @@ class GraphSamplerBase(Grid):
         Returns:
             path: a list of world coordinates
         """
+        is_array = isinstance(path, np.ndarray)
         points = np.asarray(path, dtype=np.float64)
         if points.size == 0:
-            return []
+            return np.zeros((0, self.dim), dtype=np.float64) if is_array else []
         if points.ndim != 2 or points.shape[1] != self.dim:
             raise ValueError("Point dimension does not match map dimension.")
 
         path_world = _grid_path_map_to_world(points, self.bounds, self.resolution)
+        if is_array:
+            return path_world
         return convert_np_to_tuple(path_world)
 
     def path_world_to_map(self, path: List[Tuple[float, ...]], discrete: bool = True) -> List[tuple]:
@@ -408,52 +411,25 @@ class GraphSamplerBase(Grid):
         Returns:
             path: a list of map coordinates
         """
+        is_array = isinstance(path, np.ndarray)
         points = np.asarray(path, dtype=np.float64)
         if points.size == 0:
-            return []
+            if not is_array:
+                return []
+            return np.zeros((0, self.dim), dtype=np.int64 if discrete else np.float64)
         if points.ndim != 2 or points.shape[1] != self.dim:
             raise ValueError("Point dimension does not match map dimension.")
 
         if discrete:
             path_map = _grid_path_world_to_map_int(points, self.bounds, self.resolution, self._shape_array)
+            if is_array:
+                return path_map
             return convert_np_to_tuple(path_map)
         else:
             path_map = _grid_path_world_to_map_float(points, self.bounds, self.resolution)
+            if is_array:
+                return path_map
             return convert_np_to_tuple(path_map)
-
-    # Sample points from the probability map if provided, and the rest from uniform distribution
-    # Cumulative sum of the probability map is 1
-    def sample_from_prob_map(self,prob_map=None,samp_from_prob_map_ratio=0.5):
-        bounds = np.array(self.bounds)
-        if prob_map is None:
-            normalized_points = np.random.random((self.sample_num,self.dim))
-            points = normalized_points * (bounds[:,1] - bounds[:,0]) + bounds[:,0]
-            return points,0
-        else:
-            num_prob_map_samples = int(self.sample_num * samp_from_prob_map_ratio)
-            weighted_normalized_points = np.clip(np.random.random((num_prob_map_samples,self.dim))-0.5,-0.5,0.5) + 1e-10
-            weighted_points = np.zeros((num_prob_map_samples,self.dim))
-
-            prob_map_flat = prob_map.flatten()
-            prob_map_flat /= np.sum(prob_map_flat)
-            if num_prob_map_samples > 0:
-                prob_map_indices = np.random.choice(len(prob_map_flat), size=num_prob_map_samples, p=prob_map_flat)
-                prob_map_points = np.array([np.unravel_index(idx, prob_map.shape) for idx in prob_map_indices])
-                # Convert to world coordinates
-                prob_map_points_world = np.array([self.map_to_world(tuple(point)) for point in prob_map_points])
-                weighted_points = prob_map_points_world + weighted_normalized_points
-
-            unchosen_prob_map_flat = 1 - prob_map_flat
-            unchosen_prob_map_flat /= np.sum(unchosen_prob_map_flat)
-            num_unchosen_samples = self.sample_num - num_prob_map_samples
-            unchosen_normalized_points = np.clip(np.random.random((num_unchosen_samples,self.dim))-0.5,-0.5,0.5) + 1e-10
-            unchosen_prob_map_indices = np.random.choice(len(prob_map_flat), size=num_unchosen_samples, p=unchosen_prob_map_flat)
-            unchosen_prob_map_points = np.array([np.unravel_index(idx, prob_map.shape) for idx in unchosen_prob_map_indices])
-            # Convert to world coordinates
-            unchosen_prob_map_points_world = np.array([self.map_to_world(tuple(point)) for point in unchosen_prob_map_points])
-            unchosen_prob_map_indices_weighted_points = unchosen_prob_map_points_world + unchosen_normalized_points
-            points = np.concatenate((weighted_points,unchosen_prob_map_indices_weighted_points))
-            return points,num_prob_map_samples
 
     def is_expandable(self, point, src_point = None) -> bool | np.ndarray:
         """
@@ -501,28 +477,27 @@ class GraphSamplerBase(Grid):
         if roadmap_type == 'rrg':
             return []
 
-        num_nodes = 0
-        num_weighted_samples = 0
-        bounds = np.array(self.bounds)
         nodes = []
-        rejected_weighted_samples = []
         halton_sampler = None
         is_halton = roadmap_type is not None and 'halton' in roadmap_type
         max_outer_iters = 20
         outer_iter = 0
-        oversample=1
-        while num_nodes < self.sample_num:
+        oversample = 1
+        num_rejected_weighted = 0
+        num_rejected_weighted_total = 0
+        while len(nodes) < self.sample_num:
             outer_iter += 1
             if outer_iter > max_outer_iters:
                 print(
                     f"Warning: generateRandomNodes hit max_outer_iters={max_outer_iters} "
-                    f"with {num_nodes}/{self.sample_num} nodes; continuing with what was collected."
+                    f"with {len(nodes)}/{self.sample_num} nodes; continuing with what was collected."
                 )
                 break
+
+            needed = self.sample_num - len(nodes)
             if is_halton:
                 halton_cfg = self.sampling_dist_dict.get('halton', {})
-                needed = self.sample_num - num_nodes
-                points, halton_sampler = sample_halton_nodes(
+                accepted_nodes, _, halton_sampler = sample_halton_nodes(
                     self,
                     needed,
                     halton_cfg.get('d_min', 0.3),
@@ -532,47 +507,43 @@ class GraphSamplerBase(Grid):
                     oversample=oversample,
                     halton_sampler=halton_sampler,
                 )
+                n_draw = max(1, needed * max(1, oversample))
             elif prob_map is not None:
-                points,num_weighted_samples = distributed_sampling(self, self.sample_num, prob_map, samp_from_prob_map_ratio)
+                accepted_nodes, _, num_rejected_weighted = distributed_sampling(self, self.sample_num, prob_map, samp_from_prob_map_ratio)
+                n_draw = self.sample_num
             else:
-                points = random_sampling(self, self.sample_num)
-            n_points = len(points)
-            pixels = [self.world_to_map(point,discrete=True) for point in points]
+                accepted_nodes, _ = random_sampling(self, self.sample_num)
+                n_draw = self.sample_num
+
+            # The samplers return only collision-free nodes; here we drop
+            # duplicates (snapped cells repeat in discrete space) and stop at
+            # the quota.
             accepted_this_round = 0
-            for ii in range(n_points):
-                if self.use_discrete_space:
-                    current = tuple(self.map_to_world(self.world_to_map(points[ii], discrete=True)))
-                else:
-                    current = tuple(points[ii])
-                node = Node(current,None,0,0)
-                if self.is_expandable(tuple(pixels[ii])):
-                    if node in self.node_index_dict:
-                        continue
-                    nodes.append(node)
-                    self.node_index_dict[node] = len(nodes) - 1
-                    num_nodes += 1
-                    accepted_this_round += 1
-                else:
-                    # Only track rejected WEIGHTED samples (indices 0 to num_weighted_samples-1)
-                    if ii >= num_weighted_samples:
-                        continue
-                    rejected_weighted_samples.append(points[ii])
-                if num_nodes == self.sample_num:
+            for node in accepted_nodes:
+                if node in self.node_index_dict:
+                    continue
+                nodes.append(node)
+                self.node_index_dict[node] = len(nodes) - 1
+                accepted_this_round += 1
+                if len(nodes) == self.sample_num:
                     break
-            # Update ratio / oversample for next outer iteration if still short.
-            if num_nodes < self.sample_num:
-                if is_halton:
-                    # Bump oversample so we draw enough Halton points next time.
-                    # We now request `needed` per round, so n_draw = needed * oversample;
-                    # to accept `needed_next` we need oversample ~= 1/rate.
-                    rate = accepted_this_round / max(1, n_points)
-                    if rate <= 0:
-                        oversample = min(64, max(2, oversample * 2))
-                    else:
-                        oversample = min(64, max(2, int(np.ceil(1.0 / rate))))
-                elif num_weighted_samples > 0:
-                    samp_from_prob_map_ratio = len(rejected_weighted_samples) / self.sample_num
-                    samp_from_prob_map_ratio = max(0.0, min(1.0, samp_from_prob_map_ratio))
+            if len(nodes) >= self.sample_num:
+                break
+
+            # Update ratio / oversample for the next round.
+            if is_halton:
+                # Draw roughly needed / rate raw Halton points next time.
+                rate = accepted_this_round / n_draw
+                if rate <= 0:
+                    oversample = min(64, max(2, oversample * 2))
+                else:
+                    oversample = min(64, max(2, int(np.ceil(1.0 / rate))))
+            elif prob_map is not None:
+                # Share of prob-map samples rejected so far decides how much of
+                # the next draw comes from the prob map again.
+                num_rejected_weighted_total += num_rejected_weighted
+                samp_from_prob_map_ratio = num_rejected_weighted_total / self.sample_num
+                samp_from_prob_map_ratio = max(0.0, min(1.0, samp_from_prob_map_ratio))
 
         if generate_grid_nodes:
             grid_nodes, world_grid_points = sample_grid_nodes(self)
