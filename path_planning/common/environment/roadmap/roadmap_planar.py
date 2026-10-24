@@ -6,7 +6,7 @@ from scipy.sparse import csr_array
 from python_motion_planning.common.env.map.grid import TYPES
 
 from path_planning.common.environment.node import Node
-from path_planning.common.environment.roadmap.roadmap_base import RoadmapBase, _unique_undirected
+from path_planning.common.environment.roadmap.roadmap_base import RoadmapBase, _unique_undirected, RoadmapConfig
 
 if TYPE_CHECKING:
     from path_planning.common.environment.map.graph_sampler_base import GraphSamplerBase
@@ -39,8 +39,8 @@ class RoadmapPlanar(RoadmapBase):
 
     uses_anchors = True
 
-    def __init__(self, graph_map: "GraphSamplerBase"):
-        super().__init__(graph_map)
+    def __init__(self, graph_map: "GraphSamplerBase", config: dict | RoadmapConfig | None = None):
+        super().__init__(graph_map, config)
 
     # -------------------------------------------------------------- outline
     def obstacle_boundary(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -178,12 +178,12 @@ class RoadmapPlanar(RoadmapBase):
         return self.filter_edges(u, v, filter_collision)
 
     # -------------------------------------------------------------- builder
-    def generate(self, anchor_points=None, filter_collision: bool = True) -> csr_array:
+    def generate(self, anchor_points=None, filter_collision: bool | None = None) -> csr_array:
         """Build the graph from the current nodes; implemented per subclass."""
         raise NotImplementedError
 
     def generate_roadmap(self, samples: List[Node], anchor_points=None,
-                         filter_collision: bool = True) -> csr_array:
+                         filter_collision: bool | None = None) -> csr_array:
         """``samples`` become interior triangulation points; ``anchor_points``
         (e.g. start and goal) are forced to be nodes of the result."""
         self.set_nodes(samples)

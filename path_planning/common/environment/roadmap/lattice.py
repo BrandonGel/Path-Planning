@@ -4,7 +4,7 @@ import numpy as np
 from scipy.sparse import csr_array
 
 from path_planning.common.environment.node import Node
-from path_planning.common.environment.roadmap.roadmap_base import RoadmapBase
+from path_planning.common.environment.roadmap.roadmap_base import RoadmapBase, RoadmapConfig
 
 if TYPE_CHECKING:
     from path_planning.common.environment.map.graph_sampler_base import GraphSamplerBase
@@ -15,10 +15,10 @@ class Lattice(RoadmapBase):
 
     name = "grid"
 
-    def __init__(self, graph_map: "GraphSamplerBase"):
-        super().__init__(graph_map)
+    def __init__(self, graph_map: "GraphSamplerBase", config: dict | RoadmapConfig | None = None):
+        super().__init__(graph_map, config)
 
-    def generate_lattice(self, snap_off_grid: bool = True) -> csr_array:
+    def generate_lattice(self, snap_off_grid: bool | None = None) -> csr_array:
         """Cardinal-neighbour roadmap for nodes on the Cartesian cell grid.
 
         Each node is linked to the nodes in the adjacent cells one step along
@@ -29,12 +29,14 @@ class Lattice(RoadmapBase):
         check is needed.
 
         Nodes off the cell centres (typically start/goal anchors) are snapped
-        to the centre of their cell when ``snap_off_grid`` is True; a node that
+        to the centre of their cell when ``snap_off_grid`` (default from the
+        config) is True; a node that
         lands in a cell already holding a node is merged into it. Every move is
         reported in a warning and recorded in ``self.snapped``
         (original position -> position of the node it became). With
         ``snap_off_grid`` False an off-grid node raises ``ValueError``.
         """
+        snap_off_grid = self.config.snap_off_grid if snap_off_grid is None else bool(snap_off_grid)
         self.snapped = {}
         n = self.num_nodes
         if n == 0:

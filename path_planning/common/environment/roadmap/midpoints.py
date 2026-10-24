@@ -2,6 +2,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 from scipy.sparse import csr_array
 
+from path_planning.common.environment.roadmap.roadmap_base import RoadmapConfig
 from path_planning.common.environment.roadmap.roadmap_planar import RoadmapPlanar
 
 if TYPE_CHECKING:
@@ -15,10 +16,10 @@ class Midpoints(RoadmapPlanar):
 
     name = "midpoints"
 
-    def __init__(self, graph_map: "GraphSamplerBase"):
-        super().__init__(graph_map)
+    def __init__(self, graph_map: "GraphSamplerBase", config: dict | RoadmapConfig | None = None):
+        super().__init__(graph_map, config)
 
-    def generate_midpoints(self, anchor_points=None, filter_collision: bool = True) -> csr_array:
+    def generate_midpoints(self, anchor_points=None, filter_collision: bool | None = None) -> csr_array:
         cdt, anchor_vidx = self._triangulate(self.nodes, anchor_points)
         tri = np.asarray(cdt["triangles"], dtype=np.int64)
         verts = np.asarray(cdt["vertices"], dtype=float)

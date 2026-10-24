@@ -5,7 +5,7 @@ from scipy.sparse import csr_array
 from scipy.spatial import Delaunay
 
 from path_planning.common.environment.node import Node
-from path_planning.common.environment.roadmap.roadmap_base import RoadmapBase
+from path_planning.common.environment.roadmap.roadmap_base import RoadmapBase, RoadmapConfig
 
 if TYPE_CHECKING:
     from path_planning.common.environment.map.graph_sampler_base import GraphSamplerBase
@@ -17,10 +17,10 @@ class DelaunayRoadmap(RoadmapBase):
 
     name = "dt"
 
-    def __init__(self, graph_map: "GraphSamplerBase"):
-        super().__init__(graph_map)
+    def __init__(self, graph_map: "GraphSamplerBase", config: dict | RoadmapConfig | None = None):
+        super().__init__(graph_map, config)
 
-    def generate_dt(self, filter_collision: bool = True) -> csr_array:
+    def generate_dt(self, filter_collision: bool | None = None) -> csr_array:
         n = self.num_nodes
         if n <= self.dim:
             self.adj = csr_array((n, n), dtype=float)

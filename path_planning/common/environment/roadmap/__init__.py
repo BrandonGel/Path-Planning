@@ -5,7 +5,7 @@ facade that picks one by name and exports it to a ``GraphSamplerBase``.
     rm = Roadmap(graph_map, "cdt"); rm.generate_roadmap(nodes); rm.apply_to(graph_map)
     graph_map.build_roadmap("cdt", nodes)          # same three steps
 """
-from path_planning.common.environment.roadmap.roadmap_base import RoadmapBase
+from path_planning.common.environment.roadmap.roadmap_base import RoadmapBase, RoadmapConfig
 from path_planning.common.environment.roadmap.roadmap_planar import RoadmapPlanar
 from path_planning.common.environment.roadmap.prm import PRM
 from path_planning.common.environment.roadmap.lattice import Lattice
@@ -20,6 +20,6 @@ from path_planning.common.environment.roadmap.roadmap import (
     Roadmap, ROADMAP_CLASSES, make_roadmap, resolve_roadmap_type,
 )
 
-__all__ = ["RoadmapBase", "RoadmapPlanar", "PRM", "Lattice", "DelaunayRoadmap", "CDT", "Midpoints",
+__all__ = ["RoadmapBase", "RoadmapConfig", "RoadmapPlanar", "PRM", "Lattice", "DelaunayRoadmap", "CDT", "Midpoints",
            "Centroids", "Voronoi", "CustomRoadmap", "RRG", "Roadmap", "ROADMAP_CLASSES", "make_roadmap",
            "resolve_roadmap_type"]

@@ -6,7 +6,7 @@ from scipy.spatial import KDTree
 
 from path_planning.common.environment.node import Node
 from path_planning.common.environment.map.numbaUtil import _world_in_collision
-from path_planning.common.environment.roadmap.roadmap_base import RoadmapBase
+from path_planning.common.environment.roadmap.roadmap_base import RoadmapBase, RoadmapConfig
 
 if TYPE_CHECKING:
     from path_planning.common.environment.map.graph_sampler_base import GraphSamplerBase
@@ -77,13 +77,10 @@ class PRM(RoadmapBase):
 
     name = "prm"
 
-    def __init__(self, graph_map: "GraphSamplerBase"):
-        super().__init__(graph_map)
-        self.min_edge_length = graph_map.min_edge_length
-        self.max_edge_length = graph_map.max_edge_length
-        self.num_neighbors = int(graph_map.num_neighbors)
+    def __init__(self, graph_map: "GraphSamplerBase", config: dict | RoadmapConfig | None = None):
+        super().__init__(graph_map, config)
 
-    def generate_prm(self, k_query: int | None = None, grow: int = 4) -> csr_array:
+    def generate_prm(self, k_query: int | None = None, grow: int | None = None) -> csr_array:
         """k-nearest PRM edges with an adaptive candidate query.
 
         Each round queries ``k`` candidates per unfinished node within
@@ -91,8 +88,11 @@ class PRM(RoadmapBase):
         kernel proves complete. The rest are re-queried with ``k * grow``
         until ``k`` reaches the node count. Memory is O(N * k) instead of
         O(N^2) for a full query. ``k_query`` sets the first ``k``; default
-        ``4 * num_neighbors + 1``. Ties are broken by node index.
+        ``4 * num_neighbors + 1``. Ties are broken by node index. ``k_query``
+        and ``grow`` default to the config's values.
         """
+        k_query = self.config.k_query if k_query is None else k_query
+        grow = self.config.grow if grow is None else int(grow)
         n = self.num_nodes
         if n == 0:
             self.adj = csr_array((0, 0), dtype=float)

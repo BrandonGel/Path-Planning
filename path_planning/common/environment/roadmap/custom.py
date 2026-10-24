@@ -3,7 +3,7 @@ import numpy as np
 from scipy.sparse import csr_array
 
 from path_planning.common.environment.node import Node
-from path_planning.common.environment.roadmap.roadmap_base import RoadmapBase
+from path_planning.common.environment.roadmap.roadmap_base import RoadmapBase, RoadmapConfig
 
 if TYPE_CHECKING:
     from path_planning.common.environment.map.graph_sampler_base import GraphSamplerBase
@@ -17,11 +17,11 @@ class CustomRoadmap(RoadmapBase):
 
     name = "custom"
 
-    def __init__(self, graph_map: "GraphSamplerBase"):
-        super().__init__(graph_map)
+    def __init__(self, graph_map: "GraphSamplerBase", config: dict | RoadmapConfig | None = None):
+        super().__init__(graph_map, config)
 
     def generate_custom(self, edge_indices: List[Tuple[int, int]] | np.ndarray,
-                        filter_collision: bool = True) -> csr_array:
+                        filter_collision: bool | None = None) -> csr_array:
         edges = np.asarray(edge_indices, dtype=np.int64).reshape(-1, 2)
         if edges.size and (edges.min() < 0 or edges.max() >= self.num_nodes):
             raise IndexError(f"edge index out of range for {self.num_nodes} nodes")
@@ -30,7 +30,7 @@ class CustomRoadmap(RoadmapBase):
     generate = generate_custom
 
     def generate_roadmap(self, samples: List[Node], edge_indices: List[Tuple[int, int]] | np.ndarray,
-                         filter_collision: bool = True) -> csr_array:
+                         filter_collision: bool | None = None) -> csr_array:
         """``edge_indices`` index into ``samples``."""
         self.set_nodes(samples)
         return self.generate_custom(edge_indices, filter_collision)

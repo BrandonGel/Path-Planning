@@ -5,7 +5,7 @@ from scipy.sparse import csr_array
 from scipy.spatial import KDTree
 
 from path_planning.common.environment.node import Node
-from path_planning.common.environment.roadmap.roadmap_base import RoadmapBase
+from path_planning.common.environment.roadmap.roadmap_base import RoadmapBase, RoadmapConfig
 
 if TYPE_CHECKING:
     from path_planning.common.environment.map.graph_sampler_base import GraphSamplerBase
@@ -32,14 +32,14 @@ class RRG(RoadmapBase):
     name = "rrg"
     uses_anchors = True
 
-    def __init__(self, graph_map: "GraphSamplerBase"):
-        super().__init__(graph_map)
-        self.min_edge_length = float(graph_map.min_edge_length)
-        self.max_edge_length = float(graph_map.max_edge_length)
-        self.sample_num = int(graph_map.sample_num)
-        self.goal_sample_rate = float(graph_map.goal_sample_rate)
+    def __init__(self, graph_map: "GraphSamplerBase", config: dict | RoadmapConfig | None = None):
+        super().__init__(graph_map, config)
         self.discrete = bool(graph_map.use_discrete_space)
         self.num_iterations = 0
+
+    @property
+    def goal_sample_rate(self) -> float:
+        return self.config.goal_sample_rate
 
     # --------------------------------------------------------------- pieces
     def _snap(self, p: np.ndarray) -> np.ndarray:
@@ -62,14 +62,15 @@ class RRG(RoadmapBase):
     # -------------------------------------------------------------- builder
     def generate_rrg(self, anchor_points=None, sample_num: int | None = None, goal_points=None,
                      max_iters: int | None = None, rng: np.random.Generator | None = None,
-                     filter_collision: bool = True) -> csr_array:
-        """Grow ``sample_num`` nodes (default: the map's ``sample_num``) from the
+                     filter_collision: bool | None = None) -> csr_array:
+        """Grow ``sample_num`` nodes (default: ``config.sample_num``) from the
         current nodes plus ``anchor_points``; ``goal_points`` (default: the
         map's ``goal``) receive the goal-sampling bias. ``max_iters`` (default
-        ``50 * sample_num``) bounds the rejection loop; hitting it warns."""
+        ``config.max_iters_ratio * sample_num``) bounds the rejection loop;
+        hitting it warns."""
         rng = rng if rng is not None else np.random.default_rng(np.random.randint(0, 2**31 - 1))
-        n_target = self.sample_num if sample_num is None else int(sample_num)
-        max_iters = 50 * max(n_target, 1) if max_iters is None else int(max_iters)
+        n_target = self.config.sample_num if sample_num is None else int(sample_num)
+        max_iters = int(self.config.max_iters_ratio * max(n_target, 1)) if max_iters is None else int(max_iters)
         m = self.graph_map
 
         seeds = [self.nodes.reshape(-1, self.dim)]

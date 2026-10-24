@@ -123,8 +123,8 @@ class GraphSampler(GraphSamplerBase):
                 self.boundary_nodes_index[node] = self.node_index_dict[node]
 
     def get_random_nodes(self) -> List[Node]:
-        if len(self.nodes) >= self.sample_num:
-            return self.nodes[:self.sample_num]
+        if len(self.nodes) >= self.roadmap_config.sample_num:
+            return self.nodes[:self.roadmap_config.sample_num]
         print("Warning: number of nodes is less than sample num")
         return self.nodes
 
@@ -345,10 +345,7 @@ class GraphSampler(GraphSamplerBase):
         data = {
             "start": self.start,
             "goal": self.goal,
-            "sample_num": self.sample_num,
-            "num_neighbors": self.num_neighbors,
-            "min_edge_length": self.min_edge_length,
-            "max_edge_length": self.max_edge_length,
+            "roadmap_config": self.roadmap_config.as_dict(),
             "use_discrete_space": self.use_discrete_space,
             "grid_points": self.grid_points,
             "boundary_points": self.boundary_points,
@@ -382,8 +379,11 @@ class GraphSampler(GraphSamplerBase):
         self.use_discrete_space = data["use_discrete_space"]
         self.set_start(data["start"])
         self.set_goal(data["goal"])
-        self.set_parameters(data["sample_num"], data["num_neighbors"], data["min_edge_length"], data["max_edge_length"])
-        self.num_total_nodes = self.sample_num + len(self.start) + len(self.goal)
+        if "roadmap_config" in data:
+            self.set_roadmap_config(data["roadmap_config"])
+        else:                                   # pickles written before roadmap_config existed
+            self.set_roadmap_config(sample_num=data["sample_num"], num_neighbors=data["num_neighbors"],
+                                    min_edge_length=data["min_edge_length"], max_edge_length=data["max_edge_length"])
         self.sampling_dist_dict = data.get("sampling_dist_dict", {})
 
 
@@ -630,10 +630,7 @@ class GraphSampler(GraphSamplerBase):
         pruned_data = {
             "start": self.start,
             "goal": self.goal,
-            "sample_num": pruned_sample_num,
-            "num_neighbors": self.num_neighbors,
-            "min_edge_length": self.min_edge_length,
-            "max_edge_length": self.max_edge_length,
+            "roadmap_config": {**self.roadmap_config.as_dict(), "sample_num": pruned_sample_num},
             "use_discrete_space": self.use_discrete_space,
             "grid_points": pruned_grid_points,
             "boundary_points": pruned_boundary_points,
@@ -657,10 +654,7 @@ class GraphSampler(GraphSamplerBase):
             resolution=resolution,
             start=[],
             goal=[],
-            sample_num=0,
-            num_neighbors=self.num_neighbors,
-            min_edge_len=self.min_edge_length,
-            max_edge_len=self.max_edge_length,
+            roadmap_config={**self.roadmap_config.as_dict(), "sample_num": 0},
             use_discrete_space=self.use_discrete_space,
             use_constraint_sweep=self.use_constraint_sweep,
             record_sweep=self.record_sweep,

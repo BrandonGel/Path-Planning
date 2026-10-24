@@ -2,6 +2,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 from scipy.sparse import csr_array
 
+from path_planning.common.environment.roadmap.roadmap_base import RoadmapConfig
 from path_planning.common.environment.roadmap.roadmap_planar import RoadmapPlanar
 
 if TYPE_CHECKING:
@@ -31,10 +32,10 @@ class Voronoi(RoadmapPlanar):
 
     name = "voronoi"
 
-    def __init__(self, graph_map: "GraphSamplerBase"):
-        super().__init__(graph_map)
+    def __init__(self, graph_map: "GraphSamplerBase", config: dict | RoadmapConfig | None = None):
+        super().__init__(graph_map, config)
 
-    def generate_voronoi(self, anchor_points=None, filter_collision: bool = True) -> csr_array:
+    def generate_voronoi(self, anchor_points=None, filter_collision: bool | None = None) -> csr_array:
         return self._dual_graph(_circumcentres, anchor_points, filter_collision)
 
     generate = generate_voronoi

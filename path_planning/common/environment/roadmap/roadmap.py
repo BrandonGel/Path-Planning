@@ -15,7 +15,7 @@ from scipy.spatial.distance import cdist
 
 from path_planning.common.environment.node import Node
 from path_planning.common.environment.map.numbaUtil import convert_np_to_tuple
-from path_planning.common.environment.roadmap.roadmap_base import RoadmapBase
+from path_planning.common.environment.roadmap.roadmap_base import RoadmapBase, RoadmapConfig
 from path_planning.common.environment.roadmap.prm import PRM
 from path_planning.common.environment.roadmap.lattice import Lattice
 from path_planning.common.environment.roadmap.delaunay import DelaunayRoadmap
@@ -47,9 +47,10 @@ def resolve_roadmap_type(roadmap_type: str, dim: int) -> str:
     return roadmap_type
 
 
-def make_roadmap(roadmap_type: str, graph_map: "GraphSamplerBase") -> RoadmapBase:
+def make_roadmap(roadmap_type: str, graph_map: "GraphSamplerBase",
+                 config: dict | RoadmapConfig | None = None) -> RoadmapBase:
     """Instantiate the concrete builder registered under ``roadmap_type``."""
-    return ROADMAP_CLASSES[resolve_roadmap_type(roadmap_type, graph_map.dim)](graph_map)
+    return ROADMAP_CLASSES[resolve_roadmap_type(roadmap_type, graph_map.dim)](graph_map, config)
 
 
 class Roadmap(RoadmapBase):
@@ -57,15 +58,17 @@ class Roadmap(RoadmapBase):
 
     ``generate`` instantiates the concrete builder (``PRM``, ``Lattice``,
     ``CDT``, ...) for ``roadmap_type``, runs it on the current nodes and adopts
-    its nodes, clearance and adjacency. For builders that take anchors (the
+    its nodes, clearance and adjacency, passing it this roadmap's ``config``.
+    For builders that take anchors (the
     planar family and RRG) they default to the map's ``start`` and ``goal``. ``apply_to`` writes the result
     into a ``GraphSamplerBase`` in the layout its planners read.
     """
 
     name = "general"
 
-    def __init__(self, graph_map: "GraphSamplerBase", roadmap_type: str | None = None, **options):
-        super().__init__(graph_map)
+    def __init__(self, graph_map: "GraphSamplerBase", roadmap_type: str | None = None,
+                 config: dict | RoadmapConfig | None = None, **options):
+        super().__init__(graph_map, config)
         self.roadmap_type = roadmap_type
         self.options = dict(options)          # forwarded to the builder's generate()
         self.builder: RoadmapBase | None = None
@@ -78,7 +81,7 @@ class Roadmap(RoadmapBase):
     def generate(self, roadmap_type: str | None = None, **kwargs) -> csr_array:
         rtype = resolve_roadmap_type(roadmap_type or self.roadmap_type, self.dim)
         roadmap_class = ROADMAP_CLASSES[rtype]
-        builder = roadmap_class(self.graph_map)
+        builder = roadmap_class(self.graph_map, self.config)
         # Hand over the already-installed nodes; no Node list round trip.
         builder._num_nodes = self.num_nodes
         builder.nodes = self.nodes
