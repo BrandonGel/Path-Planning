@@ -83,6 +83,7 @@ class RoadmapBase:
     """
 
     name: str = "base"
+    uses_anchors: bool = False          # builders that take anchor_points (start/goal) in generate()
 
     def __init__(self, graph_map: "GraphSamplerBase"):
         self.graph_map = graph_map

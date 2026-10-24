@@ -16,7 +16,6 @@ from scipy.spatial.distance import cdist
 from path_planning.common.environment.node import Node
 from path_planning.common.environment.map.numbaUtil import convert_np_to_tuple
 from path_planning.common.environment.roadmap.roadmap_base import RoadmapBase
-from path_planning.common.environment.roadmap.roadmap_planar import RoadmapPlanar
 from path_planning.common.environment.roadmap.prm import PRM
 from path_planning.common.environment.roadmap.lattice import Lattice
 from path_planning.common.environment.roadmap.delaunay import DelaunayRoadmap
@@ -25,12 +24,13 @@ from path_planning.common.environment.roadmap.midpoints import Midpoints
 from path_planning.common.environment.roadmap.centroids import Centroids
 from path_planning.common.environment.roadmap.voronoi import Voronoi
 from path_planning.common.environment.roadmap.custom import CustomRoadmap
+from path_planning.common.environment.roadmap.rrg import RRG
 
 if TYPE_CHECKING:
     from path_planning.common.environment.map.graph_sampler_base import GraphSamplerBase
 
 ROADMAP_CLASSES: Dict[str, Type[RoadmapBase]] = {
-    cls.name: cls for cls in (PRM, Lattice, DelaunayRoadmap, CDT, Midpoints, Centroids, Voronoi, CustomRoadmap)
+    cls.name: cls for cls in (PRM, Lattice, DelaunayRoadmap, CDT, Midpoints, Centroids, Voronoi, CustomRoadmap, RRG)
 }
 
 
@@ -42,8 +42,6 @@ def resolve_roadmap_type(roadmap_type: str, dim: int) -> str:
         raise ValueError("roadmap_type is required")
     if "halton" in roadmap_type:
         return "cdt" if dim == 2 else "dt"
-    if roadmap_type == "rrg":
-        raise ValueError("rrg grows its own nodes incrementally; use GraphSamplerBase.generate_rrg")
     if roadmap_type not in ROADMAP_CLASSES:
         raise ValueError(f"Invalid roadmap type: {roadmap_type!r}; expected one of {sorted(ROADMAP_CLASSES)}")
     return roadmap_type
@@ -59,8 +57,8 @@ class Roadmap(RoadmapBase):
 
     ``generate`` instantiates the concrete builder (``PRM``, ``Lattice``,
     ``CDT``, ...) for ``roadmap_type``, runs it on the current nodes and adopts
-    its nodes, clearance and adjacency. For the planar family the anchors
-    default to the map's ``start`` and ``goal``. ``apply_to`` writes the result
+    its nodes, clearance and adjacency. For builders that take anchors (the
+    planar family and RRG) they default to the map's ``start`` and ``goal``. ``apply_to`` writes the result
     into a ``GraphSamplerBase`` in the layout its planners read.
     """
 
@@ -88,8 +86,8 @@ class Roadmap(RoadmapBase):
         builder.adj = csr_array((self.num_nodes, self.num_nodes), dtype=float)
 
         opts = {**self.options, **kwargs}
-        if issubclass(roadmap_class, RoadmapPlanar) and opts.get("anchor_points") is None:
-            opts["anchor_points"] = self._default_anchors()
+        if roadmap_class.uses_anchors and opts.get("anchor_points") is None:
+            opts["anchor_points"] = self._default_anchors()      # start + goal
         builder.generate(**opts)              # not generate_roadmap: nodes are set
 
         self.builder = builder

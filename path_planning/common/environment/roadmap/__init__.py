@@ -15,10 +15,11 @@ from path_planning.common.environment.roadmap.midpoints import Midpoints
 from path_planning.common.environment.roadmap.centroids import Centroids
 from path_planning.common.environment.roadmap.voronoi import Voronoi
 from path_planning.common.environment.roadmap.custom import CustomRoadmap
+from path_planning.common.environment.roadmap.rrg import RRG
 from path_planning.common.environment.roadmap.roadmap import (
     Roadmap, ROADMAP_CLASSES, make_roadmap, resolve_roadmap_type,
 )
 
 __all__ = ["RoadmapBase", "RoadmapPlanar", "PRM", "Lattice", "DelaunayRoadmap", "CDT", "Midpoints",
-           "Centroids", "Voronoi", "CustomRoadmap", "Roadmap", "ROADMAP_CLASSES", "make_roadmap",
+           "Centroids", "Voronoi", "CustomRoadmap", "RRG", "Roadmap", "ROADMAP_CLASSES", "make_roadmap",
            "resolve_roadmap_type"]

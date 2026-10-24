@@ -37,6 +37,8 @@ class RoadmapPlanar(RoadmapBase):
     ``anchor_points`` (e.g. start and goal) are forced to become nodes.
     """
 
+    uses_anchors = True
+
     def __init__(self, graph_map: "GraphSamplerBase"):
         super().__init__(graph_map)
 
