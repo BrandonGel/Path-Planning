@@ -12,6 +12,7 @@ from path_planning.utils.cgal_sweep import CGAL_Sweep
 from path_planning.common.environment.map.cdt import get_boundary, get_planar_graph
 from path_planning.global_planner.sample_search.rrg import RRG
 from path_planning.common.environment.map.graph_sampler_base import GraphSamplerBase
+from path_planning.common.environment.roadmap.roadmap_base import RoadmapBase
 
 import faiss
 import pickle
@@ -148,7 +149,6 @@ class GraphSampler(GraphSamplerBase):
             pos = tuple(obstacle)
             node = Node(pos,None,0,0)
             self.obstacle_nodes.append(node)
-        self._esdf_initialized = False
 
     def get_obstacle_map(self) -> np.ndarray:
         return self.type_map.data == TYPES.OBSTACLE
@@ -392,7 +392,7 @@ class GraphSampler(GraphSamplerBase):
         self.obs_size = data["obs_size"] if "obs_size" in data else 0.5
         self.inflation_radius = data["inflation_radius"]
         self.set_obstacles(self.obstacles)
-        self.set_inflation_radius(self.inflation_radius)
+        self.inflate_obstacles(self.inflation_radius)
         self.track_with_link = data["track_with_link"]
         self.grid_points = data["grid_points"]
         self.boundary_points = data.get("boundary_points", [])
@@ -408,7 +408,8 @@ class GraphSampler(GraphSamplerBase):
         # Calculate edges (must happen before get_start/goal_nodes_with_all_edges)
         self.road_map = data["road_map"]
         self.road_map_edge_weights = data["road_map_edge_weights"]
-        self.edges, self.edge_indices_dict, self.edge_weights = self.calculate_edges(self.road_map, self.road_map_edge_weights)
+        self.roadmap = None                     # CSR view rebuilt lazily by roadmap_view()
+        self.edges, self.edge_indices_dict, self.edge_weights = RoadmapBase.edges_from_road_map(self.road_map, self.road_map_edge_weights)
         self.get_start_nodes_with_all_edges()
         self.get_goal_nodes_with_all_edges()
 
@@ -518,6 +519,7 @@ class GraphSampler(GraphSamplerBase):
         self.nodes = [
             Node(transform_pos(node.current), None, 0, 0) for node in self.nodes
         ]
+        self.roadmap = None                     # node coordinates moved; CSR view rebuilt lazily
         self.start = [list(transform_pos(tuple(s))) for s in self.start]
         self.goal = [list(transform_pos(tuple(g))) for g in self.goal]
         self.grid_points = [transform_pos(tuple(gp)) for gp in self.grid_points]

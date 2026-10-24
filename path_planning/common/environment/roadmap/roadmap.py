@@ -153,6 +153,6 @@ class Roadmap(RoadmapBase):
         gm.sample_kd_tree = KDTree(pts) if len(nodes) else None
         gm.road_map = road_map
         gm.road_map_edge_weights = weights
-        gm.edges, gm.edge_indices_dict, gm.edge_weights = gm.calculate_edges(road_map, weights)
+        gm.edges, gm.edge_indices_dict, gm.edge_weights = self.edge_list()   # isolated extra nodes add no edges
         gm._rebuild_boundary_nodes_index()
         return gm

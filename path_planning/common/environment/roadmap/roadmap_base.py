@@ -12,6 +12,7 @@ from typing import List, Tuple, TYPE_CHECKING
 import numpy as np
 from numba import njit, prange
 from scipy.sparse import csr_array
+from scipy.sparse.csgraph import dijkstra as _csgraph_dijkstra
 from python_motion_planning.common.env.map.grid import TYPES, _grid_path_world_to_map_int, _grid_path_map_to_world
 
 from path_planning.common.environment.node import Node
@@ -72,6 +73,28 @@ def _symmetric_csr(n: int, u: np.ndarray, v: np.ndarray, w: np.ndarray) -> csr_a
     adj.sort_indices()
     return adj
 
+def shortest_paths(sources, adj, limit: float = np.inf, return_predecessors: bool = False):
+    """Dijkstra over the roadmap from one or several source nodes.
+
+    Returns ``dist`` of shape ``(len(sources), num_nodes)`` (``inf`` where
+    unreachable, ``limit`` caps the search radius) and, when asked, the
+    ``predecessors`` array of the same shape (``-9999`` for the source and
+    unreachable nodes, scipy's convention). A scalar ``sources`` gives 1-D
+    results.
+    """
+    num_nodes = adj.shape[0]
+    scalar = np.isscalar(sources)
+    idx = np.atleast_1d(np.asarray(sources, dtype=np.int64))
+    if num_nodes == 0:
+        raise ValueError("shortest_paths: the roadmap has no nodes")
+    if idx.size and (idx.min() < 0 or idx.max() >= num_nodes):
+        raise IndexError(f"shortest_paths: source out of range [0, {num_nodes})")
+    out = _csgraph_dijkstra(adj, directed=True, indices=idx, limit=limit,
+                            return_predecessors=return_predecessors)
+    if return_predecessors:
+        dist, pred = out
+        return (dist[0], pred[0]) if scalar else (dist, pred)
+    return out[0] if scalar else out
 
 @dataclass
 class RoadmapConfig:
@@ -244,6 +267,57 @@ class RoadmapBase:
 
     def neighbors(self, u: int) -> np.ndarray:
         return self.adj.indices[self.adj.indptr[u]:self.adj.indptr[u + 1]]
+
+    def edge_list(self) -> Tuple[List[Tuple[int, int]], dict, List[float]]:
+        """Directed edge export in the sampler's layout: ``edges`` as
+        ``(u, v)`` pairs in row order (same order as walking ``road_map``),
+        ``edge_indices_dict`` mapping each pair to its position, and the
+        matching ``edge_weights``. Built from the CSR arrays directly."""
+        if self.num_nodes == 0 or self.adj.nnz == 0:
+            return [], {}, []
+        u = np.repeat(np.arange(self.num_nodes), np.diff(self.adj.indptr))
+        edges = list(zip(u.tolist(), self.adj.indices.tolist()))
+        return edges, {e: i for i, e in enumerate(edges)}, self.adj.data.tolist()
+
+    @staticmethod
+    def edges_from_road_map(road_map: List[List[int]],
+                            road_map_edge_weights: List[List[float]] | None = None
+                            ) -> Tuple[List[Tuple[int, int]], dict, List[float]]:
+        """Same export as ``edge_list`` for a list-of-lists roadmap (e.g. one
+        loaded from a pickle). Repeated pairs keep their first position."""
+        edges, edge_indices_dict, edge_weights = [], {}, []
+        for u, nbrs in enumerate(road_map):
+            ws = road_map_edge_weights[u] if road_map_edge_weights is not None else None
+            for k, v in enumerate(nbrs):
+                e = (int(u), int(v))
+                if e in edge_indices_dict:
+                    continue
+                edge_indices_dict[e] = len(edges)
+                edges.append(e)
+                if ws is not None:
+                    edge_weights.append(ws[k])
+        return edges, edge_indices_dict, edge_weights
+
+    # ------------------------------------------------------------- shortest paths
+    def dijkstra(self, source: int, limit: float = np.inf) -> List[Tuple[int, float]]:
+        """``[(node, distance), ...]`` for every node reachable from ``source``
+        (itself included at 0), in node order: the layout
+        ``GraphSamplerBase._dijkstra`` returns."""
+        dist = shortest_paths(int(source), self.adj, limit=limit)
+        reach = np.flatnonzero(np.isfinite(dist))
+        return list(zip(reach.tolist(), dist[reach].tolist()))
+
+    def shortest_path(self, source: int, target: int) -> Tuple[List[int], float]:
+        """Node sequence from ``source`` to ``target`` and its length;
+        ``([], inf)`` when unreachable."""
+        dist, pred = shortest_paths(int(source), self.adj, return_predecessors=True)
+        if not np.isfinite(dist[target]):
+            return [], math.inf
+        path, v = [int(target)], int(target)
+        while v != source:
+            v = int(pred[v])
+            path.append(v)
+        return path[::-1], float(dist[target])
 
     # ----------------------------------------------------------------- nodes
     def set_nodes(self, samples: List[Node]) -> None:
