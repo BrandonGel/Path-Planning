@@ -67,10 +67,7 @@ def _build_setup_sampler(source_map: GraphSampler) -> GraphSampler:
         start=[],
         goal=[],
         use_discrete_space=source_map.use_discrete_space,
-        sample_num=0,
-        min_edge_len=source_map.min_edge_length,
-        max_edge_len=source_map.max_edge_length,
-        num_neighbors=source_map.num_neighbors,
+        roadmap_config={**source_map.roadmap_config.as_dict(), "sample_num": 0},
         sampling_dist_dict=source_map.sampling_dist_dict,
     )
     fresh.obs_size = source_map.obs_size
@@ -172,8 +169,8 @@ def save_cluster_map(cluster_map: GraphSampler, graph_file: Path) -> None:
     # keeps none of the source grid nodes as such.
     cluster_map.grid_points = []
     # _load_from_dict recomputes num_total_nodes = sample_num + #start + #goal.
-    cluster_map.sample_num = (
-        len(cluster_map.nodes) - len(cluster_map.start) - len(cluster_map.goal)
+    cluster_map.set_roadmap_config(
+        sample_num=len(cluster_map.nodes) - len(cluster_map.start) - len(cluster_map.goal)
     )
     cluster_map.save_graph_sampler(graph_file)
 

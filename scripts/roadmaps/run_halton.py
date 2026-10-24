@@ -42,11 +42,11 @@ def run_halton(
         graph_sampler.type_map[graph_sampler.world_to_map(g, discrete=True)] = TYPES.GOAL
     graph_sampler.set_start(start)
     graph_sampler.set_goal(goal)
-    graph_sampler.set_parameters(
+    graph_sampler.set_roadmap_config(
         sample_num=sample_num,
         num_neighbors=0,
-        min_edge_len=min_edge_len,
-        max_edge_len=max_edge_len,
+        min_edge_length=min_edge_len,
+        max_edge_length=max_edge_len,
     )
 
     st = time.time()

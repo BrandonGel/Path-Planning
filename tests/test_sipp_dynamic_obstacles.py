@@ -28,7 +28,7 @@ def _build_grid_map():
     set_global_seed(42)
     map_ = read_graph_sampler_from_yaml(MAP_YAML, use_discrete_space=True)
     map_.inflate_obstacles(radius=RADIUS + np.sqrt(2) / 2)
-    map_.set_parameters(sample_num=0, num_neighbors=4.0, min_edge_len=0.0, max_edge_len=1.1)
+    map_.set_roadmap_config(sample_num=0, num_neighbors=4.0, min_edge_length=0.0, max_edge_length=1.1)
     map_.set_start([P])
     map_.set_goal([Q])
     nodes = map_.generateRandomNodes(generate_grid_nodes=True)

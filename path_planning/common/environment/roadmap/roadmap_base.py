@@ -5,7 +5,9 @@ implements ``generate_roadmap`` (see ``prm.py``, ``lattice.py``,
 ``delaunay.py`` and the planar family under ``roadmap_planar.py``).
 """
 import math
+import os
 from dataclasses import dataclass, fields, asdict
+import yaml
 from typing import List, Tuple, TYPE_CHECKING
 import numpy as np
 from numba import njit, prange
@@ -79,7 +81,12 @@ class RoadmapConfig:
     out take the defaults below, unknown keys raise. Edge band and k apply to
     the builders that filter edges (PRM, Delaunay, planar family, RRG,
     custom); ``Lattice`` edges are fixed by the grid.
+
+    ``RoadmapConfig.from_yaml(path)`` reads a YAML file (``config/roadmap.yaml``
+    is the template) and ``RoadmapConfig.load(x)`` accepts a config, dict,
+    YAML path or ``None``, which is what the sampler and builders call.
     """
+    YAML_KEY = "roadmap_config"           # optional top-level block in a YAML file
     min_edge_length: float = 0.0          # drop edges shorter than this
     max_edge_length: float = math.inf     # drop edges longer than this; RRG steer / connect radius
     num_neighbors: int = 0                # PRM: accepted edges per node, 0 = unlimited
@@ -113,6 +120,36 @@ class RoadmapConfig:
     def as_dict(self) -> dict:
         return asdict(self)
 
+    @classmethod
+    def from_yaml(cls, path: "str | os.PathLike") -> "RoadmapConfig":
+        """Read a config from a YAML file: the fields under a top-level
+        ``roadmap_config:`` block when present, else the whole document. Use
+        ``.inf`` for an unbounded ``max_edge_length`` and ``null`` for ``k_query``."""
+        with open(path, "r") as f:
+            data = yaml.safe_load(f) or {}
+        if not isinstance(data, dict):
+            raise TypeError(f"{path}: expected a mapping of RoadmapConfig fields")
+        if cls.YAML_KEY in data:
+            data = data[cls.YAML_KEY] or {}
+        return cls(data)
+
+    def to_yaml(self, path: "str | os.PathLike") -> None:
+        """Write the config under a ``roadmap_config:`` block (``inf`` is written as ``.inf``)."""
+        with open(path, "w") as f:
+            yaml.safe_dump({self.YAML_KEY: self.as_dict()}, f, sort_keys=False)
+
+    @classmethod
+    def load(cls, source: "RoadmapConfig | dict | str | os.PathLike | None") -> "RoadmapConfig":
+        """``RoadmapConfig`` as is; dict or ``None`` through the constructor;
+        a str / path through ``from_yaml``."""
+        if isinstance(source, cls):
+            return source
+        if isinstance(source, (str, os.PathLike)):
+            return cls.from_yaml(source)
+        if source is None or isinstance(source, dict):
+            return cls(source)
+        raise TypeError(f"RoadmapConfig.load: expected RoadmapConfig, dict, YAML path or None, got {type(source).__name__}")
+
 
 class RoadmapBase:
     """Base roadmap: nodes, clearance and a CSR adjacency over a ``GraphSamplerBase``.
@@ -130,12 +167,12 @@ class RoadmapBase:
     name: str = "base"
     uses_anchors: bool = False          # builders that take anchor_points (start/goal) in generate()
 
-    def __init__(self, graph_map: "GraphSamplerBase", config: dict | RoadmapConfig | None = None):
+    def __init__(self, graph_map: "GraphSamplerBase", config: "dict | RoadmapConfig | str | None" = None):
         """``config`` is a dict of ``RoadmapConfig`` fields (missing keys take
-        the defaults, ``None`` means all defaults); an already-built
-        ``RoadmapConfig`` is used as is."""
+        the defaults, ``None`` means all defaults), a YAML path, or an
+        already-built ``RoadmapConfig`` used as is."""
         self.graph_map = graph_map
-        self.config = config if isinstance(config, RoadmapConfig) else RoadmapConfig(config)
+        self.config = RoadmapConfig.load(config)
 
         self._dim = self.graph_map.dim
         self._num_nodes = 0

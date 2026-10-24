@@ -1,5 +1,6 @@
 from typing import Any, List, Tuple
 import heapq
+import os
 import numpy as np
 from scipy.spatial import KDTree, Delaunay
 from path_planning.common.environment.node import Node
@@ -35,7 +36,7 @@ def snap_to_cell_centers(map_, points) -> np.ndarray:
 
 
 class GraphSamplerBase(Grid):
-    def __init__(self,*args,start,goal,roadmap_config: "dict | RoadmapConfig | None" = None,use_discrete_space=True,use_constraint_sweep=True,record_sweep=True,use_exact_collision_check=True,use_dijkstra=True,sampling_dist_dict = {},sweep_backend="auto",**kwargs):
+    def __init__(self,*args,start,goal,roadmap_config: "dict | RoadmapConfig | str | None" = None,use_discrete_space=True,use_constraint_sweep=True,record_sweep=True,use_exact_collision_check=True,use_dijkstra=True,sampling_dist_dict = {},sweep_backend="auto",**kwargs):
         super().__init__(*args, **kwargs)
 
         # Check if start and goal are lists, non-empty, and not None
@@ -51,8 +52,9 @@ class GraphSamplerBase(Grid):
         self.obs_size = 0.5
         self.inflation_radius = 0.0
         # Roadmap parameters (sample_num, num_neighbors, edge band, RRG rates,
-        # ...) live in one RoadmapConfig; see set_roadmap_config.
-        self.roadmap_config = roadmap_config if isinstance(roadmap_config, RoadmapConfig) else RoadmapConfig(roadmap_config)
+        # ...) live in one RoadmapConfig: a dict, a RoadmapConfig or the path of
+        # a YAML file such as config/roadmap.yaml; see set_roadmap_config.
+        self.roadmap_config = RoadmapConfig.load(roadmap_config)
         self.num_total_nodes = self.roadmap_config.sample_num + len(self.start) + len(self.goal)
         self.cost_matrix = None
         self.node_index_dict = {}
@@ -111,17 +113,20 @@ class GraphSamplerBase(Grid):
             self._inflated_esdf_source = esdf
         return self._inflated_esdf
 
-    def set_roadmap_config(self, config: "dict | RoadmapConfig | None" = None, **fields) -> RoadmapConfig:
+    def set_roadmap_config(self, config: "dict | RoadmapConfig | str | None" = None, **fields) -> RoadmapConfig:
         """Replace or update the roadmap parameters.
 
-        A ``RoadmapConfig`` replaces the current one. A dict and/or keyword
-        fields (``sample_num``, ``num_neighbors``, ``min_edge_length``,
-        ``max_edge_length``, ``goal_sample_rate``, ...) are applied on top of
-        the current values. ``num_total_nodes`` follows ``sample_num``.
+        A ``RoadmapConfig`` or a YAML path replaces the current config. A dict
+        and/or keyword fields (``sample_num``, ``num_neighbors``,
+        ``min_edge_length``, ``max_edge_length``, ``goal_sample_rate``, ...)
+        are applied on top of the current values. ``num_total_nodes`` follows
+        ``sample_num``.
         """
+        if isinstance(config, (str, os.PathLike)):
+            config = RoadmapConfig.from_yaml(config)
         if isinstance(config, RoadmapConfig):
             if fields:
-                raise TypeError("set_roadmap_config: pass either a RoadmapConfig or fields, not both")
+                raise TypeError("set_roadmap_config: pass either a RoadmapConfig / YAML path or fields, not both")
             self.roadmap_config = config
         else:
             merged = self.roadmap_config.as_dict()

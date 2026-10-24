@@ -61,7 +61,7 @@ def _build_mapf_map(backend: str, agent_radius: float):
     map_ = read_graph_sampler_from_yaml(MAPF_YAML, use_discrete_space=False, sweep_backend=backend)
     agents = read_agents_from_yaml(MAPF_YAML)
     map_.inflate_obstacles(radius=agent_radius + np.sqrt(2) / 2)
-    map_.set_parameters(sample_num=800, num_neighbors=10.0, min_edge_len=0.0, max_edge_len=4.0)
+    map_.set_roadmap_config(sample_num=800, num_neighbors=10.0, min_edge_length=0.0, max_edge_length=4.0)
     map_.set_start([a["start"] for a in agents])
     map_.set_goal([a["goal"] for a in agents])
     nodes = map_.generateRandomNodes(generate_grid_nodes=False)

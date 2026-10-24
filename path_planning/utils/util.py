@@ -235,7 +235,7 @@ def read_grid_from_yaml(filename: str):
         raise ValueError(f"Unsupported dimensions: {len(dimensions)}")
     return env
 
-def read_graph_sampler_from_yaml(filename: str,use_discrete_space: bool = True,graph_file: str = None, args: dict = {}, sampling_dist_dict: dict = None, sweep_backend: str = "auto"):
+def read_graph_sampler_from_yaml(filename: str,use_discrete_space: bool = True,graph_file: str = None, args: dict = {}, sampling_dist_dict: dict = None, sweep_backend: str = "auto", roadmap_config=None):
     """
     Read a YAML file and recreate a GraphSampler environment.
 
@@ -243,6 +243,12 @@ def read_graph_sampler_from_yaml(filename: str,use_discrete_space: bool = True,g
     rasterized into grid indices before applying to the map. Agent positions are
     not applied here; load agents via :func:`read_agents_from_yaml` and convert with
     :func:`agents_yaml_to_roadmap_frame` before ``set_start`` / ``set_goal`` when needed.
+
+    Roadmap parameters: ``roadmap_config`` is a ``RoadmapConfig``, a dict of its
+    fields, or the path of a YAML file such as ``config/roadmap.yaml``. When it
+    is None, a top-level ``roadmap_config:`` block in the map YAML is used if
+    present, else the ``RoadmapConfig`` defaults. ``GraphSampler.generate_roadmap``
+    passes this config to the ``Roadmap`` it builds.
 
     Args:
         filename: The filename of the YAML file to read.
@@ -252,7 +258,9 @@ def read_graph_sampler_from_yaml(filename: str,use_discrete_space: bool = True,g
 
     with open(filename, 'r') as yaml_file:
         yaml_data = yaml.load(yaml_file, Loader=yaml.FullLoader)
-    
+    if roadmap_config is None:
+        roadmap_config = yaml_data.get("roadmap_config")
+
     dimensions = yaml_data['map']['dimensions'] if 'dimensions' in yaml_data['map'] else [0, 0]
     bounds = yaml_data['map']['bounds'] if 'bounds' in yaml_data['map'] else [[0, dim] for dim in dimensions]
     resolution = yaml_data['map']['resolution'] if 'resolution' in yaml_data['map'] else 1.0
@@ -260,7 +268,7 @@ def read_graph_sampler_from_yaml(filename: str,use_discrete_space: bool = True,g
     obs_size = yaml_data.get("obs_size", yaml_data.get("map", {}).get("obs_size", 0.5))
     
     
-    env = GraphSampler(bounds=bounds, resolution=resolution,start=[],goal=[],use_discrete_space=use_discrete_space,sampling_dist_dict=sampling_dist_dict or {},sweep_backend=sweep_backend)
+    env = GraphSampler(bounds=bounds, resolution=resolution,start=[],goal=[],roadmap_config=roadmap_config,use_discrete_space=use_discrete_space,sampling_dist_dict=sampling_dist_dict or {},sweep_backend=sweep_backend)
     if graph_file is None:
         validate_obstacle_map_config(env, obstacles_world, obs_size)
         obstacles = obstacles_world_to_grid(env, obstacles_world, obs_size)

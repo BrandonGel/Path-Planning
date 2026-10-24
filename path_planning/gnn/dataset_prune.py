@@ -473,10 +473,7 @@ def heterodata_to_graph_sampler(
     sampler_data = {
         "start": start,
         "goal": goal,
-        "sample_num": len(grid_points),
-        "num_neighbors": 0.0,
-        "min_edge_length": 0.0,
-        "max_edge_length": 0.0,
+        "roadmap_config": {"sample_num": len(grid_points), "num_neighbors": 0},
         "use_discrete_space": True,
         "grid_points": grid_points,
         "nodes": nodes,

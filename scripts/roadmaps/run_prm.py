@@ -23,7 +23,7 @@ if __name__ == "__main__":
     map_.type_map[start] = TYPES.START
     map_.type_map[goal] = TYPES.GOAL
 
-    planner = PRM(map_=map_, start=start, goal=goal, sample_num=1000, min_edge_len=1)
+    planner = PRM(map_=map_, start=start, goal=goal, sample_num=10000, min_edge_len=1)
     path, path_info = planner.plan()
 
     vis = Visualizer2D()

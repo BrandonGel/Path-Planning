@@ -36,10 +36,7 @@ def _clone_graph_sampler(map_: GraphSampler) -> GraphSampler:
             resolution=map_.resolution,
             start=[],
             goal=[],
-            sample_num=0,
-            num_neighbors=map_.num_neighbors,
-            min_edge_len=map_.min_edge_length,
-            max_edge_len=map_.max_edge_length,
+            roadmap_config={**map_.roadmap_config.as_dict(), "sample_num": 0},
             use_discrete_space=map_.use_discrete_space,
             use_constraint_sweep=map_.use_constraint_sweep,
             record_sweep=map_.record_sweep,
@@ -297,11 +294,11 @@ def process_single_case_graphs(args: Tuple[Path, dict]) -> Tuple[bool, Path]:
                 input_file, use_discrete_space=use_discrete_space
             )
             map_.set_inflation_radius(radius=agent_radius)
-            map_.set_parameters(
+            map_.set_roadmap_config(
                 sample_num=num_samples,
                 num_neighbors=num_neighbors,
-                min_edge_len=min_edge_len,
-                max_edge_len=max_edge_len,
+                min_edge_length=min_edge_len,
+                max_edge_length=max_edge_len,
             )
             agents_rt = agents_yaml_to_roadmap_frame(map_, agents)
             start = [a["start"] for a in agents_rt]

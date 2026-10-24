@@ -110,12 +110,12 @@ def _make_map_mapd(map_yaml: str, use_discrete_space: bool, agent_radius: float,
     map_.inflate_obstacles(radius=agent_radius + np.sqrt(2) / 2)
 
     if use_discrete_space:
-        map_.set_parameters(sample_num=0, num_neighbors=4.0, min_edge_len=0.0, max_edge_len=1.1)
+        map_.set_roadmap_config(sample_num=0, num_neighbors=4.0, min_edge_length=0.0, max_edge_length=1.1)
     else:
         # Sparser PRM with shorter edges: the SIPP low-level planner rebuilds its
         # per-node/edge interval graph each call, so fewer nodes/edges keeps it fast
         # while staying dense enough for radius-aware connectivity.
-        map_.set_parameters(sample_num=400, num_neighbors=8.0, min_edge_len=0.0, max_edge_len=3.0)
+        map_.set_roadmap_config(sample_num=400, num_neighbors=8.0, min_edge_length=0.0, max_edge_length=3.0)
 
     # World-frame starts so generateRandomNodes registers them as roadmap nodes.
     agents_rt = mapd_agents_to_roadmap_frame(map_, mapd["agents"])

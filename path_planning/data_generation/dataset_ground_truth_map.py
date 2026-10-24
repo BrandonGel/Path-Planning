@@ -378,10 +378,8 @@ def create_map(param: Dict, generate_new_graph: bool = False,graph_file: Path =N
         if road_map_type == 'grid':
             map_ = GraphSampler(
                 bounds=bounds, resolution=resolution, start=[], goal=[], use_discrete_space=True,
-                sample_num=0,
-                min_edge_len=1e-10,
-                max_edge_len=(1+1e-10)*param['resolution'],
-                num_neighbors=4.0,
+                roadmap_config=dict(sample_num=0, min_edge_length=1e-10,
+                                    max_edge_length=(1+1e-10)*param['resolution'], num_neighbors=4.0),
                 sampling_dist_dict=sampling_dist_dict,
             )
         elif validate_roadmap_type(road_map_type):
@@ -391,10 +389,8 @@ def create_map(param: Dict, generate_new_graph: bool = False,graph_file: Path =N
                 start=[],
                 goal=[],
                 use_discrete_space=param["use_discrete_space"],
-                sample_num=param["sample_num"],
-                min_edge_len=param["min_edge_len"],
-                max_edge_len=param["max_edge_len"],
-                num_neighbors=param["num_neighbors"],
+                roadmap_config=dict(sample_num=param["sample_num"], min_edge_length=param["min_edge_len"],
+                                    max_edge_length=param["max_edge_len"], num_neighbors=param["num_neighbors"]),
                 sampling_dist_dict=sampling_dist_dict,
             )
         else:

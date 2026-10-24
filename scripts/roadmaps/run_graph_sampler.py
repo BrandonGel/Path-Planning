@@ -19,7 +19,7 @@ def run_graph_sampler(graph_sampler,start,goal,generate_grid_nodes = True,sample
         graph_sampler.type_map[graph_sampler.world_to_map(g,discrete=True)] = TYPES.GOAL
     graph_sampler.set_start(start)
     graph_sampler.set_goal(goal)
-    graph_sampler.set_parameters(sample_num=sample_num, num_neighbors=num_neighbors, min_edge_len=min_edge_len, max_edge_len=max_edge_len)
+    graph_sampler.set_roadmap_config(sample_num=sample_num, num_neighbors=num_neighbors, min_edge_length=min_edge_len, max_edge_length=max_edge_len)
     
     st = time.time()
     nodes = graph_sampler.generateRandomNodes(generate_grid_nodes = generate_grid_nodes)

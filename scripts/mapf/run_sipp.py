@@ -27,12 +27,12 @@ if __name__ == "__main__":
             map_.inflate_obstacles(radius=agent_radius+np.sqrt(2)/2)
 
             if use_discrete_space:
-                map_.set_parameters(
-                    sample_num=0, num_neighbors=4.0, min_edge_len=0.0, max_edge_len=1.1
+                map_.set_roadmap_config(
+                    sample_num=0, num_neighbors=4.0, min_edge_length=0.0, max_edge_length=1.1
                 )
             else:
-                map_.set_parameters(
-                    sample_num=1000, num_neighbors=13.0, min_edge_len=0.0, max_edge_len=5.1
+                map_.set_roadmap_config(
+                    sample_num=1000, num_neighbors=13.0, min_edge_length=0.0, max_edge_length=5.1
                 )
 
             agents_rt = agents_yaml_to_roadmap_frame(map_, agents)  # discrete: snap to cell centres

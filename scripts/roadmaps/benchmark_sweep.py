@@ -31,7 +31,7 @@ def _build_roadmap(map_yaml: str, sample_num: int, seed: int):
     """Build a 2D continuous PRM roadmap; return (vertices, edges)."""
     set_global_seed(seed)
     m = read_graph_sampler_from_yaml(map_yaml, use_discrete_space=False)
-    m.set_parameters(sample_num=sample_num, num_neighbors=10.0, min_edge_len=0.0, max_edge_len=4.0)
+    m.set_roadmap_config(sample_num=sample_num, num_neighbors=10.0, min_edge_length=0.0, max_edge_length=4.0)
     m.set_start([]); m.set_goal([])
     nodes = m.generateRandomNodes(generate_grid_nodes=False, roadmap_type="prm")
     m.generate_map("prm", nodes)

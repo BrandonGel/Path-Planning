@@ -24,12 +24,12 @@ if __name__ == "__main__":
         agents = read_agents_from_yaml("path_planning/maps/2d/2d.yaml")
 
         if use_discrete_space:
-            map_.set_parameters(
-                sample_num=0, num_neighbors=4.0, min_edge_len=0.0, max_edge_len=1.1
+            map_.set_roadmap_config(
+                sample_num=0, num_neighbors=4.0, min_edge_length=0.0, max_edge_length=1.1
             )
         else:
-            map_.set_parameters(
-                sample_num=1000, num_neighbors=13.0, min_edge_len=0.0, max_edge_len=5.1
+            map_.set_roadmap_config(
+                sample_num=1000, num_neighbors=13.0, min_edge_length=0.0, max_edge_length=5.1
             )
 
         start = [agent["start"] for agent in agents]

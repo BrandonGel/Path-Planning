@@ -42,7 +42,7 @@ if __name__ == "__main__":
     goals = [tuple(a['goal']) for a in agents]
     map_.set_start(starts)
     map_.set_goal(goals)
-    map_.set_parameters(sample_num=800, num_neighbors=13, min_edge_len=1e-10, max_edge_len=8.0)
+    map_.set_roadmap_config(sample_num=800, num_neighbors=13, min_edge_length=1e-10, max_edge_length=8.0)
 
     st = time.time()
     nodes = map_.generateRandomNodes(generate_grid_nodes=False)

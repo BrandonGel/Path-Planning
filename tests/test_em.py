@@ -40,8 +40,8 @@ def _build_block_map(starts, goals, sample_num=400):
     map_.update_esdf()
     map_.set_start(list(starts))
     map_.set_goal(list(goals))
-    map_.set_parameters(
-        sample_num=sample_num, num_neighbors=13, min_edge_len=1e-10, max_edge_len=5.0
+    map_.set_roadmap_config(
+        sample_num=sample_num, num_neighbors=13, min_edge_length=1e-10, max_edge_length=5.0
     )
     nodes = map_.generateRandomNodes()
     map_.generate_roadmap(nodes)
