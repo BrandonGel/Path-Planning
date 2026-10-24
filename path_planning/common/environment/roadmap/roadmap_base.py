@@ -8,7 +8,7 @@ from typing import List, Tuple, TYPE_CHECKING
 import numpy as np
 from numba import njit, prange
 from scipy.sparse import csr_array
-from python_motion_planning.common.env.map.grid import TYPES
+from python_motion_planning.common.env.map.grid import TYPES, _grid_path_world_to_map_int, _grid_path_map_to_world
 
 from path_planning.common.environment.node import Node
 from path_planning.common.environment.map.numbaUtil import _world_in_collision
@@ -97,6 +97,7 @@ class RoadmapBase:
         self.nodes = np.zeros((0, self.dim))
         self.clearance = np.zeros(0)
         self.adj = csr_array((0, 0), dtype=float)
+        self.snapped: dict = {}             # original position -> node position, for builders that move nodes
 
     # ------------------------------------------------------------- identity
     def __hash__(self) -> int:
@@ -159,19 +160,28 @@ class RoadmapBase:
         self._num_nodes = len(pts)
         self.clearance = self._clearance_at(pts)
 
-    def _clearance_at(self, points: np.ndarray) -> np.ndarray:
-        """Max object radius at each point's cell; 0 outside the map."""
+    # ---------------------------------------------------------------- frames
+    def cells_of(self, points: np.ndarray) -> np.ndarray:
+        """Cell index (N, dim) int64 of each world point: nearest cell centre,
+        clipped to the grid (``_grid_path_world_to_map_int``)."""
         m = self.graph_map
-        n = len(points)
-        if n == 0:
+        pts = np.ascontiguousarray(points, dtype=np.float64).reshape(-1, self.dim)
+        return _grid_path_world_to_map_int(pts, np.asarray(m.bounds, dtype=np.float64), float(m.resolution),
+                                           np.asarray(m.shape, dtype=np.int64))
+
+    def centres_of(self, cells: np.ndarray) -> np.ndarray:
+        """World centre (N, dim) float64 of each cell (``_grid_path_map_to_world``)."""
+        m = self.graph_map
+        c = np.ascontiguousarray(cells, dtype=np.float64).reshape(-1, self.dim)
+        return _grid_path_map_to_world(c, np.asarray(m.bounds, dtype=np.float64), float(m.resolution))
+
+    def _clearance_at(self, points: np.ndarray) -> np.ndarray:
+        """Max object radius at the cell nearest each point (clipped to the
+        grid); 0 where nothing fits."""
+        if len(points) == 0:
             return np.zeros(0)
-        cells = np.rint(np.asarray(m.path_world_to_map(points), dtype=float)).astype(np.int64).reshape(n, self.dim)
-        shape = np.asarray(m.shape, dtype=np.int64)
-        inside = np.all((cells >= 0) & (cells < shape), axis=1)
-        out = np.zeros(n)
-        if inside.any():
-            out[inside] = m.inflated_esdf[tuple(cells[inside].T)]
-        return out
+        cells = self.cells_of(points)
+        return np.asarray(self.graph_map.inflated_esdf[tuple(cells.T)], dtype=float)
 
     # ------------------------------------------------------------- collision
     def in_collision(self, p1, p2=None) -> bool:
