@@ -120,8 +120,8 @@ class GraphSampler(GraphSamplerBase):
         self.boundary_nodes_index = {}
         for point in self.boundary_points:
             node = Node(tuple(point), None, 0, 0)
-            if node in self.node_index_dict:
-                self.boundary_nodes_index[node] = self.node_index_dict[node]
+            if tuple(node.current) in self.pos_index_dict:
+                self.boundary_nodes_index[node] = self.pos_index_dict[tuple(node.current)]
 
     def get_random_nodes(self) -> List[Node]:
         if len(self.nodes) >= self.roadmap_config.sample_num:
@@ -133,7 +133,7 @@ class GraphSampler(GraphSamplerBase):
         return self.nodes
     
     def get_node_index(self, node: Node) -> int:
-        return self.node_index_dict[node]
+        return self.pos_index_dict[tuple(node.current)]
  
     def set_obstacle_map(self, obstacles: np.ndarray):
         obstacles = np.array(obstacles)
@@ -155,49 +155,6 @@ class GraphSampler(GraphSamplerBase):
 
     def get_obstacle_nodes(self) -> List[Node]:
         return self.obstacle_nodes
-
-    def get_cost(self, p1_node: tuple, p2_node: tuple) -> float:
-        """
-        Get the cost between two nodes. (default: distance defined in the map)
-
-        Args:
-            p1: Start node.
-            p2: Goal node.
-        """
-        if self.cost_matrix is None:
-            return self.get_distance(p1_node.current, p2_node.current)
-        else:
-            p1_index = self.node_index_dict[p1_node]
-            p2_index = self.node_index_dict[p2_node]
-            return self.cost_matrix[p1_index, p2_index]
-
-    def get_neighbors(self, node: Node, **kwargs) -> List[Node]:
-        """
-        Get the neighbors of a node.
-        """
-        if self.road_map is None:
-            return []
-        idx = None
-        if node in self.node_index_dict:
-            idx = self.node_index_dict[node]
-        else:
-            try:
-                if getattr(self, "sample_kd_tree", None) is not None:
-                    dist, nn = self.sample_kd_tree.query(
-                        np.asarray(getattr(node, "current"), dtype=float).reshape(1, -1), k=1
-                    )
-                    dist = float(dist.reshape(-1)[0])
-                    nn = int(nn.reshape(-1)[0])
-                    if dist <= 1e-6 and 0 <= nn < len(self.nodes):
-                        idx = nn
-            except Exception:
-                idx = None
-        if idx is None:
-            return []
-        neighbors = [self.nodes[i] for i in self.road_map[int(idx)]]
-        if self.track_with_link:
-            neighbors = [neighbor.link(node) for neighbor in neighbors]
-        return neighbors
 
     def _make_constraint_sweep(self):
         """Build the spatial-sweep backend.
@@ -398,11 +355,11 @@ class GraphSampler(GraphSamplerBase):
         self.boundary_points = data.get("boundary_points", [])
 
         # Set up node index dict
-        self.node_index_dict = {node: i for i, node in enumerate(self.nodes)}
+        self.pos_index_dict = {tuple(node.current): i for i, node in enumerate(self.nodes)}
         self.cost_matrix = cdist(np.array([node.current for node in self.nodes]), np.array([node.current for node in self.nodes]), metric='euclidean')
-        self.start_nodes_index = {Node(tuple(start),None,0,0):self.node_index_dict[Node(tuple(start),None,0,0)] for start in self.start}
-        self.goal_nodes_index = {Node(tuple(goal),None,0,0):self.node_index_dict[Node(tuple(goal),None,0,0)] for goal in self.goal}
-        self.grid_nodes_index = {Node(tuple(grid_point),None,0,0):self.node_index_dict[Node(tuple(grid_point),None,0,0)] for grid_point in self.grid_points}
+        self.start_nodes_index = {Node(tuple(start),None,0,0):self.pos_index_dict[tuple(start)] for start in self.start}
+        self.goal_nodes_index = {Node(tuple(goal),None,0,0):self.pos_index_dict[tuple(goal)] for goal in self.goal}
+        self.grid_nodes_index = {Node(tuple(grid_point),None,0,0):self.pos_index_dict[tuple(grid_point)] for grid_point in self.grid_points}
         self._rebuild_boundary_nodes_index()
 
         # Calculate edges (must happen before get_start/goal_nodes_with_all_edges)
@@ -546,17 +503,17 @@ class GraphSampler(GraphSamplerBase):
         ]
 
         # 6. Rebuild index dicts
-        self.node_index_dict = {node: i for i, node in enumerate(self.nodes)}
+        self.pos_index_dict = {tuple(node.current): i for i, node in enumerate(self.nodes)}
         self.start_nodes_index = {
-            Node(tuple(s), None, 0, 0): self.node_index_dict[Node(tuple(s), None, 0, 0)]
+            Node(tuple(s), None, 0, 0): self.pos_index_dict[tuple(s)]
             for s in self.start
         }
         self.goal_nodes_index = {
-            Node(tuple(g), None, 0, 0): self.node_index_dict[Node(tuple(g), None, 0, 0)]
+            Node(tuple(g), None, 0, 0): self.pos_index_dict[tuple(g)]
             for g in self.goal
         }
         self.grid_nodes_index = {
-            Node(tuple(gp), None, 0, 0): self.node_index_dict[Node(tuple(gp), None, 0, 0)]
+            Node(tuple(gp), None, 0, 0): self.pos_index_dict[tuple(gp)]
             for gp in self.grid_points
         }
         self._rebuild_boundary_nodes_index()

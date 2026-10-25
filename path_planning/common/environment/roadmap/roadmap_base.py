@@ -299,11 +299,18 @@ class RoadmapBase:
         return edges, edge_indices_dict, edge_weights
 
     # ------------------------------------------------------------- shortest paths
-    def dijkstra(self, source: int, limit: float = np.inf) -> List[Tuple[int, float]]:
-        """``[(node, distance), ...]`` for every node reachable from ``source``
-        (itself included at 0), in node order: the layout
-        ``GraphSamplerBase._dijkstra`` returns."""
+    def dijkstra(self, source: int, target: int | None = None, *, limit: float = np.inf
+                 ) -> float | List[Tuple[int, float]]:
+        """Roadmap distances from node ``source``.
+
+        With ``target``: the shortest-path length to that node as a float,
+        ``inf`` when unreachable. Without: ``[(node, distance), ...]`` for every
+        node reachable from ``source`` (itself included at 0), in node order.
+        ``limit`` caps the search radius.
+        """
         dist = shortest_paths(int(source), self.adj, limit=limit)
+        if target is not None:
+            return float(dist[int(target)])
         reach = np.flatnonzero(np.isfinite(dist))
         return list(zip(reach.tolist(), dist[reach].tolist()))
 

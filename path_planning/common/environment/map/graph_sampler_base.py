@@ -17,6 +17,7 @@ from path_planning.common.environment.map.numbaUtil import _world_line_of_sight,
 from path_planning.common.environment.roadmap.roadmap_base import RoadmapConfig
 from path_planning.common.environment.roadmap.roadmap import Roadmap
 from path_planning.common.environment.map.node_sampling import sample_grid_nodes, sample_boundary_nodes, sample_halton_nodes, random_sampling, distributed_sampling
+from path_planning.common.utils.geometry import GeometryNumpy as Geometry
 import faiss
 import pickle
 
@@ -59,7 +60,7 @@ class GraphSamplerBase(Grid):
         self.roadmap = Roadmap(self, config=roadmap_config)
         self.num_total_nodes = self.roadmap_config.sample_num + len(self.start) + len(self.goal)
         self.cost_matrix = None
-        self.node_index_dict = {}
+        self.pos_index_dict = {}
         self.start_nodes_index = {}
         self.goal_nodes_index = {}
         self.grid_nodes_index = {}
@@ -80,7 +81,6 @@ class GraphSamplerBase(Grid):
         self.use_exact_collision_check = use_exact_collision_check
         self.sweep_backend = sweep_backend
         self.constraint_sweep = self._make_constraint_sweep()
-        self.sample_kd_tree = None
         self.use_dijkstra = use_dijkstra
         self.sampling_dist_dict = sampling_dist_dict if sampling_dist_dict else {}
         self._inflated_esdf = None          # cache for the inflated_esdf property
@@ -203,8 +203,8 @@ class GraphSamplerBase(Grid):
         self.boundary_nodes_index = {}
         for point in self.boundary_points:
             node = Node(tuple(point), None, 0, 0)
-            if node in self.node_index_dict:
-                self.boundary_nodes_index[node] = self.node_index_dict[node]
+            if tuple(node.current) in self.pos_index_dict:
+                self.boundary_nodes_index[node] = self.pos_index_dict[tuple(node.current)]
 
     def get_random_nodes(self) -> List[Node]:
         if len(self.nodes) >= self.roadmap_config.sample_num:
@@ -216,39 +216,32 @@ class GraphSamplerBase(Grid):
         return self.nodes
     
     def get_node_index(self, node: Node) -> int:
-        return self.node_index_dict[node]
+        return self.pos_index_dict[tuple(node.current)]
 
+
+    def _all_edges_from(self, u_indices) -> dict:
+        """``{u: [(v, distance), ...]}`` from each node index in ``u_indices`` to the
+        other nodes, through ``get_distance``: roadmap Dijkstra distances to every
+        reachable node when ``use_dijkstra``, else straight-line distances to all
+        nodes. ``v`` are node indices, in node order."""
+        if len(self.nodes) == 0 or self.road_map is None or len(self.road_map) != len(self.nodes):
+            raise ValueError("Edges have not been generated yet. Please generate the roadmap first.")
+        pts = [tuple(n.current) for n in self.nodes]
+        if self.use_dijkstra:
+            return {u: [(self.pos_index_dict[p], d)
+                        for p, d in self.get_distance(pts[u], type='dijkstra')] for u in u_indices}
+        return {u: [(v, self.get_distance(pts[u], pts[v])) for v in range(len(pts))] for u in u_indices}
 
     def get_start_nodes_with_all_edges(self):
-        if len(self.start_to_all_edges_dict) > 0:
-            return self.start_to_all_edges_dict
-        if (
-            len(self.nodes) == 0
-            or self.road_map is None
-            or len(self.road_map) != len(self.nodes)
-        ):
-            raise ValueError("Edges have not been generated yet. Please generate the roadmap first.")
-        u_indices = [self.start_nodes_index[node] for node in self.get_start_nodes()]
-        if self.use_dijkstra:
-            self.start_to_all_edges_dict = {u: self.roadmap.dijkstra(u) for u in u_indices}
-        else:
-            self.start_to_all_edges_dict = {u: [(v,self.get_cost(self.nodes[u],self.nodes[v])) for v in range(len(self.nodes))] for u in u_indices}
+        if len(self.start_to_all_edges_dict) == 0:
+            u_indices = [self.start_nodes_index[node] for node in self.get_start_nodes()]
+            self.start_to_all_edges_dict = self._all_edges_from(u_indices)
         return self.start_to_all_edges_dict
 
     def get_goal_nodes_with_all_edges(self):
-        if len(self.goal_to_all_edges_dict) > 0:
-            return self.goal_to_all_edges_dict
-        if (
-            len(self.nodes) == 0
-            or self.road_map is None
-            or len(self.road_map) != len(self.nodes)    
-        ):
-            raise ValueError("Edges have not been generated yet. Please generate the roadmap first.")
-        u_indices = [self.goal_nodes_index[node] for node in self.get_goal_nodes()]
-        if self.use_dijkstra:
-            self.goal_to_all_edges_dict = {u: self.roadmap.dijkstra(u) for u in u_indices}
-        else:
-            self.goal_to_all_edges_dict = {u: [(v,self.get_cost(self.nodes[u],self.nodes[v])) for v in range(len(self.nodes))] for u in u_indices}
+        if len(self.goal_to_all_edges_dict) == 0:
+            u_indices = [self.goal_nodes_index[node] for node in self.get_goal_nodes()]
+            self.goal_to_all_edges_dict = self._all_edges_from(u_indices)
         return self.goal_to_all_edges_dict
 
     def set_obstacle_map(self, obstacles: np.ndarray):
@@ -272,20 +265,38 @@ class GraphSamplerBase(Grid):
     def get_obstacle_nodes(self) -> List[Node]:
         return self.obstacle_nodes
 
-    def get_cost(self, p1_node: tuple, p2_node: tuple) -> float:
-        """
-        Get the cost between two nodes. (default: distance defined in the map)
+    def _index_of(self, p) -> int:
+        """Node index of a world point (exact match in ``pos_index_dict``). An
+        integer passes through. Raises ``KeyError`` when the point is not a
+        roadmap node."""
+        if isinstance(p, (int, np.integer)):
+            return int(p)
+        idx = self.pos_index_dict.get(tuple(float(x) for x in np.asarray(p).reshape(-1)))
+        if idx is not None:
+            return int(idx)
+        raise KeyError(f"point {tuple(float(x) for x in np.asarray(p).reshape(-1))} is not a roadmap node")
 
-        Args:
-            p1: Start node.
-            p2: Goal node.
+    def get_distance(self, p1, p2=None, type: str = 'Euclidean') -> float | List[Tuple[tuple, float]]:
+        """Distance between world points.
+
+        ``type`` ``'Euclidean'`` / ``'Manhattan'``: straight-line distance between
+        ``p1`` and ``p2`` (both required). ``type='dijkstra'``: shortest-path length
+        over the roadmap; ``p1`` / ``p2`` must be roadmap nodes (world coordinates,
+        resolved with ``_index_of``). With ``p2`` the result is a float, ``inf``
+        when unreachable; without ``p2`` it is ``[(point, distance), ...]`` for
+        every node reachable from ``p1`` (itself at 0), in node order.
         """
-        if self.cost_matrix is None:
-            return self.get_distance(p1_node.current, p2_node.current)
-        else:
-            p1_index = self.node_index_dict[p1_node]
-            p2_index = self.node_index_dict[p2_node]
-            return self.cost_matrix[p1_index, p2_index]
+        if type == 'dijkstra':
+            u = self._index_of(p1)
+            if p2 is not None:
+                v = self._index_of(p2)
+                return float(self.roadmap.dijkstra(u, v))
+            return [(tuple(self.nodes[v].current), d) for v, d in self.roadmap.dijkstra(u)]
+        if type not in ('Euclidean', 'Manhattan'):
+            raise ValueError(f"get_distance: unknown type {type!r}; expected 'Euclidean', 'Manhattan' or 'dijkstra'")
+        if p2 is None:
+            raise ValueError("get_distance: p2 is required for a straight-line distance")
+        return Geometry.dist(p1, p2, type)
 
     def get_neighbors(self, node: Node, **kwargs) -> List[Node]:
         """
@@ -293,24 +304,11 @@ class GraphSamplerBase(Grid):
         """
         if self.road_map is None:
             return []
-        idx = None
-        if node in self.node_index_dict:
-            idx = self.node_index_dict[node]
-        else:
-            try:
-                if getattr(self, "sample_kd_tree", None) is not None:
-                    dist, nn = self.sample_kd_tree.query(
-                        np.asarray(getattr(node, "current"), dtype=float).reshape(1, -1), k=1
-                    )
-                    dist = float(dist.reshape(-1)[0])
-                    nn = int(nn.reshape(-1)[0])
-                    if dist <= 1e-6 and 0 <= nn < len(self.nodes):
-                        idx = nn
-            except Exception:
-                idx = None
-        if idx is None:
+        try:
+            idx = self._index_of(node.current)
+        except KeyError:
             return []
-        neighbors = [self.nodes[i] for i in self.road_map[int(idx)]]
+        neighbors = [self.nodes[i] for i in self.road_map[idx]]
         if self.track_with_link:
             neighbors = [neighbor.link(node) for neighbor in neighbors]
         return neighbors
@@ -505,10 +503,10 @@ class GraphSamplerBase(Grid):
             # the quota.
             accepted_this_round = 0
             for node in accepted_nodes:
-                if node in self.node_index_dict:
+                if tuple(node.current) in self.pos_index_dict:
                     continue
                 nodes.append(node)
-                self.node_index_dict[node] = len(nodes) - 1
+                self.pos_index_dict[tuple(node.current)] = len(nodes) - 1
                 accepted_this_round += 1
                 if len(nodes) == self.roadmap_config.sample_num:
                     break
@@ -533,14 +531,14 @@ class GraphSamplerBase(Grid):
         if generate_grid_nodes:
             grid_nodes, world_grid_points = sample_grid_nodes(self)
             for node, world_pt in zip(grid_nodes, world_grid_points):
-                if node in self.node_index_dict:
+                if tuple(node.current) in self.pos_index_dict:
                     # A snapped random sample already occupies this cell:
                     # reuse it as the grid node instead of adding a duplicate.
-                    self.grid_nodes_index[node] = self.node_index_dict[node]
+                    self.grid_nodes_index[node] = self.pos_index_dict[tuple(node.current)]
                     self.grid_points.append(world_pt)
                     continue
                 nodes.append(node)
-                self.node_index_dict[node] = len(nodes) - 1
+                self.pos_index_dict[tuple(node.current)] = len(nodes) - 1
                 self.grid_nodes_index[node] = len(nodes) - 1
                 self.grid_points.append(world_pt)
 
@@ -556,33 +554,33 @@ class GraphSamplerBase(Grid):
             boundary_nodes, _ = sample_boundary_nodes(self)
             for node in boundary_nodes:
                 current = node.current
-                if node in self.node_index_dict:
+                if tuple(node.current) in self.pos_index_dict:
                     # Cell already registered (grid node / snapped sample):
                     # reuse it, but still record it as a boundary point so
                     # save/load rebuilds boundary_nodes_index identically.
-                    self.boundary_nodes_index[node] = self.node_index_dict[node]
+                    self.boundary_nodes_index[node] = self.pos_index_dict[tuple(node.current)]
                     self.boundary_points.append(current)
                     continue
                 nodes.append(node)
-                self.node_index_dict[node] = len(nodes) - 1
+                self.pos_index_dict[tuple(node.current)] = len(nodes) - 1
                 self.boundary_nodes_index[node] = len(nodes) - 1
                 self.boundary_points.append(current)
 
         for start in self.start:
             node = Node(tuple(start),None,0,0)
-            if node in self.node_index_dict:
-                self.start_nodes_index[node] = self.node_index_dict[node]
+            if tuple(node.current) in self.pos_index_dict:
+                self.start_nodes_index[node] = self.pos_index_dict[tuple(node.current)]
                 continue
             nodes.append(node)
-            self.node_index_dict[node] = len(nodes) - 1
+            self.pos_index_dict[tuple(node.current)] = len(nodes) - 1
             self.start_nodes_index[node] = len(nodes) - 1
         for goal in self.goal:
             node = Node(tuple(goal),None,0,0)
-            if node in self.node_index_dict:
-                self.goal_nodes_index[node] = self.node_index_dict[node]
+            if tuple(node.current) in self.pos_index_dict:
+                self.goal_nodes_index[node] = self.pos_index_dict[tuple(node.current)]
                 continue
             nodes.append(node)
-            self.node_index_dict[node] = len(nodes) - 1
+            self.pos_index_dict[tuple(node.current)] = len(nodes) - 1
             self.goal_nodes_index[node] = len(nodes) - 1
         
         # Update total node count after all nodes are added
@@ -643,25 +641,25 @@ class GraphSamplerBase(Grid):
             node = Node(current,None,0,0)
             if not filter_points or not self.in_collision(tuple(pos)):
                 nodes.append(node)
-                self.node_index_dict[node] = len(nodes) - 1
+                self.pos_index_dict[tuple(node.current)] = len(nodes) - 1
                 num_nodes += 1
         if len(nodes) < len(points):
             print(f"Warning: number of nodes is less than number of points")
         for start in self.start:
             node = Node(tuple(start),None,0,0)
-            if node in self.node_index_dict:
-                self.start_nodes_index[node] = self.node_index_dict[node]
+            if tuple(node.current) in self.pos_index_dict:
+                self.start_nodes_index[node] = self.pos_index_dict[tuple(node.current)]
                 continue
             nodes.append(node)
-            self.node_index_dict[node] = len(nodes) - 1
+            self.pos_index_dict[tuple(node.current)] = len(nodes) - 1
             self.start_nodes_index[node] = len(nodes) - 1
         for goal in self.goal:
             node = Node(tuple(goal),None,0,0)
-            if node in self.node_index_dict:
-                self.goal_nodes_index[node] = self.node_index_dict[node]
+            if tuple(node.current) in self.pos_index_dict:
+                self.goal_nodes_index[node] = self.pos_index_dict[tuple(node.current)]
                 continue
             nodes.append(node)
-            self.node_index_dict[node] = len(nodes) - 1
+            self.pos_index_dict[tuple(node.current)] = len(nodes) - 1
             self.goal_nodes_index[node] = len(nodes) - 1
         
         # Update total node count after all nodes are added
@@ -833,7 +831,7 @@ class GraphSamplerBase(Grid):
         super().inflate_obstacles(radius)
 
     def clear_data(self):
-        self.roadmap = None
+        self.roadmap = Roadmap(self, config=self.roadmap_config)   # empty roadmap, same parameters
         self.road_map = []
         self.edges = []
         self.edge_indices_dict = {}
@@ -843,7 +841,7 @@ class GraphSamplerBase(Grid):
         self.start_to_all_edges_dict = {}
         self.goal_to_all_edges_dict = {}
         self.nodes = []
-        self.node_index_dict = {}
+        self.pos_index_dict = {}
         self.start_nodes_index = {}
         self.goal_nodes_index = {}
         self.grid_nodes_index = {}

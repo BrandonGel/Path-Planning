@@ -109,7 +109,7 @@ class Roadmap(RoadmapBase):
 
     def apply_to(self, graph_map: "GraphSamplerBase | None" = None, with_cost_matrix: bool = True) -> "GraphSamplerBase":
         """Install this roadmap into ``graph_map`` the way ``generate_map`` does:
-        ``nodes``, ``node_index_dict``, start/goal/grid/boundary indices,
+        ``nodes``, ``pos_index_dict``, start/goal/grid/boundary indices,
         ``road_map`` + ``road_map_edge_weights``, ``edges`` / ``edge_indices_dict``
         / ``edge_weights``, ``num_total_nodes``, ``sample_kd_tree`` and (unless
         ``with_cost_matrix`` is False) the dense ``cost_matrix``. Start and goal
@@ -123,28 +123,28 @@ class Roadmap(RoadmapBase):
         weights = self.edge_weights
         index = {}
         for i, node in enumerate(nodes):
-            index.setdefault(node, i)
+            index.setdefault(tuple(node.current), i)
 
         def register(points: list, target: dict) -> None:
             target.clear()
             for p in points:
-                key = Node(tuple(p), None, 0, 0)      # indices stay keyed by the given position
-                node = key
-                if node not in index and tuple(p) in self.snapped:
-                    node = Node(self.snapped[tuple(p)], None, 0, 0)   # builder moved it (e.g. Lattice snap)
-                if node not in index:                 # not produced by the builder: isolated node
-                    index[node] = len(nodes)
-                    nodes.append(node)
+                key = Node(tuple(p), None, 0, 0)      # start/goal indices stay keyed by the given position
+                pos = tuple(p)
+                if pos not in index and pos in self.snapped:
+                    pos = tuple(self.snapped[pos])    # builder moved it (e.g. Lattice snap)
+                if pos not in index:                  # not produced by the builder: isolated node
+                    index[pos] = len(nodes)
+                    nodes.append(Node(pos, None, 0, 0))
                     road_map.append([])
                     weights.append([])
-                target[key] = index[node]
+                target[key] = index[pos]
 
         old_grid = [n.current for n in gm.nodes if n in gm.grid_nodes_index] if gm.nodes else []
-        gm.node_index_dict = index
+        gm.pos_index_dict = index
         register(list(gm.start), gm.start_nodes_index)
         register(list(gm.goal), gm.goal_nodes_index)
-        gm.grid_nodes_index = {Node(tuple(p), None, 0, 0): index[Node(tuple(p), None, 0, 0)]
-                               for p in old_grid if Node(tuple(p), None, 0, 0) in index}
+        gm.grid_nodes_index = {Node(tuple(p), None, 0, 0): index[tuple(p)]
+                               for p in old_grid if tuple(p) in index}
 
         gm.nodes = nodes
         gm.num_total_nodes = len(nodes)
