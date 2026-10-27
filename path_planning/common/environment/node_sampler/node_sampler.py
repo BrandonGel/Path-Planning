@@ -4,7 +4,7 @@ from path_planning.common.environment.node import Node
 from typing import List, Tuple, TYPE_CHECKING
 from scipy.stats import qmc
 from typing import Final
-from path_planning.common.environment.node_sampler.node_sampler_util import validate_sampling_type, density_probability, boundary_vertices
+from path_planning.common.environment.node_sampler.node_sampler_util import validate_sampling_type, density_probability, boundary_vertices, mark_boundary_nodes_from_sampled_nodes
 if TYPE_CHECKING:
     from path_planning.common.environment.map.graph_sampler_base import GraphSamplerBase
 
@@ -42,14 +42,12 @@ class NodeSampler:
         # Node -> index in nodes, one dict per node kind (a node can be in several)
         self._sample_points_index: dict = {}
         self._custom_points_index: dict = {}
-        self._grid_points_index: dict = {}
         self._boundary_points_index: dict = {}
         self._start_points_index: dict = {}
         self._goal_points_index: dict = {}
         self._points_index_dict: dict = {
             'sample_points': self._sample_points_index,
             'custom_points': self._custom_points_index,
-            'grid_points': self._grid_points_index,
             'boundary_points': self._boundary_points_index,
             'start_points': self._start_points_index,
             'goal_points': self._goal_points_index,
@@ -82,7 +80,7 @@ class NodeSampler:
 
     @property
     def points_index_dict(self, index_type: str = '') -> dict:
-        """Kind name (``'sample_points'``, ``'custom_points'``, ``'grid_points'``,
+        """Kind name (``'sample_points'``, ``'custom_points'``,
         ``'boundary_points'``, ``'start_points'``, ``'goal_points'``) -> its
         ``Node -> index`` dict."""
         if index_type in self._points_index_dict and index_type != '':
@@ -185,7 +183,7 @@ class NodeSampler:
         pts = np.asarray(points, dtype=np.float64).reshape(-1, self.dim)
         if len(pts) != len(self._nodes):
             raise ValueError(f"set_positions: {len(pts)} points for {len(self._nodes)} nodes")
-        by_index = {kind: {i: None for i in index.values()} for kind, index in self._points_index_dict.items()}
+        by_index = {kind: list(index.values()) for kind, index in self._points_index_dict.items()}
         self._nodes = [Node(p, None, 0, 0, old.max_clearance) for p, old in zip(convert_np_to_tuple(pts), self._nodes)]
         self._pos_index_dict = {}
         for i, node in enumerate(self._nodes):
@@ -220,6 +218,14 @@ class NodeSampler:
         radii = self.inflated_esdf[tuple(cells.T)]
         return [Node(point, None, 0, 0, float(radius))
                 for point, radius in zip(convert_np_to_tuple(points), radii)]
+
+    def register_points(self, kind: str, points) -> int:
+        """Register ``points`` (world tuples, an ``(N, dim)`` array or ``Node``
+        objects) under ``kind`` (a key of ``points_index_dict``), reusing nodes
+        already at those positions. Returns how many nodes were new."""
+        if kind not in self._points_index_dict:
+            raise ValueError(f"register_points: unknown kind {kind!r}; expected one of {list(self._points_index_dict)}")
+        return self._add_points(points, self._points_index_dict[kind])
 
     def _add_points(self, points, index_dict: dict) -> int:
         """Register a node per point in ``index_dict`` (``Node -> index``),
@@ -504,8 +510,9 @@ class NodeSampler:
             self._add_points(pts_list, self._custom_points_index)
 
         if generate_grid_nodes:
-            # A snapped random sample already in a cell is reused as its grid node.
-            self._add_points(self.sample_grid_points(), self._grid_points_index)
+            # Grid nodes are samples on the cell-centre lattice: they join the
+            # sample kind. A snapped random sample already in a cell is reused.
+            self._add_points(self.sample_grid_points(), self._sample_points_index)
 
         if generate_boundary_nodes:
             # Vertices on the outline of free space: the corners of the
@@ -520,4 +527,18 @@ class NodeSampler:
             self._add_points(start_list, self._start_points_index)
         if goal_list is not None:
             self._add_points(goal_list, self._goal_points_index)
+
+        if not generate_boundary_nodes:
+            # No outline nodes were generated: mark the nodes already present
+            # (samples, custom, grid, start, goal) whose cell touches a wall or
+            # the map edge as boundary nodes instead, so the boundary kind is
+            # populated either way. Done last so a start/goal on the outline
+            # is included (the dataset code gives start/goal precedence).
+            marked = mark_boundary_nodes_from_sampled_nodes(
+                self._nodes, self.path_world_to_map(self.pos_points), self.graph_map.type_map.data)
+            # update in place: self._points_index_dict['boundary_points'] is this same dict
+            self._boundary_points_index.clear()
+            self._boundary_points_index.update(marked)
         return self._nodes
+
+    

@@ -3,6 +3,23 @@ from itertools import product
 from python_motion_planning.common import TYPES
 SAMPLING_TYPES = ('random', 'halton', 'distributed')
 
+def boundary_cells(type_map: np.ndarray, include_map_edge: bool = True) -> np.ndarray:
+    """Boolean mask of the free cells on the outline of free space: a cell is
+    free (neither OBSTACLE nor INFLATION) and one of its 3^dim - 1 neighbours
+    is blocked, or lies outside the map when ``include_map_edge`` is True.
+    The cell-level counterpart of ``boundary_vertices``: a sampled node in
+    such a cell sits next to a wall."""
+    blocked = (type_map == TYPES.OBSTACLE) | (type_map == TYPES.INFLATION)
+    dim = blocked.ndim
+    padded = np.pad(blocked, 1, mode="constant", constant_values=include_map_edge)
+    near_blocked = np.zeros_like(blocked)
+    for off in product((0, 1, 2), repeat=dim):
+        if all(o == 1 for o in off):
+            continue
+        near_blocked |= padded[tuple(slice(o, o + n) for o, n in zip(off, blocked.shape))]
+    return ~blocked & near_blocked
+
+
 def boundary_vertices(type_map: np.ndarray, include_map_edge: bool = True):
     """Lattice vertices on the outline of free space.
 
@@ -87,3 +104,16 @@ def validate_sampling_type(sampling_type: str) -> str:
     if sampling_type not in SAMPLING_TYPES:
         raise ValueError(f"sampling_type must be one of {SAMPLING_TYPES}, got {sampling_type!r}")
     return sampling_type
+
+
+def mark_boundary_nodes_from_sampled_nodes(nodes, cells, data_map: np.ndarray, include_map_edge: bool = True) -> dict:
+    """``{node: index}`` of the nodes whose cell is on the outline of free
+    space (free cell with a blocked or, when ``include_map_edge``, an off-map
+    neighbour; see ``boundary_cells``). ``cells`` is the ``(N, dim)`` cell of
+    each node. Nodes in blocked cells are never marked. The dict has the
+    ``Node -> index`` layout of the sampler's kind indices."""
+    if len(nodes) == 0:
+        return {}
+    on_outline = boundary_cells(data_map, include_map_edge)
+    mask = on_outline[tuple(np.asarray(cells, dtype=np.int64).T)]
+    return {nodes[i]: int(i) for i in np.flatnonzero(mask)}
