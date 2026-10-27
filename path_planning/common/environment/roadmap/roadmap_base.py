@@ -200,10 +200,26 @@ class RoadmapBase:
         self._dim = self.graph_map.dim
         self._num_nodes = 0
 
-        self.nodes = np.zeros((0, self.dim))
-        self.clearance = np.zeros(0)
-        self.adj = csr_array((0, 0), dtype=float)
-        self.snapped: dict = {}             # original position -> node position, for builders that move nodes
+        self._nodes: np.ndarray = np.zeros((0, self.dim))
+        self._clearance: np.ndarray = np.zeros(0)
+        self._adj: csr_array = csr_array((0, 0), dtype=float)
+        self._snapped: dict = {}             # original position -> node position, for builders that move nodes
+
+    @property
+    def nodes(self) -> np.ndarray:
+        return self._nodes
+
+    @property
+    def clearance(self) -> np.ndarray:
+        return self._clearance
+
+    @property
+    def adj(self) -> csr_array:
+        return self._adj
+
+    @property
+    def snapped(self) -> dict:
+        return self._snapped
 
     # ---------------------------------------------------------------- config
     @property
@@ -312,9 +328,14 @@ class RoadmapBase:
     def set_nodes(self, samples: List[Node]) -> None:
         n = len(samples)
         self._num_nodes = n
-        self.nodes = np.asarray([s.current for s in samples], dtype=float).reshape(n, self.dim)
-        self.clearance = np.asarray([s.max_clearance for s in samples], dtype=float)
-        self.adj = csr_array((n, n), dtype=float)
+        if len(samples) > 0:
+            self._nodes = np.asarray([s.current for s in samples], dtype=float).reshape(n, self.dim)
+            self._clearance = np.asarray([s.max_clearance for s in samples], dtype=float)
+            self._adj = csr_array((n, n), dtype=float)
+        else:
+            self._nodes = np.zeros((0, self.dim))
+            self._clearance = np.zeros(0)
+            self._adj = csr_array((0, 0), dtype=float)
 
     def set_adjacency(self, roadmap_edges: List[List[int]], roadmap_weights: List[List[float]] | None = None) -> None:
         """Install the adjacency from per-node neighbour lists (the
@@ -331,7 +352,7 @@ class RoadmapBase:
         else:
             u = np.repeat(np.arange(n), counts)
             data = np.linalg.norm(self.nodes[u] - self.nodes[indices], axis=1) if len(u) else np.zeros(0)
-        self.adj = csr_array((data, indices, indptr), shape=(n, n))
+        self._adj = csr_array((data, indices, indptr), shape=(n, n))
 
     def append_isolated_nodes(self, points) -> None:
         """Append nodes with no edges (e.g. a start or goal the builder did
@@ -340,18 +361,18 @@ class RoadmapBase:
         if len(pts) == 0:
             return
         n, k = self.num_nodes, len(pts)
-        self.nodes = np.vstack([self.nodes.reshape(n, self.dim), pts])
-        self.clearance = np.concatenate([self.clearance, self._clearance_at(pts)])
+        self._nodes = np.vstack([self.nodes.reshape(n, self.dim), pts])
+        self._clearance = np.concatenate([self.clearance, self._clearance_at(pts)])
         self._num_nodes = n + k
         indptr = np.concatenate([self.adj.indptr, np.full(k, self.adj.indptr[-1])])
-        self.adj = csr_array((self.adj.data, self.adj.indices, indptr), shape=(n + k, n + k))
+        self._adj = csr_array((self.adj.data, self.adj.indices, indptr), shape=(n + k, n + k))
 
     def _set_points(self, points: np.ndarray) -> None:
         """Replace the nodes with raw points; clearance is read from the map."""
         pts = np.ascontiguousarray(points, dtype=np.float64).reshape(-1, self.dim)
-        self.nodes = pts
+        self._nodes = pts
         self._num_nodes = len(pts)
-        self.clearance = self._clearance_at(pts)
+        self._clearance = self._clearance_at(pts)
 
     # ---------------------------------------------------------------- frames
     def cells_of(self, points: np.ndarray) -> np.ndarray:
@@ -399,7 +420,7 @@ class RoadmapBase:
         pts = np.ascontiguousarray(self.nodes, dtype=np.float64)
         keep, w = _filter_edges_kernel(pts, eu, ev, float(self.min_edge_length), float(self.max_edge_length),
                                        bool(filter_collision), *self._collision_args())
-        self.adj = _symmetric_csr(self.num_nodes, eu[keep], ev[keep], w[keep])
+        self._adj = _symmetric_csr(self.num_nodes, eu[keep], ev[keep], w[keep])
         return self.adj
 
     # --------------------------------------------------------------- builder
@@ -411,4 +432,6 @@ class RoadmapBase:
     def generate_roadmap(self, samples: List[Node], **kwargs) -> csr_array:
         """Install ``samples`` as the nodes, then ``generate(**kwargs)``."""
         self.set_nodes(samples)
+        if self.num_nodes == 0:
+            raise ValueError("No nodes to generate roadmap")
         return self.generate(**kwargs)

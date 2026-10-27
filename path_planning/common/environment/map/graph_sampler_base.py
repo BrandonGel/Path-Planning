@@ -16,7 +16,7 @@ from python_motion_planning.common.env.map.grid import _njit, _grid_line_of_sigh
 from path_planning.common.environment.map.numbaUtil import _world_line_of_sight, _world_in_collision, _grid_vector_is_expandable, convert_np_to_tuple, _world_min_wall_distance
 from path_planning.common.environment.roadmap.roadmap_base import RoadmapConfig
 from path_planning.common.environment.roadmap.roadmap import Roadmap
-from path_planning.common.environment.map.node_sampler import NodeSampler
+from path_planning.common.environment.node_sampler.node_sampler import NodeSampler
 from path_planning.common.utils.geometry import GeometryNumpy as Geometry
 import faiss
 import pickle
@@ -49,34 +49,20 @@ class GraphSamplerBase(Grid):
         assert isinstance(goal, list), "Goal must be a list"
         self.start = start
         self.goal = goal
-        self.grid_points = []
-        self.boundary_points = []
+        self._boundary_points = []
         self.obstacles = []
         self.obs_size = 0.5
         # Roadmap parameters (sample_num, num_neighbors, edge band, RRG rates,
         # ...) live in one RoadmapConfig: a dict, a RoadmapConfig or the path of
         # a YAML file such as config/roadmap.yaml; see set_roadmap_config.
-        self.nodes = []
         self.node_sampler = NodeSampler(self)      # reads the map live; see NodeSampler
         self.roadmap = Roadmap(self, config=roadmap_config)
-        self.num_total_nodes = self.roadmap_config.sample_num + len(self.start) + len(self.goal)
-        self.cost_matrix = None
-        self.pos_index_dict = {}
-        self.start_nodes_index = {}
-        self.goal_nodes_index = {}
-        self.grid_nodes_index = {}
-        self.boundary_nodes_index = {}
-        self.start_to_all_edges_dict = {}
-        self.goal_to_all_edges_dict = {}
         
         self.obstacle_nodes = []
         self.track_with_link = False
-        self.edges = []
-        self.edge_weights = []
+
         self.use_discrete_space = use_discrete_space
 
-
-        
 
         self.use_constraint_sweep = use_constraint_sweep
         self.record_sweep = record_sweep
@@ -84,10 +70,11 @@ class GraphSamplerBase(Grid):
         self.sweep_backend = sweep_backend
         self.constraint_sweep = self._make_constraint_sweep()
         self.sampling_dist_dict = sampling_dist_dict if sampling_dist_dict else {}
-        self._inflated_esdf = None          # cache for the inflated_esdf property
-        self._inflated_esdf_source = None   # the esdf array it was computed from
-        # Task endpoints, world coords. Visualization-only metadata (no roadmap
-        # side effects), populated via set_endpoints() for e.g. MAPD demos.
+
+        self._inflated_esdf = None          # inflated esdf cache
+        self._inflated_esdf_source = None   # inflated esdf source to update inflated esdf
+
+
         self.pickups = []
         self.deliveries = []
         self.parking = []
@@ -123,16 +110,29 @@ class GraphSamplerBase(Grid):
         return self.roadmap.config
 
     @roadmap_config.setter
-    def roadmap_config(self, config: "dict | RoadmapConfig | str | None") -> None:
-        self.roadmap.config = RoadmapConfig.load(config)
+    def roadmap_config(self, config: "dict | RoadmapConfig | str | None" = None, **fields) -> None:
+        """Replace or update the roadmap parameters.
 
-    # Nested per-node views of the roadmap, read from ``self.roadmap`` (CSR):
-    # ``road_map[u]`` are the neighbour indices of node u, ``road_map_edge_weights[u]``
-    # the matching edge lengths. ``roadmap_edges`` / ``roadmap_weights`` are the
-    # same lists under the Roadmap's names. Empty before a roadmap exists.
-    @property
-    def road_map(self) -> List[List[int]]:
-        return self.roadmap.roadmap_edges if self.roadmap is not None else []
+        A ``RoadmapConfig`` or a YAML path replaces the current config. A dict
+        and/or keyword fields (``sample_num``, ``num_neighbors``,
+        ``min_edge_length``, ``max_edge_length``, ``goal_sample_rate``, ...)
+        are applied on top of the current values. The result is stored on
+        ``self.roadmap.config`` (assigning ``self.roadmap_config`` here would
+        call this setter again). ``fields`` can only arrive through
+        ``set_roadmap_config``: ``m.roadmap_config = x`` passes one value.
+        """
+        if isinstance(config, (str, os.PathLike)):
+            config = RoadmapConfig.from_yaml(config)
+        if isinstance(config, RoadmapConfig):
+            if fields:
+                raise TypeError("roadmap_config: pass either a RoadmapConfig / YAML path or fields, not both")
+            self.roadmap.config = config
+        else:
+            merged = self.roadmap_config.as_dict()
+            merged.update(config or {})
+            merged.update(fields)
+            self.roadmap.config = RoadmapConfig(merged)
+
 
     @property
     def road_map_edge_weights(self) -> List[List[float]]:
@@ -140,11 +140,52 @@ class GraphSamplerBase(Grid):
 
     @property
     def roadmap_edges(self) -> List[List[int]]:
-        return self.road_map
+        return self.roadmap.roadmap_edges if self.roadmap is not None else []
 
     @property
-    def roadmap_weights(self) -> List[List[float]]:
-        return self.road_map_edge_weights
+    def road_map(self) -> List[List[int]]:
+        """Alias of ``roadmap_edges``: the per-node neighbour lists under the
+        name planners, scripts and pickles read."""
+        return self.roadmap_edges
+
+    @property
+    def edges(self) -> List[Tuple[int, int]]:
+        return self.roadmap.edges if self.roadmap is not None else []
+
+    @property
+    def edge_weights(self) -> List[float]:
+        return self.roadmap.edge_weights if self.roadmap is not None else []
+
+    @property
+    def nodes(self) -> List[Node]:
+        return self.node_sampler.nodes if self.node_sampler is not None else []
+
+    @property
+    def pos_index_dict(self) -> dict:
+        """Position tuple -> node index (the sampler's registry)."""
+        return self.node_sampler.pos_index_dict if self.node_sampler is not None else {}
+
+    @property
+    def points_index_dict(self) -> dict:
+        """Kind name -> ``Node -> index`` dict (the sampler's registry)."""
+        return self.node_sampler.points_index_dict if self.node_sampler is not None else {}
+
+    @property
+    def start_nodes_index(self) -> dict:
+        """``Node -> index`` of the start nodes: the sampler's ``'start_points'`` kind."""
+        return self.points_index_dict.get('start_points', {})
+
+    @property
+    def goal_nodes_index(self) -> dict:
+        """``Node -> index`` of the goal nodes: the sampler's ``'goal_points'`` kind."""
+        return self.points_index_dict.get('goal_points', {})
+
+    @property
+    def num_total_nodes(self) -> int:
+        return self.node_sampler.num_total_nodes if self.node_sampler is not None else 0
+
+    def get_nodes(self, points: List[tuple] | np.ndarray | None = None, index_dict: dict | None = None, index_type: str = '') -> List[Node]:
+        return self.node_sampler.get_nodes(points, index_dict, index_type)
 
     def set_roadmap_config(self, config: "dict | RoadmapConfig | str | None" = None, **fields) -> RoadmapConfig:
         """Replace or update the roadmap parameters.
@@ -166,7 +207,6 @@ class GraphSamplerBase(Grid):
             merged.update(config or {})
             merged.update(fields)
             self.roadmap_config = RoadmapConfig(merged)
-        self.num_total_nodes = self.roadmap_config.sample_num + len(self.start) + len(self.goal)
         return self.roadmap_config
 
     def set_start(self, start):
@@ -193,63 +233,53 @@ class GraphSamplerBase(Grid):
         self.parking = list(parking) if parking is not None else []
 
     def get_start_nodes(self) -> List[Node]:
-        return [self.nodes[i] for i in self.start_nodes_index.values()]
+        return self.node_sampler.get_nodes(index_type='start_points')
     
     def get_goal_nodes(self) -> List[Node]:
-        return [self.nodes[i] for i in self.goal_nodes_index.values()]
+        return self.node_sampler.get_nodes(index_type='goal_points')
     
-    def get_obstacle_boundary(self):
+    @property
+    def boundary_points(self):
         """Obstacle/inflation boundary geometry from the CDT extraction
         (path_planning.common.environment.map.cdt.get_boundary): merged wall
         corners/junctions plus the enclosing map rectangle.
 
         Returns (boundary_points (N,2), boundary_segments (M,2) index pairs,
         holes: one interior point per obstacle component)."""
-        mask = (self.type_map.data == TYPES.OBSTACLE) | (self.type_map.data == TYPES.INFLATION)
-        return get_boundary(self, mask)
+        if len(self._boundary_points) > 0:
+            return self._boundary_points
+        self._boundary_points = self.get_nodes(index_type='boundary_points')
+        if len(self._boundary_points) == 0:
+            self._boundary_points = self.node_sampler.sample_boundary_points()
+        return self._boundary_points
 
     def get_inflated_obstacles(self):
         return [tuple(int(p) for p in row) for row in np.argwhere(self.type_map.data == TYPES.INFLATION)]
-
-    def _rebuild_boundary_nodes_index(self):
-        """Re-point boundary_nodes_index at the current node registry (node
-        indices shift whenever nodes are re-registered); boundary points not
-        present as nodes are dropped from the index but kept in boundary_points."""
-        self.boundary_nodes_index = {}
-        for point in self.boundary_points:
-            node = Node(tuple(point), None, 0, 0)
-            if tuple(node.current) in self.pos_index_dict:
-                self.boundary_nodes_index[node] = self.pos_index_dict[tuple(node.current)]
-
-    def get_nodes(self) -> List[Node]:
-        return self.nodes
-    
-    def get_node_index(self, node: Node) -> int:
-        return self.pos_index_dict[tuple(node.current)]
 
     def _all_edges_from(self, u_indices, type: str = 'Euclidean') -> dict:
         """``{u: [(v, distance), ...]}`` from each node index in ``u_indices`` to the
         other nodes, through ``get_distance``, else straight-line distances to all
         nodes. ``v`` are node indices, in node order."""
-        if len(self.nodes) == 0 or len(self.road_map) != len(self.nodes):
+        if len(self.nodes) == 0 or len(self.roadmap_edges) != len(self.nodes):
             raise ValueError("Edges have not been generated yet. Please generate the roadmap first.")
         pts = [tuple(n.current) for n in self.nodes]
         return {u: [(v, self.get_distance(pts[u], pts[v], type)) for v in range(len(pts))] for u in u_indices}
 
     def get_start_nodes_with_all_edges(self):
-        if len(self.start_to_all_edges_dict) == 0:
-            u_indices = [self.start_nodes_index[node] for node in self.get_start_nodes()]
-            self.start_to_all_edges_dict = self._all_edges_from(u_indices)
+        """``{start index: [(v, distance), ...]}``, cached until the roadmap is
+        rebuilt (``Roadmap.apply`` resets the cache)."""
+        if not getattr(self, "start_to_all_edges_dict", None):
+            self.start_to_all_edges_dict = self._all_edges_from(list(self.start_nodes_index.values()))
         return self.start_to_all_edges_dict
 
     def get_goal_nodes_with_all_edges(self):
-        if len(self.goal_to_all_edges_dict) == 0:
-            u_indices = [self.goal_nodes_index[node] for node in self.get_goal_nodes()]
-            self.goal_to_all_edges_dict = self._all_edges_from(u_indices)
+        """Goal twin of ``get_start_nodes_with_all_edges``."""
+        if not getattr(self, "goal_to_all_edges_dict", None):
+            self.goal_to_all_edges_dict = self._all_edges_from(list(self.goal_nodes_index.values()))
         return self.goal_to_all_edges_dict
 
-    def set_obstacle_map(self, obstacles: np.ndarray):
-        obstacles = np.array(obstacles)
+    def set_obstacle_map(self, obstacles: np.ndarray | List[tuple]):
+        obstacles = np.array(obstacles).reshape(-1, self.dim)
         if len(obstacles) == 0:
             return
         if len(obstacles[0]) == 2:
@@ -258,16 +288,9 @@ class GraphSamplerBase(Grid):
             self.type_map[obstacles[:,0], obstacles[:,1], obstacles[:,2]] = TYPES.OBSTACLE
         else:
             raise ValueError(f"Unsupported dimensions: {len(obstacles.shape)}")
-        for obstacle in obstacles:
-            pos = tuple(obstacle)
-            node = Node(pos,None,0,0)
-            self.obstacle_nodes.append(node)
 
     def get_obstacle_map(self) -> np.ndarray:
         return self.type_map.data == TYPES.OBSTACLE
-
-    def get_obstacle_nodes(self) -> List[Node]:
-        return self.obstacle_nodes
 
     def _index_of(self, p) -> int:
         """Node index of a world point (exact match in ``pos_index_dict``). An
@@ -275,7 +298,7 @@ class GraphSamplerBase(Grid):
         roadmap node."""
         if isinstance(p, (int, np.integer)):
             return int(p)
-        idx = self.pos_index_dict.get(tuple(float(x) for x in np.asarray(p).reshape(-1)))
+        idx = self.pos_index_dict[p]
         if idx is not None:
             return int(idx)
         raise KeyError(f"point {tuple(float(x) for x in np.asarray(p).reshape(-1))} is not a roadmap node")
@@ -302,7 +325,7 @@ class GraphSamplerBase(Grid):
             raise ValueError("get_distance: p2 is required for a straight-line distance")
         return Geometry.dist(p1, p2, type)
 
-    def get_neighbors(self, node: Node, **kwargs) -> List[Node]:
+    def get_neighbors(self, node: Node | int, **kwargs) -> List[Node]:
         """
         Get the neighbors of a node.
         """
@@ -310,7 +333,7 @@ class GraphSamplerBase(Grid):
             idx = self._index_of(node.current)
         except KeyError:
             return []
-        road_map = self.road_map
+        road_map = self.roadmap_edges
         if idx >= len(road_map):
             return []
         neighbors = [self.nodes[i] for i in road_map[idx]]
@@ -461,7 +484,7 @@ class GraphSamplerBase(Grid):
             self.strict_collision,
         )
 
-    def generateRandomNodes(self, generate_grid_nodes = False, generate_boundary_nodes = False, prob_map = None, samp_from_prob_map_ratio = 0.5, roadmap_type: str = None, boundary_node_spacing: float | None = None):
+    def generateRandomNodes(self,sample_num: int = None, generate_grid_nodes = False, generate_boundary_nodes = False, prob_map = None, samp_from_prob_map_ratio = 0.5, roadmap_type: str = None, boundary_node_spacing: float | None = None):
         """Sample this map's node set with a fresh ``NodeSampler`` (see
         ``NodeSampler.sample_nodes`` for the options) and install it here:
         ``roadmap_config.sample_num`` random nodes (Halton when
@@ -484,7 +507,7 @@ class GraphSamplerBase(Grid):
             sampling_type = 'random'
         self.node_sampler.reset()
         self.node_sampler.sample_nodes(
-            n_samples=self.roadmap_config.sample_num,
+            n_samples=sample_num if sample_num is not None else self.roadmap_config.sample_num,
             start_list=self.start,
             goal_list=self.goal,
             generate_grid_nodes=generate_grid_nodes,
@@ -494,10 +517,9 @@ class GraphSamplerBase(Grid):
             sampling_dist_dict=self.sampling_dist_dict,
             sampling_type=sampling_type,
         )
-        self.node_sampler.apply_nodes(self)
         return self.nodes
 
-    def generate_roadmap(self, roadmap_type="prm", samples: List[Node] | None = None, config=None, **options):
+    def generate_roadmap(self, roadmap_type="prm", config=None, **options):
         """Build a roadmap with ``path_planning.common.environment.roadmap`` and
         install it here.
 
@@ -508,7 +530,7 @@ class GraphSamplerBase(Grid):
         ``anchor_points``, ``filter_collision``, ``k_query``). ``config`` is a
         ``RoadmapConfig``, or a dict of overrides on top of this sampler's
         ``roadmap_config`` (the default). Afterwards
-        ``nodes``, ``edges``, ``edge_weights``, ``cost_matrix`` and the index
+        ``nodes``, ``edges``, ``edge_weights`` and the index
         dicts are set (``Roadmap.apply_to``); the ``Roadmap`` object (CSR
         adjacency in ``.adj``) is kept on ``self.roadmap`` and serves the
         ``road_map`` / ``road_map_edge_weights`` views.
@@ -519,15 +541,16 @@ class GraphSamplerBase(Grid):
         Returns:
             roadmap: the installed ``Roadmap``.
         """
+        samples = None
         if not isinstance(roadmap_type, str):          # legacy generate_roadmap(samples)
             roadmap_type, samples = "prm", roadmap_type
         if config is None:                               # this sampler's roadmap_config
             config = self.roadmap_config
-        elif not isinstance(config, RoadmapConfig):      # dict: overrides on top of it
+        if not isinstance(config, RoadmapConfig):      # dict: overrides on top of it
             config = RoadmapConfig({**self.roadmap_config.as_dict(), **config})
-        roadmap = Roadmap(self, roadmap_type, config=config, **options)
-        roadmap.generate_roadmap(self.nodes if samples is None else samples)
-        roadmap.apply_to(self)                     # also sets self.roadmap
+        self.roadmap = Roadmap(self, roadmap_type, config=config, **options)
+        self.roadmap.generate_roadmap(self.nodes if samples is None else samples)
+        self.roadmap.apply()
         return self.roadmap
 
     def _make_constraint_sweep(self):
@@ -694,19 +717,9 @@ class GraphSamplerBase(Grid):
 
     def clear_data(self):
         self.roadmap = Roadmap(self, config=self.roadmap_config)   # empty roadmap, same parameters
-        self.edges = []
-        self.edge_weights = []
         self.start = []
         self.goal = []
-        self.start_to_all_edges_dict = {}
-        self.goal_to_all_edges_dict = {}
-        self.nodes = []
-        self.pos_index_dict = {}
-        self.start_nodes_index = {}
-        self.goal_nodes_index = {}
-        self.grid_nodes_index = {}
         self.boundary_points = []
         self.boundary_nodes_index = {}
-        self.cost_matrix = None
         self.obstacles = []
         self.inflation_radius = 0.0

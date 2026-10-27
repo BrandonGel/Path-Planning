@@ -23,7 +23,7 @@ class DelaunayRoadmap(RoadmapBase):
     def generate_dt(self, filter_collision: bool | None = None) -> csr_array:
         n = self.num_nodes
         if n <= self.dim:
-            self.adj = csr_array((n, n), dtype=float)
+            self._adj = csr_array((n, n), dtype=float)
             return self.adj
         simplices = np.asarray(Delaunay(self.nodes).simplices, dtype=np.int64)
         pairs = list(combinations(range(self.dim + 1), 2))   # all simplex edges (6 per tetrahedron)

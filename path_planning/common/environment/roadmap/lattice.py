@@ -37,10 +37,10 @@ class Lattice(RoadmapBase):
         ``snap_off_grid`` False an off-grid node raises ``ValueError``.
         """
         snap_off_grid = self.config.snap_off_grid if snap_off_grid is None else bool(snap_off_grid)
-        self.snapped = {}
+        self._snapped = {}
         n = self.num_nodes
         if n == 0:
-            self.adj = csr_array((0, 0), dtype=float)
+            self._adj = csr_array((0, 0), dtype=float)
             return self.adj
 
         m = self.graph_map
@@ -76,7 +76,7 @@ class Lattice(RoadmapBase):
         # Adjacent centres are exactly one cell apart: uniform weight, no
         # min/max edge-length band.
         w = np.full(len(rows), float(m.resolution))
-        self.adj = csr_array((w, (rows, cols)), shape=(n, n))
+        self._adj = csr_array((w, (rows, cols)), shape=(n, n))
         self.adj.sort_indices()
         return self.adj
 
@@ -94,11 +94,11 @@ class Lattice(RoadmapBase):
             if j != i:
                 keep[i] = False
             dst = tuple(float(x) for x in snapped[j])
-            self.snapped[src] = dst
+            self._snapped[src] = dst
             report.append(f"  {np.round(src, 6).tolist()} -> {np.round(dst, 6).tolist()}"
                           + (" (merged into existing node)" if j != i else " (snapped)"))
-        self.nodes = np.ascontiguousarray(snapped[keep])
-        self.clearance = self.clearance[keep]
+        self._nodes = np.ascontiguousarray(snapped[keep])
+        self._clearance = self.clearance[keep]
         self._num_nodes = len(self.nodes)
         warnings.warn(f"Lattice: {len(report)} node(s) were not at cell centres and were snapped:\n"
                       + "\n".join(report), stacklevel=3)

@@ -122,7 +122,7 @@ class RRG(RoadmapBase):
         self._set_points(pts[:n])
         pairs = KDTree(self.nodes).query_pairs(r=np.nextafter(self.max_edge_length, np.inf), output_type="ndarray")
         if len(pairs) == 0:
-            self.adj = csr_array((n, n), dtype=float)
+            self._adj = csr_array((n, n), dtype=float)
             return self.adj
         return self.filter_edges(pairs[:, 0], pairs[:, 1], filter_collision)
 

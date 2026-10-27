@@ -95,7 +95,7 @@ class PRM(RoadmapBase):
         grow = self.config.grow if grow is None else int(grow)
         n = self.num_nodes
         if n == 0:
-            self.adj = csr_array((0, 0), dtype=float)
+            self._adj = csr_array((0, 0), dtype=float)
             return self.adj
 
         K = self.num_neighbors if self.num_neighbors > 0 else n
@@ -130,7 +130,7 @@ class PRM(RoadmapBase):
                 break
             k = int(min(n, k * grow))
 
-        self.adj = _to_csr(out_idx, out_w, count)
+        self._adj = _to_csr(out_idx, out_w, count)
         return self.adj
 
     generate = generate_prm

@@ -3,7 +3,7 @@ result to a ``GraphSamplerBase``.
 
     rm = Roadmap(graph_map, "cdt")
     rm.generate_roadmap(nodes)          # anchors default to the map's start + goal
-    rm.apply_to(graph_map)              # graph_map.nodes / road_map / edges ... updated
+    rm.update_node_sampler(graph_map.node_sampler)   # graph_map.nodes / road_map / edges ... updated
 
 ``GraphSamplerBase.build_roadmap(roadmap_type, samples)`` does the three steps.
 """
@@ -28,6 +28,7 @@ from path_planning.common.environment.roadmap.rrg import RRG
 
 if TYPE_CHECKING:
     from path_planning.common.environment.map.graph_sampler_base import GraphSamplerBase
+    from path_planning.common.environment.node_sampler.node_sampler import NodeSampler
 
 ROADMAP_CLASSES: Dict[str, Type[RoadmapBase]] = {
     cls.name: cls for cls in (PRM, Lattice, DelaunayRoadmap, CDT, Midpoints, Centroids, Voronoi, CustomRoadmap, RRG)
@@ -60,7 +61,7 @@ class Roadmap(RoadmapBase):
     ``CDT``, ...) for ``roadmap_type``, runs it on the current nodes and adopts
     its nodes, clearance and adjacency, passing it this roadmap's ``config``.
     For builders that take anchors (the
-    planar family and RRG) they default to the map's ``start`` and ``goal``. ``apply_to`` writes the result
+    planar family and RRG) they default to the map's ``start`` and ``goal``. ``update_node_sampler`` writes the result
     into a ``GraphSamplerBase`` in the layout its planners read.
     """
 
@@ -84,9 +85,9 @@ class Roadmap(RoadmapBase):
         builder = roadmap_class(self.graph_map, self.config)
         # Hand over the already-installed nodes; no Node list round trip.
         builder._num_nodes = self.num_nodes
-        builder.nodes = self.nodes
-        builder.clearance = self.clearance
-        builder.adj = csr_array((self.num_nodes, self.num_nodes), dtype=float)
+        builder._nodes = self.nodes
+        builder._clearance = self.clearance
+        builder._adj = csr_array((self.num_nodes, self.num_nodes), dtype=float)
 
         opts = {**self.options, **kwargs}
         if roadmap_class.uses_anchors and opts.get("anchor_points") is None:
@@ -95,33 +96,31 @@ class Roadmap(RoadmapBase):
 
         self.builder = builder
         self.roadmap_type = rtype
-        self.snapped = dict(builder.snapped)
-        self.nodes = builder.nodes
-        self.clearance = builder.clearance
+        self._snapped = dict(builder.snapped)
+        self._nodes = builder.nodes
+        self._clearance = builder.clearance
         self._num_nodes = builder.num_nodes
-        self.adj = builder.adj
+        self._adj = builder.adj
         return self.adj
 
     # ---------------------------------------------------------------- export
-    def to_nodes(self) -> List[Node]:
-        """``Node`` objects (position + ``max_clearance``) in roadmap order."""
-        return [Node(p, None, 0, 0, float(c)) for p, c in zip(convert_np_to_tuple(self.nodes), self.clearance)]
+    def apply(self, node_sampler: "NodeSampler | None" = None) -> None:
+        """Hand this roadmap's nodes to ``node_sampler`` (default: the map's),
+        so the map's ``nodes`` / ``pos_index_dict`` / ``num_total_nodes`` read
+        them in roadmap order, then write the start/goal kinds and drop the
+        map's cached start/goal edge lists (``start_to_all_edges_dict`` /
+        ``goal_to_all_edges_dict``), which are keyed by node index.
+        ``edges`` / ``edge_weights`` / ``road_map`` are views over ``gm.roadmap``.
 
-    def apply_to(self, graph_map: "GraphSamplerBase | None" = None, with_cost_matrix: bool = True) -> "GraphSamplerBase":
-        """Install this roadmap into ``graph_map`` in the layout its planners
-        read: ``nodes``, ``pos_index_dict``, start/goal/grid/boundary indices,
-        ``edges`` / ``edge_weights`` (flat), ``num_total_nodes`` and (unless
-        ``with_cost_matrix`` is False) the dense ``cost_matrix``. The nested
-        ``road_map`` / ``road_map_edge_weights`` views are properties of the
-        map over this object. Start and goal positions missing from the
-        roadmap are appended as isolated nodes; a position the builder snapped
+        The nodes are *replaced*, not appended: planar builders derive new
+        points, Lattice snaps and start/goal may be added, so sampler index
+        ``i`` must be roadmap node ``i``. A start/goal position the builder did
+        not produce is appended as an isolated node; one the builder snapped
         (``self.snapped``) resolves to the node it became, keyed by the
         original position."""
-        gm = self.graph_map if graph_map is None else graph_map
-        if gm is None:
-            return
-        old_grid = [n.current for n in gm.nodes if n in gm.grid_nodes_index] if gm.nodes else []
-
+        
+        gm = self.graph_map
+        node_sampler = gm.node_sampler if node_sampler is None else node_sampler
         index: dict = {}
         for i, p in enumerate(convert_np_to_tuple(self.nodes)):
             index.setdefault(p, i)
@@ -139,21 +138,18 @@ class Roadmap(RoadmapBase):
                     extra.append(pos)
                 target[key] = index[pos]
 
-        register(list(gm.start), gm.start_nodes_index)
-        register(list(gm.goal), gm.goal_nodes_index)
+        start_index: dict = {}
+        goal_index: dict = {}
+        register(list(gm.start), start_index)
+        register(list(gm.goal), goal_index)
         self.append_isolated_nodes(extra)
-
-        gm.roadmap = self
-        gm.nodes = self.to_nodes()
-        gm.num_total_nodes = len(gm.nodes)
-        gm.pos_index_dict = index
-        gm.grid_nodes_index = {Node(tuple(p), None, 0, 0): index[tuple(p)]
-                               for p in old_grid if tuple(p) in index}
-        gm._rebuild_boundary_nodes_index()
-        gm.edges = self.edges
-        gm.edge_weights = self.edge_weights
-        gm.start_to_all_edges_dict = {}
+        node_sampler.set_nodes(self.to_nodes())      # re-keys the kinds by position: a snapped start/goal would drop,
+        kinds = node_sampler.points_index_dict        # so the start/goal kinds are written afterwards
+        kinds['start_points'].clear(); kinds['start_points'].update(start_index)
+        kinds['goal_points'].clear(); kinds['goal_points'].update(goal_index)
+        gm.start_to_all_edges_dict = {}               # node indices changed: drop the cached start/goal edge lists
         gm.goal_to_all_edges_dict = {}
-        if with_cost_matrix:
-            gm.cost_matrix = cdist(self.nodes, self.nodes, metric="euclidean")
-        return gm
+
+    def to_nodes(self) -> List[Node]:
+        """``Node`` objects (position + ``max_clearance``) in roadmap order."""
+        return [Node(p, None, 0, 0, float(c)) for p, c in zip(convert_np_to_tuple(self.nodes), self.clearance)]

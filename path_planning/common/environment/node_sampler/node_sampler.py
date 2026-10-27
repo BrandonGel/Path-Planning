@@ -1,105 +1,12 @@
 import numpy as np
-from itertools import product
 from path_planning.common.environment.map.numbaUtil import _world_min_wall_distance, convert_np_to_tuple
-from python_motion_planning.common.env.map.grid import _grid_path_map_to_world, _grid_path_world_to_map_int, _grid_path_world_to_map_float
 from path_planning.common.environment.node import Node
-from python_motion_planning.common import TYPES
-from typing import List, Tuple
-from typing import TYPE_CHECKING
+from typing import List, Tuple, TYPE_CHECKING
 from scipy.stats import qmc
-from scipy.spatial.distance import cdist
 from typing import Final
-
-
+from path_planning.common.environment.node_sampler.node_sampler_util import validate_sampling_type, density_probability, boundary_vertices
 if TYPE_CHECKING:
     from path_planning.common.environment.map.graph_sampler_base import GraphSamplerBase
-
-def boundary_vertices(type_map: np.ndarray, include_map_edge: bool = True):
-    """Lattice vertices on the outline of free space.
-
-    A vertex is on the outline when its 2^dim surrounding cells contain both
-    a free cell (neither OBSTACLE nor INFLATION) and a blocked one; the map
-    edge counts as blocked when ``include_map_edge`` is True. It is an *edge*
-    vertex when a single axis splits the blocked cells from the free ones (a
-    flat wall), otherwise a *corner*. In 3-D the corner flag also covers the
-    straight edges of a wall.
-
-    Returns:
-        vertices: (K, dim) float64 map-frame points, row-major. Integer
-            (r, c) is the centre of cell (r, c), so the lower corner of cell
-            (i, j) is (i - 0.5, j - 0.5). Use ``path_map_to_world`` for world
-            points.
-        is_corner: (K,) bool.
-        free_dir: (K, dim) int in {-1, 0, +1}, direction from the vertex
-            into free space (wall normal on an edge, diagonal at a corner).
-    """
-    blocked = (type_map == TYPES.OBSTACLE) | (type_map == TYPES.INFLATION)
-    dim = blocked.ndim
-    # Outside the map is blocked (edge is part of the outline) or free.
-    padded = np.pad(blocked, 1, mode="constant", constant_values=include_map_edge)
-    vertex_shape = tuple(n + 1 for n in blocked.shape)
-
-    # patterns[k]: blocked state of the cell at corner offset k of each vertex
-    offsets = list(product((0, 1), repeat=dim))
-    patterns = np.stack([
-        padded[tuple(slice(o, o + n) for o, n in zip(off, vertex_shape))] for off in offsets
-    ])                                                   # (2^dim, *vertex_shape)
-
-    any_blocked = patterns.any(axis=0)
-    any_free = ~patterns.all(axis=0)
-    on_outline = any_blocked & any_free
-
-    offsets_arr = np.asarray(offsets, dtype=bool)        # (2^dim, dim)
-    is_edge = np.zeros(vertex_shape, dtype=bool)
-    for d in range(dim):
-        lower = patterns[~offsets_arr[:, d]]             # cells on the low side of axis d
-        upper = patterns[offsets_arr[:, d]]
-        is_edge |= lower.all(axis=0) & ~upper.any(axis=0)
-        is_edge |= upper.all(axis=0) & ~lower.any(axis=0)
-
-    corners = np.argwhere(on_outline)                  # (K, dim) lattice indices
-    idx = tuple(corners.T)
-    # Corner (i, j) of the lattice is map-frame (i - 0.5, j - 0.5).
-    vertices = corners.astype(np.float64) - 0.5
-    is_corner = ~is_edge[idx]
-
-    # free_dir: sign of the summed centred offsets of the free cells around
-    # each vertex (wall normal on an edge, diagonal at a corner).
-    free_cells = ~patterns[(slice(None),) + idx]                 # (2^dim, K)
-    centred = offsets_arr.astype(np.int64) * 2 - 1               # (2^dim, dim) in {-1, +1}
-    free_dir = np.sign(free_cells.T.astype(np.int64) @ centred)  # (K, dim)
-
-    # When free cells sit on opposite diagonals the sum can point at a
-    # blocked cell; then aim at the first free cell instead.
-    towards = offsets_arr[:, None, :] == (free_dir[None, :, :] > 0)          # (2^dim, K, dim)
-    consistent = np.all(towards | (free_dir[None, :, :] == 0), axis=2)      # (2^dim, K)
-    unsafe = np.any(consistent & ~free_cells, axis=0)
-    if unsafe.any():
-        first_free = np.argmax(free_cells[:, unsafe], axis=0)
-        free_dir[unsafe] = centred[first_free]
-    return vertices, is_corner, free_dir
-
-def density_probability(d, d_min, d_opt, sigma, floor):
-    """Gaussian-shaped acceptance probability for wall distance ``d``,
-    peaking at ``d_opt`` and never below ``floor``; 0 where ``d < d_min``."""
-    d_arr = np.asarray(d, dtype=float)
-    prob = floor + (1.0 - floor) * np.exp(-((d_arr - d_opt) ** 2) / (2.0 * sigma ** 2))
-    prob = np.where(d_arr < d_min, 0.0, prob)
-    if np.isscalar(d) or np.ndim(d) == 0:
-        return float(prob)
-    return prob
-
-SAMPLING_TYPES = ('random', 'halton', 'distributed')
-
-def validate_sampling_type(sampling_type: str) -> str:
-    """``sampling_type`` normalised to one of ``SAMPLING_TYPES``; a roadmap
-    type such as ``halton_prm`` counts as ``halton``."""
-    sampling_type = str(sampling_type).lower()
-    if 'halton' in sampling_type:
-        return 'halton'
-    if sampling_type not in SAMPLING_TYPES:
-        raise ValueError(f"sampling_type must be one of {SAMPLING_TYPES}, got {sampling_type!r}")
-    return sampling_type
 
 class NodeSampler:
     """Node samplers over a ``GraphSamplerBase``.
@@ -125,45 +32,69 @@ class NodeSampler:
         self.reset()
 
     def reset(self) -> None:
-        """Forget every sampled node (and the Halton sequence position)."""
-        self.halton_sampler = None
-        self.nodes: List[Node] = []
-        self.pos_index_dict: dict = {}        # position tuple -> index in nodes
+        """Forget every sampled node (and the Halton sequence position).
+
+        The state is rebound, not cleared in place, so a map that received
+        the previous lists from ``apply_points`` keeps them."""
+        self._halton_sampler = None
+        self._nodes: List[Node] = []
+        self._pos_index_dict: dict = {}        # position tuple -> index in nodes
         # Node -> index in nodes, one dict per node kind (a node can be in several)
-        self.sample_nodes_index: dict = {}
-        self.custom_nodes_index: dict = {}
-        self.grid_nodes_index: dict = {}
-        self.boundary_nodes_index: dict = {}
-        self.start_nodes_index: dict = {}
-        self.goal_nodes_index: dict = {}
+        self._sample_points_index: dict = {}
+        self._custom_points_index: dict = {}
+        self._grid_points_index: dict = {}
+        self._boundary_points_index: dict = {}
+        self._start_points_index: dict = {}
+        self._goal_points_index: dict = {}
+        self._points_index_dict: dict = {
+            'sample_points': self._sample_points_index,
+            'custom_points': self._custom_points_index,
+            'grid_points': self._grid_points_index,
+            'boundary_points': self._boundary_points_index,
+            'start_points': self._start_points_index,
+            'goal_points': self._goal_points_index,
+        }
+
+    # ------------------------------------------------------------ read access
+    # The sampled state is private; these expose it read-only. ``nodes`` and
+    # the dicts are the live objects (not copies): ``apply_points`` hands the
+    # same objects to the map, and ``reset`` rebinds rather than clears them.
+    @property
+    def nodes(self) -> List[Node]:
+        """Every node sampled so far, in index order."""
+        return self._nodes
+
+    @property
+    def num_total_nodes(self) -> int:
+        return len(self._nodes)
+
+    @property
+    def pos_index_dict(self, pos: tuple | np.ndarray | None = None) -> dict:
+        """Position tuple -> index in ``nodes``."""
+        if pos is not None:
+            if isinstance(pos, tuple):
+                return self._pos_index_dict[pos]
+            elif isinstance(pos, np.ndarray):
+                return [self._pos_index_dict[p] for p in convert_np_to_tuple(pos)]
+            else:
+                raise ValueError(f"Invalid pos type: {type(pos)} for Node Sampler")
+        return self._pos_index_dict
+
+    @property
+    def points_index_dict(self, index_type: str = '') -> dict:
+        """Kind name (``'sample_points'``, ``'custom_points'``, ``'grid_points'``,
+        ``'boundary_points'``, ``'start_points'``, ``'goal_points'``) -> its
+        ``Node -> index`` dict."""
+        if index_type in self._points_index_dict and index_type != '':
+            return self._points_index_dict[index_type]
+        elif index_type != '':
+            raise ValueError(f"Invalid index type: {index_type} for Node Sampler")
+        return self._points_index_dict
 
     @property
     def pos_points(self) -> np.ndarray:
         """(N, dim) positions of ``nodes``."""
-        return np.array([node.current for node in self.nodes], dtype=np.float64).reshape(-1, self.dim)
-
-    def add_node(self, node: Node) -> Tuple[int, bool]:
-        """Register ``node``: ``(index, True)`` when its position is new and it
-        was appended, ``(index, False)`` when a node already sits there."""
-        key = tuple(node.current)
-        index = self.pos_index_dict.get(key)
-        if index is not None:
-            return index, False
-        index = len(self.nodes)
-        self.nodes.append(node)
-        self.pos_index_dict[key] = index
-        return index, True
-
-    def _add_points(self, points, index_dict: dict) -> int:
-        """Register a node per point in ``index_dict`` (``Node -> index``),
-        reusing nodes already at that position. Returns how many were new."""
-        added = 0
-        for node in self.make_nodes(points):
-            index, is_new = self.add_node(node)
-            index_dict[node] = index
-            added += is_new
-        return added
-
+        return np.array([node.current for node in self._nodes], dtype=np.float64).reshape(-1, self.dim)
 
     @property
     def bounds(self) -> np.ndarray:
@@ -202,6 +133,104 @@ class NodeSampler:
     def is_expandable(self, point, src_point=None):
         return self.graph_map.is_expandable(point, src_point)
 
+    def get_nodes(self, points: List[tuple] | np.ndarray | None = None, index_dict: dict | None = None, index_type: str = '') -> List[Node]:
+        """Get nodes from ``points`` or ``index_dict``."""
+        nodes = []
+        if points is not None:
+            points = np.asarray(points, dtype=np.float64).reshape(-1, self.dim)
+            for pt in convert_np_to_tuple(points):
+                if pt in self._pos_index_dict:
+                    nodes.append(self._nodes[self._pos_index_dict[pt]])
+                else:
+                    raise ValueError(f"Invalid point: {pt} for Node Sampler")
+            return nodes
+        
+        if index_dict is not None:
+            for index in index_dict.values():
+                if 0 <= index < len(self._nodes):
+                    nodes.append(self._nodes[index])
+                else:
+                    raise ValueError(f"Invalid index: {index} for Node Sampler")
+            return nodes
+
+        if index_type in self._points_index_dict and index_type != '':
+            return [self._nodes[index] for index in self._points_index_dict[index_type].values()]
+        elif index_type != '':
+            raise ValueError(f"Invalid index type: {index_type} for Node Sampler")
+
+        return self._nodes   
+
+    def set_nodes(self, nodes: List[Node]) -> List[Node]:
+        """Replace the node list, e.g. with the nodes a roadmap builder produced
+        (the planar family derives new points, Lattice snaps, start/goal may be
+        appended). ``pos_index_dict`` is rebuilt (first index wins for a
+        repeated position) and every kind index is re-keyed by position; a
+        node whose position is gone is dropped from the kind indices."""
+        self._nodes = list(nodes)
+        self._pos_index_dict = {}
+        for i, node in enumerate(self._nodes):
+            self._pos_index_dict.setdefault(tuple(node.current), i)
+        for index in self._points_index_dict.values():          # same dict objects as self._*_points_index
+            kept = {node: self._pos_index_dict[tuple(node.current)]
+                    for node in index if tuple(node.current) in self._pos_index_dict}
+            index.clear()
+            index.update(kept)
+        return self._nodes
+
+    def set_positions(self, points) -> List[Node]:
+        """Move every node to ``points[i]`` (same count, same order, e.g.
+        after ``rotate``), keeping each node's clearance and every kind index:
+        the dicts are re-keyed by node index, so a start/goal/grid/... entry
+        follows its node to the new position."""
+        pts = np.asarray(points, dtype=np.float64).reshape(-1, self.dim)
+        if len(pts) != len(self._nodes):
+            raise ValueError(f"set_positions: {len(pts)} points for {len(self._nodes)} nodes")
+        by_index = {kind: {i: None for i in index.values()} for kind, index in self._points_index_dict.items()}
+        self._nodes = [Node(p, None, 0, 0, old.max_clearance) for p, old in zip(convert_np_to_tuple(pts), self._nodes)]
+        self._pos_index_dict = {}
+        for i, node in enumerate(self._nodes):
+            self._pos_index_dict.setdefault(tuple(node.current), i)
+        for kind, index in self._points_index_dict.items():
+            index.clear()
+            index.update({Node(self._nodes[i].current, None, 0, 0): i for i in by_index[kind] if i < len(self._nodes)})
+        return self._nodes
+
+    def add_node(self, node: Node) -> Tuple[int, bool]:
+        """Register ``node``: ``(index, True)`` when its position is new and it
+        was appended, ``(index, False)`` when a node already sits there."""
+        key = tuple(node.current)
+        index = self._pos_index_dict.get(key)
+        if index is not None:
+            return index, False
+        index = len(self._nodes)
+        self._nodes.append(node)
+        self._pos_index_dict[key] = index
+        return index, True
+
+    def make_points(self, points) -> List[Node]:
+        """``Node`` per world point, with its clearance (``inflated_esdf`` of the
+        cell the point falls in) as the node radius. ``points`` may also be a
+        list of ``Node``, whose positions are used."""
+        if len(points) and isinstance(points[0], Node):
+            points = [node.current for node in points]
+        points = np.asarray(points, dtype=np.float64).reshape(-1, self.dim)
+        if len(points) == 0:
+            return []
+        cells = self.path_world_to_map(points)
+        radii = self.inflated_esdf[tuple(cells.T)]
+        return [Node(point, None, 0, 0, float(radius))
+                for point, radius in zip(convert_np_to_tuple(points), radii)]
+
+    def _add_points(self, points, index_dict: dict) -> int:
+        """Register a node per point in ``index_dict`` (``Node -> index``),
+        reusing nodes already at that position. Returns how many were new."""
+        added = 0
+        for node in self.make_points(points):
+            index, is_new = self.add_node(node)
+            index_dict[node] = index
+            added += is_new
+        return added
+
     def random_sampling(self,
         n_samples,
     ):
@@ -238,7 +267,7 @@ class NodeSampler:
         Returns:
             (points, num_rejected_weighted): accepted world points (K, dim),
             prob-map samples first, and how many prob-map samples were
-            rejected (``sample_nodes`` uses it to re-balance the ratio).
+            rejected (``sample_points`` uses it to re-balance the ratio).
         """
         n_samples = int(n_samples)
         num_prob_map_samples = int(n_samples * samp_from_prob_map_ratio)
@@ -274,7 +303,7 @@ class NodeSampler:
             accepted_points = self.path_map_to_world(accepted_cells + jitter)
         return accepted_points, num_rejected_weighted
 
-    def sample_halton_nodes(self,
+    def sample_halton_points(self,
             n_samples : Final[int],
             d_min: Final[float] = 0.3,
             d_opt: Final[float] = 0.4,
@@ -330,7 +359,7 @@ class NodeSampler:
         accepted_points = self.path_map_to_world(accepted_cells) if self.use_discrete_space else world_points[expandable_mask]
         return accepted_points, halton_sampler
 
-    def sample_grid_nodes(self):
+    def sample_grid_points(self):
         """One node at the centre of every expandable cell.
 
         Returns:
@@ -345,7 +374,7 @@ class NodeSampler:
         accepted_points = world_grid_points[expandable_mask]
         return accepted_points
 
-    def sample_boundary_nodes(self, include_map_edge: Final[bool] = True,
+    def sample_boundary_points(self, include_map_edge: Final[bool] = True,
                             corners_only: Final[bool] = False, inset: Final[float] = 1e-3):
         """Nodes on the outline of free space: its corners and one point every
         ``resolution`` along its edges (see ``boundary_vertices``).
@@ -366,20 +395,6 @@ class NodeSampler:
         accepted_points = self.path_map_to_world(vertices + inset * free_dir)
         return accepted_points
 
-    def make_nodes(self, points) -> List[Node]:
-        """``Node`` per world point, with its clearance (``inflated_esdf`` of the
-        cell the point falls in) as the node radius. ``points`` may also be a
-        list of ``Node``, whose positions are used."""
-        if len(points) and isinstance(points[0], Node):
-            points = [node.current for node in points]
-        points = np.asarray(points, dtype=np.float64).reshape(-1, self.dim)
-        if len(points) == 0:
-            return []
-        cells = self.path_world_to_map(points)
-        radii = self.inflated_esdf[tuple(cells.T)]
-        return [Node(point, None, 0, 0, float(radius))
-                for point, radius in zip(convert_np_to_tuple(points), radii)]
-
     def sample_nodes(self,
             n_samples: int = 0,
             start_list: List[tuple] | np.ndarray | None = None,
@@ -395,9 +410,9 @@ class NodeSampler:
         ) -> List[Node]:
         """Sample nodes and add them to this sampler (``nodes`` and the index
         dicts accumulate across calls; ``reset`` clears them). Copy them onto a
-        map with ``apply_nodes``.
+        map with ``apply_points``.
 
-        ``n_samples`` random nodes come from ``sample_halton_nodes``
+        ``n_samples`` random nodes come from ``sample_halton_points``
         (``sampling_type='halton'``, or any roadmap type containing
         ``halton``), ``distributed_sampling`` (``'distributed'``, needs
         ``prob_map``) or ``random_sampling`` (``'random'``); rounds repeat
@@ -407,8 +422,8 @@ class NodeSampler:
         ``distributed``: samp_from_prob_map_ratio), and the
         ``samp_from_prob_map_ratio`` argument overrides both. Then, in order:
         ``pts_list`` (custom points), every expandable cell centre
-        (``generate_grid_nodes``), the outline of free space
-        (``generate_boundary_nodes``), ``start_list`` and ``goal_list``. A
+        (``generate_grid_points``), the outline of free space
+        (``generate_boundary_points``), ``start_list`` and ``goal_list``. A
         point already present is reused, not added twice, but is still
         recorded in that kind's index dict.
 
@@ -427,32 +442,32 @@ class NodeSampler:
             samp_from_prob_map_ratio = distributed_cfg['samp_from_prob_map_ratio']
 
         n_samples = int(n_samples)
-        target = len(self.nodes) + n_samples
+        target = len(self._nodes) + n_samples
         oversample = 1
         num_rejected_weighted_total = 0
         for outer_iter in range(max_outer_iters + 1):
-            if len(self.nodes) >= target:
+            if len(self._nodes) >= target:
                 break
             if outer_iter == max_outer_iters:
                 print(
-                    f"Warning: sample_nodes hit max_outer_iters={max_outer_iters} "
-                    f"with {n_samples - (target - len(self.nodes))}/{n_samples} nodes; continuing with what was collected."
+                    f"Warning: sample_points hit max_outer_iters={max_outer_iters} "
+                    f"with {n_samples - (target - len(self._nodes))}/{n_samples} nodes; continuing with what was collected."
                 )
                 break
 
-            needed = target - len(self.nodes)
+            needed = target - len(self._nodes)
             num_rejected_weighted = 0
             if is_halton:
                 # The sequence continues across rounds and calls; restarting it
                 # would redraw the same points.
-                points, self.halton_sampler = self.sample_halton_nodes(
+                points, self._halton_sampler = self.sample_halton_points(
                     needed,
                     halton_cfg['d_min'],
                     halton_cfg['d_opt'],
                     halton_cfg['sigma'],
                     halton_cfg['floor'],
                     oversample=oversample,
-                    halton_sampler=self.halton_sampler,
+                    halton_sampler=self._halton_sampler,
                 )
                 n_draw = max(1, needed * max(1, oversample))
             elif is_distributed:
@@ -465,13 +480,13 @@ class NodeSampler:
             # The samplers return only collision-free points; drop duplicates
             # (snapped cells repeat in discrete space) and stop at the quota.
             accepted_this_round = 0
-            for node in self.make_nodes(points):
+            for node in self.make_points(points):
                 index, is_new = self.add_node(node)
                 if not is_new:
                     continue
-                self.sample_nodes_index[node] = index
+                self._sample_points_index[node] = index
                 accepted_this_round += 1
-                if len(self.nodes) == target:
+                if len(self._nodes) == target:
                     break
 
             # Update oversample / ratio for the next round.
@@ -486,11 +501,11 @@ class NodeSampler:
                 samp_from_prob_map_ratio = max(0.0, min(1.0, num_rejected_weighted_total / n_samples))
 
         if pts_list is not None:
-            self._add_points(pts_list, self.custom_nodes_index)
+            self._add_points(pts_list, self._custom_points_index)
 
         if generate_grid_nodes:
             # A snapped random sample already in a cell is reused as its grid node.
-            self._add_points(self.sample_grid_nodes(), self.grid_nodes_index)
+            self._add_points(self.sample_grid_points(), self._grid_points_index)
 
         if generate_boundary_nodes:
             # Vertices on the outline of free space: the corners of the
@@ -499,30 +514,10 @@ class NodeSampler:
             # cell-centre lattice). They are not filtered for expandability;
             # edge-level collision checks in the roadmap builders decide
             # connectivity.
-            self._add_points(self.sample_boundary_nodes(), self.boundary_nodes_index)
+            self._add_points(self.sample_boundary_points(), self._boundary_points_index)
 
         if start_list is not None:
-            self._add_points(start_list, self.start_nodes_index)
+            self._add_points(start_list, self._start_points_index)
         if goal_list is not None:
-            self._add_points(goal_list, self.goal_nodes_index)
-        return self.nodes
-
-    def apply_nodes(self, graph_map: "GraphSamplerBase") -> "GraphSamplerBase":
-        """Install this sampler's nodes on ``graph_map``: ``nodes``,
-        ``pos_index_dict``, the index dicts (``Node -> index``), ``grid_points``
-        and ``boundary_points`` (what save/load and ``rotate`` keep),
-        ``num_total_nodes`` and the Euclidean ``cost_matrix``."""
-        graph_map.nodes = self.nodes
-        graph_map.pos_index_dict = self.pos_index_dict
-        graph_map.sample_nodes_index = self.sample_nodes_index
-        graph_map.custom_nodes_index = self.custom_nodes_index
-        graph_map.grid_nodes_index = self.grid_nodes_index
-        graph_map.boundary_nodes_index = self.boundary_nodes_index
-        graph_map.start_nodes_index = self.start_nodes_index
-        graph_map.goal_nodes_index = self.goal_nodes_index
-        graph_map.grid_points = [node.current for node in self.grid_nodes_index]
-        graph_map.boundary_points = [node.current for node in self.boundary_nodes_index]
-        graph_map.num_total_nodes = len(self.nodes)
-        positions = self.pos_points
-        graph_map.cost_matrix = cdist(positions, positions, metric='euclidean')
-        return graph_map
+            self._add_points(goal_list, self._goal_points_index)
+        return self._nodes

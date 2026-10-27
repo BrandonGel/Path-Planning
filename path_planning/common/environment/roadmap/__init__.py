@@ -2,7 +2,7 @@
 facade that picks one by name and exports it to a ``GraphSamplerBase``.
 
     rm = make_roadmap("prm", graph_map); rm.generate_roadmap(nodes)
-    rm = Roadmap(graph_map, "cdt"); rm.generate_roadmap(nodes); rm.apply_to(graph_map)
+    rm = Roadmap(graph_map, "cdt"); rm.generate_roadmap(nodes); rm.apply()
     graph_map.build_roadmap("cdt", nodes)          # same three steps
 """
 from path_planning.common.environment.roadmap.roadmap_base import RoadmapBase, RoadmapConfig

@@ -39,274 +39,12 @@ class GraphSampler(GraphSamplerBase):
     def __str__(self) -> str:
         return "Graph Sampler"
 
-    def set_start(self, start):
-        self.start = start
-        start_pixel = [self.world_to_map(s,discrete=True) for s in start]
-        for s in start_pixel:
-            self.type_map[tuple(s)] = TYPES.START
-        
-    def set_goal(self, goal):
-        self.goal = goal
-        goal_pixel =  [self.world_to_map(g,discrete=True) for g in goal]
-        for g in goal_pixel:
-            self.type_map[tuple(g)] = TYPES.GOAL
-    
-    def set_endpoints(self, pickups=None, deliveries=None, parking=None):
-        """Store task endpoints (world coords) for visualization only.
-
-        Unlike set_start/set_goal, these do NOT inject nodes into the roadmap
-        or touch type_map; they are purely cosmetic metadata that Visualizer2D
-        draws on top of the roadmap (pickups, deliveries, parking spots).
-        """
-        self.pickups = list(pickups) if pickups is not None else []
-        self.deliveries = list(deliveries) if deliveries is not None else []
-        self.parking = list(parking) if parking is not None else []
-
-    def get_start_nodes(self) -> List[Node]:
-        return [self.nodes[i] for i in self.start_nodes_index.values()]
-    
-    def get_goal_nodes(self) -> List[Node]:
-        return [self.nodes[i] for i in self.goal_nodes_index.values()]
-    
-    def get_grid_nodes(self) -> List[Node]:
-        return [self.nodes[i] for i in self.grid_nodes_index.values()]
-
-    def get_boundary_nodes(self) -> List[Node]:
-        return [self.nodes[i] for i in self.boundary_nodes_index.values()]
-
-    def get_obstacle_boundary(self):
-        """Obstacle/inflation boundary geometry from the CDT extraction
-        (path_planning.common.environment.map.cdt.get_boundary): merged wall
-        corners/junctions plus the enclosing map rectangle.
-
-        Returns (boundary_points (N,2), boundary_segments (M,2) index pairs,
-        holes: one interior point per obstacle component)."""
-        mask = (self.type_map.data == TYPES.OBSTACLE) | (self.type_map.data == TYPES.INFLATION)
-        return get_boundary(self, mask)
-
-    def get_inflated_obstacles(self):
-        return [tuple(int(p) for p in row) for row in np.argwhere(self.type_map.data == TYPES.INFLATION)]
-
-    @staticmethod
-    def resample_boundary(bnd_pts: np.ndarray, bnd_segs: np.ndarray, spacing: float) -> np.ndarray:
-        """Boundary vertices plus points every ``spacing`` along each segment.
-
-        Every segment of length L gets ``round(L / spacing)`` equal
-        subdivisions (at least one), so when ``spacing`` divides the wall
-        lengths (e.g. ``spacing == resolution`` on a rectilinear boundary)
-        the interior points land exactly on the cell corners. Corner /
-        junction vertices come first, in their original order, followed by
-        the interior points; duplicates (shared corners) are dropped.
-        """
-        pts = np.asarray(bnd_pts, dtype=float)
-        out = [tuple(float(v) for v in p) for p in pts]
-        seen = {tuple(round(float(v), 8) for v in p) for p in out}
-        for u, v in np.asarray(bnd_segs, dtype=int).tolist():
-            a, b = pts[u], pts[v]
-            length = float(np.linalg.norm(b - a))
-            n = max(int(round(length / spacing)), 1)
-            for k in range(1, n):
-                q = a + (b - a) * (k / n)
-                key = tuple(round(float(x), 8) for x in q)
-                if key in seen:
-                    continue
-                seen.add(key)
-                out.append(tuple(float(x) for x in q))
-        return np.asarray(out, dtype=float)
-
-    def _rebuild_boundary_nodes_index(self):
-        """Re-point boundary_nodes_index at the current node registry (node
-        indices shift whenever nodes are re-registered); boundary points not
-        present as nodes are dropped from the index but kept in boundary_points."""
-        self.boundary_nodes_index = {}
-        for point in self.boundary_points:
-            node = Node(tuple(point), None, 0, 0)
-            if tuple(node.current) in self.pos_index_dict:
-                self.boundary_nodes_index[node] = self.pos_index_dict[tuple(node.current)]
-
-    def get_random_nodes(self) -> List[Node]:
-        if len(self.nodes) >= self.roadmap_config.sample_num:
-            return self.nodes[:self.roadmap_config.sample_num]
-        print("Warning: number of nodes is less than sample num")
-        return self.nodes
-
-    def get_nodes(self) -> List[Node]:
-        return self.nodes
-    
-    def get_node_index(self, node: Node) -> int:
-        return self.pos_index_dict[tuple(node.current)]
- 
-    def set_obstacle_map(self, obstacles: np.ndarray):
-        obstacles = np.array(obstacles)
-        if len(obstacles) == 0:
-            return
-        if len(obstacles[0]) == 2:
-            self.type_map[obstacles[:,0], obstacles[:,1]] = TYPES.OBSTACLE
-        elif len(obstacles[0]) == 3:
-            self.type_map[obstacles[:,0], obstacles[:,1], obstacles[:,2]] = TYPES.OBSTACLE
-        else:
-            raise ValueError(f"Unsupported dimensions: {len(obstacles.shape)}")
-        for obstacle in obstacles:
-            pos = tuple(obstacle)
-            node = Node(pos,None,0,0)
-            self.obstacle_nodes.append(node)
-
-    def get_obstacle_map(self) -> np.ndarray:
-        return self.type_map.data == TYPES.OBSTACLE
-
-    def get_obstacle_nodes(self) -> List[Node]:
-        return self.obstacle_nodes
-
-    def _make_constraint_sweep(self):
-        """Build the spatial-sweep backend.
-
-        ``sweep_backend``:
-        - ``"auto"`` (default): use the Shapely (GEOS) backend in 2D and the CGAL
-          backend in 3D+ (Shapely/GEOS is planar). Falls back to CGAL in 2D if
-          Shapely is not installed.
-        - ``"shapely"``: force the Shapely backend (2D only).
-        - ``"cgal"``: force the CGAL backend (2D or 3D).
-        Shapely is imported lazily so it is only required when actually selected."""
-        backend = getattr(self, "sweep_backend", "auto")
-        dim = getattr(self, "dim", None)
-        if dim is None:
-            dim = len(self.bounds) if getattr(self, "bounds", None) is not None else 2
-
-        if backend == "auto":
-            backend = "shapely" if dim == 2 else "cgal"
-            if backend == "shapely":
-                try:  # 2D auto falls back to CGAL when Shapely is unavailable.
-                    import shapely  # noqa: F401
-                except Exception:
-                    backend = "cgal"
-
-        if backend == "shapely":
-            from path_planning.utils.shapely_sweep import ShapelySweep
-            return ShapelySweep(
-                record_sweep=self.record_sweep,
-                use_exact_collision_check=self.use_exact_collision_check,
-            )
-        if backend != "cgal":
-            raise ValueError(f"Unknown sweep_backend {backend!r}; expected 'auto', 'cgal' or 'shapely'.")
-        return CGAL_Sweep(
-            record_sweep=self.record_sweep,
-            use_exact_collision_check=self.use_exact_collision_check,
-        )
-
-    def set_constraint_sweep(self, force: bool = False, keep_query_caches: bool = False):
-        """(Re)bind the sweep backend to the current roadmap.
-
-        Building the backend's spatial indices (vertex KD-tree / edge R-tree, edge
-        geometry arrays) is the expensive part and depends on the roadmap only, so it
-        is skipped when the roadmap is unchanged since the last call (content
-        fingerprint of nodes + edges); per-query memo caches are still cleared then,
-        keeping memory behaviour identical to a full rebuild. Callers that plan many
-        times on one roadmap (NeuralATTF builds a SippPlanner per low-level call)
-        therefore pay the index build once. ``force`` rebuilds regardless;
-        ``keep_query_caches`` also keeps the sweep's memoized query results.
-        """
-        sig = self._roadmap_signature()
-        if not force and getattr(self, "_constraint_sweep_signature", None) == sig:
-            if not keep_query_caches:
-                self.constraint_sweep.clear_caches()
-            self._constraint_sweep_locations_cache = {}
-            return
-        self.constraint_sweep.set_graph([node.current for node in self.nodes],self.edges)
-        self._constraint_sweep_signature = sig
-        self._sipp_sweep_memo = {}  # SippGraph's cross-call sweep memo is roadmap-bound
-        # Precompute tuples for fast per-index coordinate access — avoids the
-        # repeated `self.nodes[idx].current` attribute walk in the hot path.
-        self._node_current_tuples = [tuple(n.current) for n in self.nodes]
-        # Memoize the coordinate-converted sweep result so identical queries
-        # don't re-pay the set-comprehension cost on every CBS conflict check.
-        self._constraint_sweep_locations_cache = {}
-
-    def get_constraint_sweep(self, p1: tuple[float,float], p2: tuple[float,float],v: float = 0.0, r: float = 0.5, use_interval: bool = False,get_time_interval: bool = False):
-        if not self.use_constraint_sweep:
-            return None
-        if use_interval:
-            overlapping_vertices,overlapping_edges = self.constraint_sweep.overlapping_interval_cgal(p1, p2,v, r,get_time_interval=get_time_interval)
-            node_tuples = getattr(self, "_node_current_tuples", None)
-            if node_tuples is None:
-                node_tuples = [tuple(n.current) for n in self.nodes]
-            if get_time_interval:
-                vertices_interval = {node_tuples[vi]: iv for vi, iv in overlapping_vertices.items()}
-                edges_interval = {(node_tuples[e[0]], node_tuples[e[1]]): iv for e, iv in overlapping_edges.items()}
-                return vertices_interval, edges_interval
-            vertices_locations = set(node_tuples[vi] for vi in overlapping_vertices)
-            edges_locations = set((node_tuples[e[0]], node_tuples[e[1]]) for e in overlapping_edges)
-            return vertices_locations, edges_locations
-
-        cache = getattr(self, "_constraint_sweep_locations_cache", None)
-        if cache is not None:
-            cache_key = (p1, p2, v, r)
-            cached = cache.get(cache_key)
-            if cached is not None:
-                return cached
-
-        overlapping_edges = self.constraint_sweep.overlapping_graph_elements_cgal(p1, p2, v, r)
-        node_tuples = getattr(self, "_node_current_tuples", None)
-        if node_tuples is None:
-            node_tuples = [tuple(n.current) for n in self.nodes]
-        edges_locations = set((node_tuples[e[0]], node_tuples[e[1]]) for e in overlapping_edges)
-        if cache is not None:
-            cache[cache_key] = edges_locations
-        return edges_locations
-
-    def get_constraint_segment(self, p1a: Tuple[float, ...],p1b: Tuple[float, ...],p2a: Tuple[float, ...],p2b: Tuple[float, ...],v: float = 0.0,r: float = 0.5) -> bool:
-        p1a = np.array(p1a)
-        p2a = np.array(p2a)
-        p1b = np.array(p1b)
-        p2b = np.array(p2b)
-        if v == 0.0:
-            v1 = p1b-p1a
-            v2 = p2b-p2a
-            t_dur = 1.0
-        else:
-            dist1 = np.linalg.norm(p1b-p1a)
-            dist2 = np.linalg.norm(p2b-p2a)
-            t_dur1 = dist1/v
-            t_dur2 = dist2/v
-            t_dur = min(t_dur1, t_dur2)
-            v1 = (p1b-p1a)/t_dur1 if dist1 > 0.0 else np.zeros(self.dim)
-            v2 = (p2b-p2a)/t_dur2 if dist2 > 0.0 else np.zeros(self.dim)
-        r = 2*r
-        r_vec = p2a-p1a
-        vel = v2-v1
-        tmin = np.clip(-np.dot(vel,r_vec)/(np.dot(vel,vel)+1e-10),0.0,t_dur)
-        r_min_vec = r_vec + vel*tmin
-        if np.linalg.norm(r_min_vec) < r:
-            return True
-        return False
-
-    def point_float_to_int(self, point: Tuple[float, ...]) -> Tuple[int, ...]:
-        """
-        Convert a point from float to integer coordinates.
-
-        Args:
-            point: a point in float coordinates
-        
-        Returns:
-            point: a point in integer coordinates
-        """
-        point_int = []
-        for d in range(self.dim):
-            point_int.append(max(0, min(self.shape[d] - 1, int(round(point[d]+1e-10)))))
-        point_int = tuple(point_int)
-        return point_int
-
-    def set_obstacles(self, obstacles: np.ndarray):
-        self.obstacles = [tuple[Any, ...](obs) for obs in obstacles]
-        self.set_obstacle_map(obstacles)
-
     def save_graph_sampler(self, path: str):
         data = {
             "start": self.start,
             "goal": self.goal,
             "roadmap_config": self.roadmap_config.as_dict(),
             "use_discrete_space": self.use_discrete_space,
-            "grid_points": self.grid_points,
-            "boundary_points": self.boundary_points,
             "nodes": self.nodes,
             # ndarray, not list-of-tuples: pickling 4.5M tuples costs ~10s / ~200MB, the array
             # milliseconds / ~70MB. set_obstacles() accepts either on load.
@@ -345,7 +83,7 @@ class GraphSampler(GraphSamplerBase):
         self.sampling_dist_dict = data.get("sampling_dist_dict", {})
 
 
-        self.nodes = data["nodes"]
+        self.node_sampler.set_nodes(data["nodes"])      # nodes / pos_index_dict are views over the sampler
         self.obstacles = data["obstacles"]
         self.obs_size = data["obs_size"] if "obs_size" in data else 0.5
         self.inflation_radius = data["inflation_radius"]
@@ -355,21 +93,15 @@ class GraphSampler(GraphSamplerBase):
         self.grid_points = data["grid_points"]
         self.boundary_points = data.get("boundary_points", [])
 
-        # Set up node index dict
-        self.pos_index_dict = {tuple(node.current): i for i, node in enumerate(self.nodes)}
-        self.cost_matrix = cdist(np.array([node.current for node in self.nodes]), np.array([node.current for node in self.nodes]), metric='euclidean')
-        self.start_nodes_index = {Node(tuple(start),None,0,0):self.pos_index_dict[tuple(start)] for start in self.start}
-        self.goal_nodes_index = {Node(tuple(goal),None,0,0):self.pos_index_dict[tuple(goal)] for goal in self.goal}
-        self.grid_nodes_index = {Node(tuple(grid_point),None,0,0):self.pos_index_dict[tuple(grid_point)] for grid_point in self.grid_points}
-        self._rebuild_boundary_nodes_index()
+        # Set up node index dicts (pos_index_dict was rebuilt by set_nodes)
+        self.node_sampler.sample_nodes(start_list=self.start, goal_list=self.goal)   # registers the start/goal kinds (positions already nodes)
 
         # Calculate edges (must happen before get_start/goal_nodes_with_all_edges)
         # The CSR roadmap is the source of road_map / road_map_edge_weights.
         self.roadmap = Roadmap(self, config=self.roadmap_config)
         self.roadmap.set_nodes(self.nodes)
         self.roadmap.set_adjacency(data["road_map"], data.get("road_map_edge_weights"))
-        self.edges = self.roadmap.edges
-        self.edge_weights = self.roadmap.edge_weights
+        # edges / edge_weights / road_map are views over self.roadmap.
         self.get_start_nodes_with_all_edges()
         self.get_goal_nodes_with_all_edges()
 
@@ -476,9 +208,8 @@ class GraphSampler(GraphSamplerBase):
 
         self._bounds[:, :] = new_bounds
 
-        self.nodes = [
-            Node(transform_pos(node.current), None, 0, 0) for node in self.nodes
-        ]
+        # Same nodes, moved: every kind index (start/goal/sample/...) follows its node.
+        self.node_sampler.set_positions([transform_pos(node.current) for node in self.nodes])
         if self.roadmap is not None and self.roadmap.num_nodes == len(self.nodes):
             # Same topology, moved coordinates (clearance re-read from the rotated ESDF).
             self.roadmap._set_points(np.array([node.current for node in self.nodes], dtype=np.float64))
@@ -507,16 +238,8 @@ class GraphSampler(GraphSamplerBase):
             for n in self.obstacle_nodes
         ]
 
-        # 6. Rebuild index dicts
-        self.pos_index_dict = {tuple(node.current): i for i, node in enumerate(self.nodes)}
-        self.start_nodes_index = {
-            Node(tuple(s), None, 0, 0): self.pos_index_dict[tuple(s)]
-            for s in self.start
-        }
-        self.goal_nodes_index = {
-            Node(tuple(g), None, 0, 0): self.pos_index_dict[tuple(g)]
-            for g in self.goal
-        }
+        # 6. Rebuild index dicts (pos_index_dict was rebuilt by set_nodes)
+        # start/goal index views follow the sampler (moved above with set_positions)
         self.grid_nodes_index = {
             Node(tuple(gp), None, 0, 0): self.pos_index_dict[tuple(gp)]
             for gp in self.grid_points
