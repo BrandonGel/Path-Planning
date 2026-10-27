@@ -76,14 +76,10 @@ class GraphSamplerBase(Grid):
         return self.type_map.data == TYPES.OBSTACLE
 
     def get_distance(self, p1, p2=None, type: str = 'Euclidean') -> float | List[Tuple[tuple, float]]:
-        """Distance between world points.
-
-        ``type`` ``'Euclidean'`` / ``'Manhattan'``: straight-line distance between
-        ``p1`` and ``p2`` (both required). ``type='dijkstra'``: shortest-path length
-        over the roadmap; ``p1`` / ``p2`` must be roadmap nodes (world coordinates,
-        resolved with ``_index_of``). With ``p2`` the result is a float, ``inf``
-        when unreachable; without ``p2`` it is ``[(point, distance), ...]`` for
-        every node reachable from ``p1`` (itself at 0), in node order.
+        """Straight-line distance between world points ``p1`` and ``p2``
+        (``type`` ``'Euclidean'`` or ``'Manhattan'``, both points required).
+        ``GraphSampler.get_distance`` adds ``type='dijkstra'``, the
+        shortest-path length over its roadmap.
         """
         if type not in ('Euclidean', 'Manhattan'):
             raise ValueError(f"get_distance: unknown type {type!r}; expected 'Euclidean', 'Manhattan' or 'dijkstra'")
@@ -92,9 +88,8 @@ class GraphSamplerBase(Grid):
         return Geometry.dist(p1, p2, type)
 
     def get_neighbors(self, node: Node | int, **kwargs) -> List[Node]:
-        """
-        Get the neighbors of a node.
-        """
+        """Neighbours of a node along a roadmap. The base map has no roadmap;
+        ``GraphSampler.get_neighbors`` reads ``road_map``."""
         raise ValueError("No neighbors")
 
     def line_of_sight(self, p1: Tuple[float, ...], p2: Tuple[float, ...]) -> List[Tuple[int, ...]]:

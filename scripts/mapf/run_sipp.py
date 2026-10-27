@@ -43,8 +43,8 @@ if __name__ == "__main__":
             nodes = map_.generateRandomNodes(generate_grid_nodes=use_discrete_space)
             road_map = map_.generate_roadmap(nodes)
 
-            start = [s.current for s in map_.get_start_nodes()]
-            goal = [g.current for g in map_.get_goal_nodes()]
+            start = [s.current for s in map_.start_nodes]
+            goal = [g.current for g in map_.goal_nodes]
             agents = [
                 {"start": start[i], "name": agent["name"], "goal": goal[i]}
                 for i, agent in enumerate(agents)

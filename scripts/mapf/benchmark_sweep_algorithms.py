@@ -66,8 +66,8 @@ def _build_mapf_map(backend: str, agent_radius: float):
     map_.set_goal([a["goal"] for a in agents])
     nodes = map_.generateRandomNodes(generate_grid_nodes=False)
     map_.generate_roadmap(nodes)
-    start = [s.current for s in map_.get_start_nodes()]
-    goal = [g.current for g in map_.get_goal_nodes()]
+    start = [s.current for s in map_.start_nodes]
+    goal = [g.current for g in map_.goal_nodes]
     agents = [{"start": start[i], "name": a["name"], "goal": goal[i]} for i, a in enumerate(agents)]
     map_.set_constraint_sweep()
     return map_, agents

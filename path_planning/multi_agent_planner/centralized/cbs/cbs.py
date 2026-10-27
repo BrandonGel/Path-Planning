@@ -138,11 +138,11 @@ class Environment(object):
         goal_pt = tuple(float(x) for x in self.agent_dict[agent_name]["goal"].location.point)
         start_node = Node(start_pt, None, 0, 0)
         goal_node = Node(goal_pt, None, 0, 0)
-        node_index_dict = getattr(self.graph_map, "node_index_dict", {})
-        if start_node not in node_index_dict or goal_node not in node_index_dict:
+        pos_index_dict = getattr(self.graph_map, "pos_index_dict", {})
+        if start_node.current not in pos_index_dict or goal_node.current not in pos_index_dict:
             return False, float("inf")
-        s = int(node_index_dict[start_node])
-        g = int(node_index_dict[goal_node])
+        s = int(pos_index_dict[start_node.current])
+        g = int(pos_index_dict[goal_node.current])
         if s == g:
             return [State(0, Location(start_pt))], 0.0
 
@@ -169,7 +169,7 @@ class Environment(object):
                 break
             u_node = self.graph_map.nodes[u]
             for v in road_map[u]:
-                nd = d + float(self.graph_map.get_cost(u_node, self.graph_map.nodes[v]))
+                nd = d + float(self.graph_map.get_distance(u_node.current, self.graph_map.nodes[v].current))
                 if nd < dist.get(v, INF):
                     dist[v] = nd
                     prev[v] = u
@@ -217,7 +217,7 @@ class Environment(object):
             seen.add(u)
             u_node = self.graph_map.nodes[u]
             for v in road_map[u]:
-                nd = d + float(self.graph_map.get_cost(u_node, self.graph_map.nodes[v]))
+                nd = d + float(self.graph_map.get_distance(u_node.current, self.graph_map.nodes[v].current))
                 if nd < dist.get(v, float("inf")):
                     dist[v] = nd
                     heapq.heappush(heap, (nd, v))
@@ -443,12 +443,12 @@ class Environment(object):
         costs are euclidean edge lengths) when either point is not a roadmap
         node or the goal is unreachable from loc_pt.
         """
-        node_index_dict = getattr(self.graph_map, "node_index_dict", {})
+        pos_index_dict = getattr(self.graph_map, "pos_index_dict", {})
         loc_node = Node(tuple(float(x) for x in loc_pt), None, 0, 0)
         goal_node = Node(tuple(float(x) for x in goal_pt), None, 0, 0)
-        if loc_node in node_index_dict and goal_node in node_index_dict:
-            dist = self._goal_distance_map(int(node_index_dict[goal_node]))
-            d = dist.get(int(node_index_dict[loc_node]))
+        if loc_node.current in pos_index_dict and goal_node.current in pos_index_dict:
+            dist = self._goal_distance_map(int(pos_index_dict[goal_node.current]))
+            d = dist.get(int(pos_index_dict[loc_node.current]))
             if d is not None:
                 return d
         return sum((a - b) ** 2 for a, b in zip(loc_pt, goal_pt)) ** 0.5
@@ -467,7 +467,7 @@ class Environment(object):
             return 1.0
         node1 = Node(tuple[Any, ...](p1), None, 0, 0)
         node2 = Node(tuple[Any, ...](p2), None, 0, 0)
-        return float(self.graph_map.get_cost(node1, node2))
+        return float(self.graph_map.get_distance(node1.current, node2.current))
 
     def is_at_goal(self, state, agent_name):
         goal_state = self.agent_dict[agent_name]["goal"]

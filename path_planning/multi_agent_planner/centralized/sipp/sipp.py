@@ -65,7 +65,7 @@ class SippPlanner(SippGraph):
     def get_mtime(self, position1, position2):
         if (position1, position2) in self._mtime_cache:
             return self._mtime_cache[(position1, position2)]
-        m_cost = float(self.graph_map.get_cost(Node(tuple(position1)), Node(tuple(position2))))
+        m_cost = float(self.graph_map.get_distance(tuple(position1), tuple(position2)))
         if self.velocity > 0:
             m_time = m_cost / self.velocity
         else:
@@ -213,7 +213,7 @@ class SippPlanner(SippGraph):
             seen.add(u)
             u_node = self.graph_map.nodes[u]
             for v in road_map[u]:
-                nd = d + float(self.graph_map.get_cost(u_node, self.graph_map.nodes[v]))
+                nd = d + float(self.graph_map.get_distance(u_node.current, self.graph_map.nodes[v].current))
                 if nd < dist.get(v, float("inf")):
                     dist[v] = nd
                     heapq.heappush(heap, (nd, v))
@@ -227,12 +227,12 @@ class SippPlanner(SippGraph):
         move costs are euclidean edge lengths) when either point is not a
         roadmap node or the goal is unreachable from position.
         """
-        node_index_dict = getattr(self.graph_map, "node_index_dict", {})
+        pos_index_dict = getattr(self.graph_map, "pos_index_dict", {})
         loc_node = Node(tuple(float(x) for x in position), None, 0, 0)
         goal_node = Node(tuple(float(x) for x in goal), None, 0, 0)
-        if loc_node in node_index_dict and goal_node in node_index_dict:
-            dist = self._goal_distance_map(int(node_index_dict[goal_node]))
-            d = dist.get(int(node_index_dict[loc_node]))
+        if loc_node.current in pos_index_dict and goal_node.current in pos_index_dict:
+            dist = self._goal_distance_map(int(pos_index_dict[goal_node.current]))
+            d = dist.get(int(pos_index_dict[loc_node.current]))
             if d is not None:
                 return d
         return math.sqrt((position[0] - goal[0]) ** 2 + (position[1] - goal[1]) ** 2)

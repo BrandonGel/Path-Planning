@@ -264,7 +264,7 @@ class CTopPRM:
         Args:
             pairs: (start, goal) pairs; each endpoint is a node index or a
                 coordinate in the roadmap-node frame (resolved exactly via
-                ``node_index_dict``, else snapped to the nearest node).
+                ``pos_index_dict``, else snapped to the nearest node).
 
         Returns:
             ``{(start_idx, goal_idx): [path, ...]}`` with paths as
@@ -301,7 +301,7 @@ class CTopPRM:
             return idx
         coord = tuple(endpoint)
         node = Node(coord, None, 0, 0)
-        idx = self.map.node_index_dict.get(node)
+        idx = self.map.pos_index_dict.get(coord)
         if idx is not None:
             return int(idx)
         if self._kd_tree is None:

@@ -623,7 +623,7 @@ class NeuralATTF:
         from path_planning.common.environment.node import Node
 
         pt = tuple(pt)
-        if Node(pt) in self.graph_map.node_index_dict:
+        if pt in self.graph_map.pos_index_dict:
             return pt
         nodes = self.graph_map.nodes
         if not nodes:
@@ -658,7 +658,7 @@ class NeuralATTF:
         from path_planning.common.environment.node import Node
 
         pt = tuple(float(c) for c in pt)
-        if Node(pt) in self.graph_map.node_index_dict:
+        if pt in self.graph_map.pos_index_dict:
             return [(pt, 0.0)]
         nodes = self.graph_map.nodes
         snapped = self._snap_to_node(pt)

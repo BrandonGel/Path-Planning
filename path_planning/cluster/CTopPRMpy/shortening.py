@@ -279,20 +279,20 @@ def segment_first_collision(
 def get_esdf_gradients(map_) -> List[np.ndarray]:
     """Per-axis gradients of the map's signed ESDF (world units).
 
-    Computed once per map and cached on the map object; the signed field
+    Computed once per ESDF and cached on the map object; the signed field
     (negative inside obstacles, see ``Grid.update_esdf``) makes the gradient
-    point out of obstacles even when evaluated inside one.
+    point out of obstacles even when evaluated inside one. ``map_.esdf`` is
+    lazy and recomputes after any obstacle change, producing a new array, so
+    the cache is keyed on the array's identity.
     """
-    if not getattr(map_, "_esdf_initialized", False):
-        map_.update_esdf()
-        map_._esdf_initialized = True
+    esdf = map_.esdf
     cached = getattr(map_, "_ctopprm_esdf_gradients", None)
-    if cached is not None and cached[0] is map_._esdf:
+    if cached is not None and cached[0] is esdf:
         return cached[1]
-    grads = np.gradient(np.asarray(map_._esdf, dtype=float), float(map_.resolution))
+    grads = np.gradient(np.asarray(esdf, dtype=float), float(map_.resolution))
     if map_.dim == 1:  # np.gradient returns a bare array for 1-D input
         grads = [grads]
-    map_._ctopprm_esdf_gradients = (map_._esdf, list(grads))
+    map_._ctopprm_esdf_gradients = (esdf, list(grads))
     return map_._ctopprm_esdf_gradients[1]
 
 

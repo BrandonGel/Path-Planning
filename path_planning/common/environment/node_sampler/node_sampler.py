@@ -9,12 +9,17 @@ if TYPE_CHECKING:
     from path_planning.common.environment.map.graph_sampler_base import GraphSamplerBase
 
 class NodeSampler:
-    """Node samplers over a ``GraphSamplerBase``.
+    """Samples and owns the nodes of a ``GraphSamplerBase``.
 
-    Holds only the map; everything else is read from it on each call, so the
-    sampler stays correct after ``rotate``, an ESDF recompute or a new
-    inflation radius (the map's ``shape``, ``bounds`` and ``inflated_esdf``
-    all change then).
+    State: the node list, ``pos_index_dict`` (position -> index) and one
+    ``Node -> index`` dict per kind (``sample_points``, ``custom_points``,
+    ``boundary_points``, ``start_points``, ``goal_points``; a node can be in
+    several). The map's ``nodes`` / ``pos_index_dict`` / ``points_index_dict``
+    are views over these. Map geometry (``shape``, ``bounds``,
+    ``inflated_esdf``, the type map) is read from ``graph_map`` on every
+    call, so sampling stays correct after ``rotate``, an ESDF recompute or a
+    new inflation radius. ``sampling_dist_dict`` holds the Halton and
+    prob-map parameters.
     """
     def __init__(self, graph_map: "GraphSamplerBase", sampling_dist_dict: dict = None):
         self.graph_map = graph_map
@@ -45,8 +50,9 @@ class NodeSampler:
     def reset(self) -> None:
         """Forget every sampled node (and the Halton sequence position).
 
-        The state is rebound, not cleared in place, so a map that received
-        the previous lists from ``apply_points`` keeps them."""
+        The state is rebound, not cleared in place, so a node list or index
+        dict handed out earlier (e.g. captured by a planner) is left as it
+        was."""
         self._halton_sampler = None
         self._nodes: List[Node] = []
         self._pos_index_dict: dict = {}        # position tuple -> index in nodes
@@ -66,8 +72,9 @@ class NodeSampler:
 
     # ------------------------------------------------------------ read access
     # The sampled state is private; these expose it read-only. ``nodes`` and
-    # the dicts are the live objects (not copies): ``apply_points`` hands the
-    # same objects to the map, and ``reset`` rebinds rather than clears them.
+    # the dicts are the live objects (not copies): the map's ``nodes`` /
+    # ``pos_index_dict`` / ``points_index_dict`` return these same objects, and
+    # ``reset`` rebinds rather than clears them.
     @property
     def nodes(self) -> List[Node]:
         """Every node sampled so far, in index order."""
@@ -143,7 +150,9 @@ class NodeSampler:
         return self.graph_map.is_expandable(point, src_point)
 
     def get_nodes(self, points: List[tuple] | np.ndarray | None = None, index_dict: dict | None = None, index_type: str = '') -> List[Node]:
-        """Get nodes from ``points`` or ``index_dict``."""
+        """Nodes selected by world ``points`` (each must be a node), by an
+        ``index_dict`` (``Node -> index``) or by a kind name ``index_type``;
+        with none of them, every node."""
         nodes = []
         if points is not None:
             points = np.asarray(points, dtype=np.float64).reshape(-1, self.dim)
@@ -292,7 +301,7 @@ class NodeSampler:
         expandable cells. Discrete space snaps them to cell centres.
 
         Returns:
-            (nodes, points): parallel lists of accepted nodes and world tuples.
+            (points): accepted world points ``(K, dim)``.
         """
         normalized_points = np.random.random((n_samples,self.dim))
         world_points = normalized_points * (self.bounds[:,1] - self.bounds[:,0]) + self.bounds[:,0]
@@ -321,7 +330,7 @@ class NodeSampler:
         Returns:
             (points, num_rejected_weighted): accepted world points (K, dim),
             prob-map samples first, and how many prob-map samples were
-            rejected (``sample_points`` uses it to re-balance the ratio).
+            rejected (``sample_nodes`` uses it to re-balance the ratio).
         """
         n_samples = int(n_samples)
         num_prob_map_samples = int(n_samples * samp_from_prob_map_ratio)
@@ -371,7 +380,8 @@ class NodeSampler:
         expandable cells. Discrete space snaps them to cell centres.
 
         Pass the returned ``halton_sampler`` back in to continue the sequence;
-        a fresh sampler repeats the same points.
+        a fresh sampler repeats the same points. ``sample_nodes`` keeps it
+        across rounds and calls until ``reset``.
 
         Args:
             n_samples: number of samples to draw
@@ -386,7 +396,8 @@ class NodeSampler:
                 - number of times to oversample the samples
 
         Returns:
-            (points): accepted world tuples.
+            (points, halton_sampler): accepted world points ``(K, dim)`` and
+            the sampler to pass back in.
         """
         if halton_sampler is None:
             halton_sampler = qmc.Halton(d=self.dim, scramble=False)
@@ -417,7 +428,7 @@ class NodeSampler:
         """One node at the centre of every expandable cell.
 
         Returns:
-            (points): accepted world tuples.
+            (points): accepted world points ``(K, dim)``.
         """
         grid_shape = self.shape
         grid_ranges = [np.arange(grid_shape[d]) for d in range(self.dim)]
@@ -439,7 +450,7 @@ class NodeSampler:
         vertices. ``corners_only`` drops the edge vertices.
 
         Returns:
-            (points): accepted world tuples.
+            (points): accepted world points ``(K, dim)``.
         """
         vertices, is_corner, free_dir = boundary_vertices(self.graph_map.type_map.data, include_map_edge)
         if corners_only:
@@ -463,8 +474,9 @@ class NodeSampler:
             sampling_type: str = 'random',
         ) -> List[Node]:
         """Sample nodes and add them to this sampler (``nodes`` and the index
-        dicts accumulate across calls; ``reset`` clears them). Copy them onto a
-        map with ``apply_points``.
+        dicts accumulate across calls; ``reset`` clears them). The map reads
+        them live through its ``nodes`` / ``pos_index_dict`` /
+        ``points_index_dict`` views.
 
         ``n_samples`` random nodes come from ``sample_halton_points``
         (``sampling_type='halton'``, or any roadmap type containing
@@ -476,10 +488,13 @@ class NodeSampler:
         ``distributed``: samp_from_prob_map_ratio), and the
         ``samp_from_prob_map_ratio`` argument overrides both. Then, in order:
         ``pts_list`` (custom points), every expandable cell centre
-        (``generate_grid_points``), the outline of free space
-        (``generate_boundary_points``), ``start_list`` and ``goal_list``. A
-        point already present is reused, not added twice, but is still
-        recorded in that kind's index dict.
+        (``generate_grid_nodes``, registered as sample points), the outline of
+        free space (``generate_boundary_nodes``), ``start_list`` and
+        ``goal_list``. A point already present is reused, not added twice, but
+        is still recorded in that kind's index dict. Without
+        ``generate_boundary_nodes`` the nodes whose cell touches a wall or the
+        map edge are marked as boundary nodes instead
+        (``mark_boundary_nodes_from_sampled_nodes``).
 
         Returns:
             nodes: this sampler's full node list.
@@ -504,7 +519,7 @@ class NodeSampler:
                 break
             if outer_iter == max_outer_iters:
                 print(
-                    f"Warning: sample_points hit max_outer_iters={max_outer_iters} "
+                    f"Warning: sample_nodes hit max_outer_iters={max_outer_iters} "
                     f"with {n_samples - (target - len(self._nodes))}/{n_samples} nodes; continuing with what was collected."
                 )
                 break

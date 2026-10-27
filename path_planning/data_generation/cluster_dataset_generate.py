@@ -43,7 +43,7 @@ def _clone_graph_sampler(map_: GraphSampler) -> GraphSampler:
             use_constraint_sweep=map_.use_constraint_sweep,
             record_sweep=map_.record_sweep,
             use_exact_collision_check=map_.use_exact_collision_check,
-            sampling_dist_dict=map_.sampling_dist_dict,
+            sampling_dist_dict=map_.node_sampler.sampling_dist_dict,
         )
         clone.load_graph_sampler(path)
         return clone
@@ -136,26 +136,26 @@ def generate_target_space(target_space_type:str, map:GraphSampler,density_map:np
             y_density = y_density / np.sum(density_map)
         y = y_density.copy()
         
-        # PRE-COMPUTE: Build graph structure once (OPTIMIZATION)
+        # PRE-COMPUTE: Build graph structure once (OPTIMIZATION).
+        # Node i of the roadmap is map.nodes[i]; road_map / road_map_edge_weights
+        # are the per-node neighbour lists and edge lengths (views over map.roadmap).
         num_nodes = len(map.nodes)
-        y_node_index = {map.node_index_list[node]: ii for ii, node in enumerate(map.nodes)}
+        road_map, road_map_weights = map.road_map, map.road_map_edge_weights
         
         # Pre-build neighbor arrays for efficient access
-        max_neighbors = max(len(map.road_map[map.node_index_list[node]]) 
-                        for node in map.nodes) if num_nodes > 0 else 0
+        max_neighbors = max((len(r) for r in road_map), default=0) if num_nodes > 0 else 0
         if max_neighbors > 0:
             neighbor_indices = np.full((num_nodes, max_neighbors), -1, dtype=np.int32)
             neighbor_costs = np.zeros((num_nodes, max_neighbors), dtype=np.float32)
             neighbor_counts = np.zeros(num_nodes, dtype=np.int32)
             
-            for i, node in enumerate(map.nodes):
-                node_idx = map.node_index_list[node]
-                neighbors = list(map.road_map[node_idx])
+            for i in range(num_nodes):
+                neighbors = road_map[i]
                 neighbor_counts[i] = len(neighbors)
                 
                 for j, neighbor_idx in enumerate(neighbors):
-                    neighbor_indices[i, j] = y_node_index[neighbor_idx]
-                    neighbor_costs[i, j] = map.cost_matrix[(node_idx, neighbor_idx)]
+                    neighbor_indices[i, j] = neighbor_idx
+                    neighbor_costs[i, j] = road_map_weights[i][j]
             
             # PROPAGATION LOOP (now much faster)
             for _ in range(num_hops):
@@ -213,7 +213,7 @@ def transform_graph_map_to_gnn(map_: GraphSampler):
     # Get Edges & Edge Weights
     edge_weights = map_.edge_weights
     start_goal_edges_dict = {**map_.get_start_nodes_with_all_edges(), **map_.get_goal_nodes_with_all_edges()}
-    start_goal_nodes = map_.get_start_nodes() + map_.get_goal_nodes()
+    start_goal_nodes = map_.start_nodes + map_.goal_nodes
 
     # Generate Node Data ('node')
     pos = np.array([node.current for node in map_.nodes])
@@ -221,7 +221,7 @@ def transform_graph_map_to_gnn(map_: GraphSampler):
     # [start/goal, free, boundary] with precedence start/goal > boundary > free.
     ndata = np.concatenate((pos, np.zeros((pos.shape[0], 3))), axis=1)
     start_goal_mask = np.full(len(ndata),fill_value=0).astype(bool)
-    start_goal_idx = [map_.get_node_index(node) for node in start_goal_nodes]
+    start_goal_idx = list(map_.start_nodes_index.values()) + list(map_.goal_nodes_index.values())   # same order as start_nodes + goal_nodes
     start_goal_mask[start_goal_idx] = True
     boundary_mask = np.full(len(ndata), fill_value=0).astype(bool)
     boundary_idx = list(map_.boundary_nodes_index.values())
@@ -293,7 +293,7 @@ def sample_shortest_path_pairs(map_: GraphSampler, num_sources: int = 16,
     sources = rng.choice(candidates, size=min(num_sources, len(candidates)), replace=False)
     pairs, dists = [], []
     for s in sources:
-        for v, d in map_._dijkstra(int(s)):
+        for v, d in map_.roadmap.dijkstra(int(s)):
             if v == int(s):
                 continue
             pairs.append((int(s), int(v)))
@@ -405,7 +405,7 @@ def process_single_case_graphs(args: Tuple[Path, dict]) -> Tuple[bool, Path]:
                 input_file, use_discrete_space=use_discrete_space,
                 sampling_dist_dict=sampling_dist_dict,
             )
-            map_.set_inflation_radius(radius=agent_radius)
+            map_.inflate_obstacles(radius=agent_radius)
             map_.set_roadmap_config(
                 sample_num=num_samples,
                 num_neighbors=num_neighbors,

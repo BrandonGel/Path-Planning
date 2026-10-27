@@ -3,9 +3,9 @@ result to a ``GraphSamplerBase``.
 
     rm = Roadmap(graph_map, "cdt")
     rm.generate_roadmap(nodes)          # anchors default to the map's start + goal
-    rm.update_node_sampler(graph_map.node_sampler)   # graph_map.nodes / road_map / edges ... updated
+    rm.apply()                          # nodes -> graph_map.node_sampler; road_map / edges are views
 
-``GraphSamplerBase.build_roadmap(roadmap_type, samples)`` does the three steps.
+``GraphSampler.generate_roadmap(roadmap_type)`` does the three steps.
 """
 from typing import Dict, List, Type, TYPE_CHECKING
 import numpy as np
@@ -38,7 +38,7 @@ ROADMAP_CLASSES: Dict[str, Type[RoadmapBase]] = {
 def resolve_roadmap_type(roadmap_type: str, dim: int) -> str:
     """Map a ``GraphSamplerBase`` roadmap type onto a registered builder name.
     ``halton*`` means a triangulation of the Halton samples: ``cdt`` in 2D,
-    ``dt`` otherwise (as ``generate_map`` does)."""
+    ``dt`` otherwise."""
     if roadmap_type is None:
         raise ValueError("roadmap_type is required")
     if "halton" in roadmap_type:
@@ -60,9 +60,10 @@ class Roadmap(RoadmapBase):
     ``generate`` instantiates the concrete builder (``PRM``, ``Lattice``,
     ``CDT``, ...) for ``roadmap_type``, runs it on the current nodes and adopts
     its nodes, clearance and adjacency, passing it this roadmap's ``config``.
-    For builders that take anchors (the
-    planar family and RRG) they default to the map's ``start`` and ``goal``. ``update_node_sampler`` writes the result
-    into a ``GraphSamplerBase`` in the layout its planners read.
+    For builders that take anchors (the planar family and RRG) they default
+    to the map's ``start`` and ``goal``. ``apply`` hands the result to the
+    map's ``node_sampler`` and registers the start/goal kinds; the map's
+    ``edges`` / ``road_map`` views then read this object.
     """
 
     name = "general"

@@ -143,7 +143,7 @@ def _make_map_mapd(map_yaml: str, use_discrete_space: bool, agent_radius: float,
     road_map = map_.road_map
 
     if register_task_endpoints:
-        map_.set_goal([])  # nodes persist in node_index_dict; keep the figure clean
+        map_.set_goal([])  # nodes persist in pos_index_dict; keep the figure clean
 
     return map_, agents_rt, mapd, nodes, road_map
 

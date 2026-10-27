@@ -48,13 +48,16 @@ GNN6_EPOCH = 100
 
 
 def _detach_vertex(map_, i: int) -> None:
-    """Remove every roadmap edge touching node i (road_map + aligned weights)."""
-    for u in range(len(map_.road_map)):
-        keep = [k for k, v in enumerate(map_.road_map[u]) if v != i]
-        map_.road_map[u] = [map_.road_map[u][k] for k in keep]
-        map_.road_map_edge_weights[u] = [map_.road_map_edge_weights[u][k] for k in keep]
-    map_.road_map[i] = []
-    map_.road_map_edge_weights[i] = []
+    """Remove every roadmap edge touching node i. ``road_map`` is a view of the
+    CSR roadmap, so the edited lists go back through ``set_adjacency``."""
+    road_map, weights = map_.road_map, map_.road_map_edge_weights
+    for u in range(len(road_map)):
+        keep = [k for k, v in enumerate(road_map[u]) if v != i]
+        road_map[u] = [road_map[u][k] for k in keep]
+        weights[u] = [weights[u][k] for k in keep]
+    road_map[i] = []
+    weights[i] = []
+    map_.roadmap.set_adjacency(road_map, weights)    # edges / edge_weights are views over map_.roadmap
 
 
 @unittest.skipUnless(_IMPORTS_OK, f"imports failed: {_IMPORT_ERROR}")

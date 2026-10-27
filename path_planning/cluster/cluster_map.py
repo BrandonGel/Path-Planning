@@ -68,12 +68,12 @@ def _build_setup_sampler(source_map: GraphSampler) -> GraphSampler:
         goal=[],
         use_discrete_space=source_map.use_discrete_space,
         roadmap_config={**source_map.roadmap_config.as_dict(), "sample_num": 0},
-        sampling_dist_dict=source_map.sampling_dist_dict,
+        sampling_dist_dict=source_map.node_sampler.sampling_dist_dict,
     )
     fresh.obs_size = source_map.obs_size
     if len(source_map.obstacles):
         fresh.set_obstacles(np.asarray(source_map.obstacles, dtype=np.int64))
-    fresh.set_inflation_radius(source_map.inflation_radius)
+    fresh.inflate_obstacles(source_map.inflation_radius)
     return fresh
 
 
@@ -165,9 +165,6 @@ def build_cluster_map(
 
 def save_cluster_map(cluster_map: GraphSampler, graph_file: Path) -> None:
     """Save a distilled sampler so load_graph_sampler round-trips cleanly."""
-    # grid_points must be a subset of nodes on load; the distilled roadmap
-    # keeps none of the source grid nodes as such.
-    cluster_map.grid_points = []
     # _load_from_dict recomputes num_total_nodes = sample_num + #start + #goal.
     cluster_map.set_roadmap_config(
         sample_num=len(cluster_map.nodes) - len(cluster_map.start) - len(cluster_map.goal)

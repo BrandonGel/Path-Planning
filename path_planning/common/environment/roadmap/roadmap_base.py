@@ -1,8 +1,10 @@
 """Array-backed roadmaps: an ``(N, dim)`` point array plus a CSR adjacency.
 
 ``RoadmapBase`` holds the shared state and helpers; one subclass per roadmap type
-implements ``generate_roadmap`` (see ``prm.py``, ``lattice.py``,
-``delaunay.py`` and the planar family under ``roadmap_planar.py``).
+implements ``generate`` (see ``prm.py``, ``lattice.py``, ``delaunay.py``,
+``rrg.py``, ``custom.py`` and the planar family under ``roadmap_planar.py``).
+The numba kernels, Dijkstra and CSR helpers live in ``roadmap_util.py`` and
+``RoadmapConfig`` in ``roadmap_config.py``.
 """
 import math
 from typing import List, Tuple, TYPE_CHECKING
@@ -24,13 +26,18 @@ class RoadmapBase:
     """Base roadmap: nodes, clearance and a CSR adjacency over a ``GraphSamplerBase``.
 
     ``adj.indices[adj.indptr[u]:adj.indptr[u+1]]`` are the neighbours of ``u``
-    and ``adj.data`` the matching edge lengths. ``road_map`` / ``edge_weights``
-    give the list-of-lists view the rest of the codebase reads.
+    and ``adj.data`` the matching edge lengths. ``roadmap_edges`` /
+    ``roadmap_weights`` give the per-node neighbour lists (the map's
+    ``road_map`` / ``road_map_edge_weights``), ``edges`` / ``edge_weights`` the
+    flat ``(E, 2)`` / ``(E,)`` form. ``nodes``, ``clearance``, ``adj`` and
+    ``snapped`` are read-only; builders write the private fields.
 
-    Subclasses implement ``generate_roadmap(samples, ...)``. ``PRM``,
+    Subclasses implement ``generate(**kwargs)`` over the current nodes;
+    ``generate_roadmap(samples, ...)`` sets the nodes first. ``PRM``,
     ``Lattice`` and ``DelaunayRoadmap`` connect the given samples; the planar
     family (``CDT``, ``Midpoints``, ``Centroids``, ``Voronoi``) replaces the
-    nodes with points derived from a constrained triangulation.
+    nodes with points derived from a constrained triangulation; ``RRG`` grows
+    its own nodes from the anchors.
     """
 
     name: str = "base"

@@ -292,7 +292,7 @@ class InputFile:
 
         map_ = GraphSampler(bounds=bounds, resolution=resolution,start=[],goal=[],use_discrete_space=True)
         map_.set_obstacles(obstacles=obstacles_grid)
-        map_.set_inflation_radius(radius=agent_radius)
+        map_.inflate_obstacles(radius=agent_radius)
         occupied_positions.update(map_.get_inflated_obstacles())   
 
 
@@ -398,7 +398,7 @@ def create_map(param: Dict, generate_new_graph: bool = False,graph_file: Path =N
         
         obstacles = obstacles_world_to_grid(map_, obstacles_world, obs_size)
         map_.set_obstacles(obstacles=obstacles)
-        map_.set_inflation_radius(radius=param["agent_radius"])
+        map_.inflate_obstacles(radius=param["agent_radius"])
 
         agents_rt = agents_yaml_to_roadmap_frame(map_, agents)
         start = [a["start"] for a in agents_rt]

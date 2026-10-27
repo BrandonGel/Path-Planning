@@ -318,7 +318,7 @@ def normalize_data(map_: GraphSampler):
     # Get Edges & Edge Weights
     edge_weights = map_.edge_weights
     start_goal_edges_dict = {**map_.get_start_nodes_with_all_edges(), **map_.get_goal_nodes_with_all_edges()}
-    start_goal_nodes = map_.get_start_nodes() + map_.get_goal_nodes()
+    start_goal_nodes = map_.start_nodes + map_.goal_nodes
 
 
     # Generate Node Data ('node')
@@ -326,7 +326,7 @@ def normalize_data(map_: GraphSampler):
     # Concatenate Position & zero class vector
     ndata = np.concatenate((pos, np.zeros((pos.shape[0], 2))), axis=1)
     start_goal_mask = np.full(len(ndata),fill_value=0).astype(bool)
-    start_goal_idx = [map_.get_node_index(node) for node in start_goal_nodes]
+    start_goal_idx = list(map_.start_nodes_index.values()) + list(map_.goal_nodes_index.values())   # same order as start_nodes + goal_nodes
     start_goal_mask[start_goal_idx] = True
     # Specify Start & Goal Nodes to have the one class value
     ndata[start_goal_mask, dims] = 1
@@ -466,16 +466,15 @@ def heterodata_to_graph_sampler(
         road_map_edge_weights[u].append(w)
         road_map_edge_weights[v].append(w)
 
-    # Treat non-start/goal nodes as sampled/grid points for bookkeeping
+    # Non-start/goal nodes count as samples for sample_num bookkeeping
     start_goal_set = set(start_indices) | set(goal_indices)
-    grid_points = [tuple(coords[i]) for i in range(num_nodes) if i not in start_goal_set]
+    num_sampled = sum(1 for i in range(num_nodes) if i not in start_goal_set)
 
     sampler_data = {
         "start": start,
         "goal": goal,
-        "roadmap_config": {"sample_num": len(grid_points), "num_neighbors": 0},
+        "roadmap_config": {"sample_num": num_sampled, "num_neighbors": 0},
         "use_discrete_space": True,
-        "grid_points": grid_points,
         "nodes": nodes,
         "obstacles": [],
         "inflation_radius": 0.0,

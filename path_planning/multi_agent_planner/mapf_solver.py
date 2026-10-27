@@ -28,18 +28,18 @@ def _snap_agents_to_nodes(map_, agents_rt):
     nodes = getattr(map_, "nodes", None)
     if not nodes:
         return agents_rt
-    nidx = getattr(map_, "node_index_dict", {})
+    nidx = getattr(map_, "pos_index_dict", {})
     pts = [tuple(float(c) for c in n.current) for n in nodes]
     kdt = None
     out = []
     for a in agents_rt:
         s = tuple(float(x) for x in a["start"])
         g = tuple(float(x) for x in a["goal"])
-        if Node(s) not in nidx:
+        if s not in nidx:
             from scipy.spatial import KDTree
             kdt = kdt or KDTree(pts)
             s = pts[int(kdt.query(np.asarray(s))[1])]
-        if Node(g) not in nidx:
+        if g not in nidx:
             from scipy.spatial import KDTree
             kdt = kdt or KDTree(pts)
             g = pts[int(kdt.query(np.asarray(g))[1])]
@@ -51,14 +51,14 @@ def _agents_off_nodes(map_, agents_rt) -> List[str]:
     """Return a description of every agent start/goal that is not an exact roadmap node."""
     from path_planning.common.environment.node import Node
 
-    nidx = getattr(map_, "node_index_dict", {}) or {}
+    nidx = getattr(map_, "pos_index_dict", {}) or {}
     off = []
     for a in agents_rt:
         s = tuple(float(x) for x in a["start"])
         g = tuple(float(x) for x in a["goal"])
-        if Node(s) not in nidx:
+        if s not in nidx:
             off.append(f"{a.get('name', 'agent')} start {s}")
-        if Node(g) not in nidx:
+        if g not in nidx:
             off.append(f"{a.get('name', 'agent')} goal {g}")
     return off
 

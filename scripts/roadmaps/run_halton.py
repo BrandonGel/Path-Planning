@@ -31,10 +31,8 @@ def run_halton(
     """Build a Halton-sampled roadmap and optionally persist it."""
     set_global_seed(42)
 
-    if not hasattr(graph_sampler, "sampling_dist_dict"):
-        graph_sampler.sampling_dist_dict = {}
     if halton_cfg:
-        graph_sampler.sampling_dist_dict["halton"] = halton_cfg
+        graph_sampler.node_sampler.set_sampling_dist_dict({"halton": halton_cfg})
 
     for s in start:
         graph_sampler.type_map[graph_sampler.world_to_map(s, discrete=True)] = TYPES.START

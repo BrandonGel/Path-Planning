@@ -179,13 +179,10 @@ class GraphSampler(GraphSamplerBase):
         return self.node_sampler.get_nodes(index_type='goal_points')
     
     @property
-    def boundary_nodes(self):
-        """Obstacle/inflation boundary geometry from the CDT extraction
-        (path_planning.common.environment.map.cdt.get_boundary): merged wall
-        corners/junctions plus the enclosing map rectangle.
-
-        Returns (boundary_points (N,2), boundary_segments (M,2) index pairs,
-        holes: one interior point per obstacle component)."""
+    def boundary_nodes(self) -> List[Node]:
+        """The boundary nodes (the sampler's ``'boundary_points'`` kind) as
+        ``Node`` objects: outline vertices when they were generated, otherwise
+        the sampled nodes whose cell touches a wall or the map edge."""
         return self.node_sampler.get_nodes(index_type='boundary_points')
 
     def _all_edges_from(self, u_indices, khop: int = -1) -> dict:
@@ -263,17 +260,23 @@ class GraphSampler(GraphSamplerBase):
         return neighbors
 
     def generateRandomNodes(self,sample_num: int = None, generate_grid_nodes = False, generate_boundary_nodes = False, prob_map = None, samp_from_prob_map_ratio = 0.5, roadmap_type: str = None, boundary_node_spacing: float | None = None):
-        """Sample this map's node set with a fresh ``NodeSampler`` (see
-        ``NodeSampler.sample_nodes`` for the options) and install it here:
-        ``roadmap_config.sample_num`` random nodes (Halton when
+        """Reset ``node_sampler`` and sample this map's node set (see
+        ``NodeSampler.sample_nodes`` for the options); ``nodes``,
+        ``pos_index_dict`` and the index dicts are views over the sampler, so
+        nothing is copied here. ``sample_num`` (default
+        ``roadmap_config.sample_num``) random nodes: Halton when
         ``roadmap_type`` contains ``halton``, prob-map weighted when
-        ``prob_map`` is given), then grid, boundary, start and goal nodes.
+        ``prob_map`` is given, uniform otherwise. Then, in order: every
+        expandable cell centre (``generate_grid_nodes``, into the sample
+        kind), the outline of free space (``generate_boundary_nodes``), the
+        start and goal positions, and when no outline was generated the
+        existing nodes next to a wall are marked as boundary nodes instead.
         ``rrg`` roadmaps sample their own nodes, so nothing is generated for
         them. ``boundary_node_spacing`` is accepted for backward
         compatibility; the boundary spacing is the map resolution.
 
         Returns:
-            nodes: the installed node list.
+            nodes: the map's node list (``self.nodes``).
         """
         if roadmap_type == 'rrg':
             return []
@@ -300,17 +303,19 @@ class GraphSampler(GraphSamplerBase):
         """Build a roadmap with ``path_planning.common.environment.roadmap`` and
         install it here.
 
-        ``roadmap_type`` follows ``generate_map`` (``prm``, ``grid``, ``dt``,
-        ``cdt``, ``midpoints``, ``centroids``, ``voronoi``, ``rrg``, ``halton*``;
-        plus ``custom`` with ``edge_indices=...``). ``samples`` defaults to
-        ``self.nodes``. Extra keyword arguments go to the builder (e.g.
+        ``roadmap_type`` is one of ``prm``, ``grid``, ``dt``, ``cdt``,
+        ``midpoints``, ``centroids``, ``voronoi``, ``rrg``, ``halton*`` (a
+        triangulation of the Halton samples) or ``custom`` (pass
+        ``edge_indices=...``). The nodes are ``self.nodes``, i.e. what ``node_sampler``
+        holds. Extra keyword arguments go to the builder (e.g.
         ``anchor_points``, ``filter_collision``, ``k_query``). ``config`` is a
-        ``RoadmapConfig``, or a dict of overrides on top of this sampler's
-        ``roadmap_config`` (the default). Afterwards
-        ``nodes``, ``edges``, ``edge_weights`` and the index
-        dicts are set (``Roadmap.apply_to``); the ``Roadmap`` object (CSR
-        adjacency in ``.adj``) is kept on ``self.roadmap`` and serves the
-        ``road_map`` / ``road_map_edge_weights`` views.
+        ``RoadmapConfig``, or a dict of overrides on top of this map's
+        ``roadmap_config`` (the default). Afterwards ``Roadmap.apply`` hands
+        the builder's nodes back to ``node_sampler`` (planar builders derive
+        new points; a snapped or missing start/goal is resolved or appended)
+        and clears the start/goal edge caches. The ``Roadmap`` (CSR adjacency
+        in ``.adj``) is ``self.roadmap``; ``edges``, ``edge_weights``,
+        ``road_map`` and ``road_map_edge_weights`` are views over it.
 
         Legacy form ``generate_roadmap(samples)`` (a node list as first
         argument) builds the k-nearest PRM, as before.
@@ -513,8 +518,10 @@ class GraphSampler(GraphSamplerBase):
         """Restore a pickle written by ``save_graph_sampler``. Version 2 holds
         ``node_sampler`` / ``roadmap`` state dicts; the legacy layout holds
         ``nodes`` (Node list), ``road_map`` / ``road_map_edge_weights``
-        (nested neighbour lists) and optional ``grid_points`` /
-        ``boundary_points`` and is still read."""
+        (nested neighbour lists), the config and ``sampling_dist_dict`` at the
+        top level and optional ``boundary_points``; it is still read
+        (``grid_points``, when present, is ignored: grid nodes are plain
+        samples now)."""
         self.use_discrete_space = data["use_discrete_space"]
         self.set_start(data["start"])
         self.set_goal(data["goal"])
@@ -567,7 +574,9 @@ class GraphSampler(GraphSamplerBase):
 
         ``axes`` is a pair of distinct dimension indices (same convention as ``numpy.rot90``).
         When k is 1 or 3, the world extents along those two axes are swapped.
-        Road map topology and cost_matrix are unchanged (rotation preserves distances).
+        Road map topology and edge weights are unchanged (rotation preserves
+        distances); the roadmap's node array and every sampler kind index follow
+        their nodes to the new positions.
 
         - **Discrete space** (``use_discrete_space`` is True): grid cell indices are
           rotated with the same mapping as ``numpy.rot90`` on ``type_map``.

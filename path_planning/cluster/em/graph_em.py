@@ -351,7 +351,7 @@ class GraphEM:
             return idx
         coord = tuple(endpoint)
         node = Node(coord, None, 0, 0)
-        idx = self.map.node_index_dict.get(node)
+        idx = self.map.pos_index_dict.get(coord)
         if idx is not None:
             return int(idx)
         if self._kd_tree is None:
