@@ -55,6 +55,7 @@ class NodeSampler:
         was."""
         self._halton_sampler = None
         self._nodes: List[Node] = []
+        self._pos_points = np.zeros((0, self.dim), dtype=np.float64)   # (capacity, dim) positions buffer; rows [:len(nodes)] are live
         self._pos_index_dict: dict = {}        # position tuple -> index in nodes
         # Node -> index in nodes, one dict per node kind (a node can be in several)
         self._sample_points_index: dict = {}
@@ -85,6 +86,13 @@ class NodeSampler:
         return len(self._nodes)
 
     @property
+    def position(self) -> np.ndarray:
+        """Alias of ``pos_points``: ``(N, dim)`` positions, row ``i`` = node ``i``.
+        (Not the ``pos_index_dict`` keys: a repeated position has one key but
+        two nodes, which would break the row/index correspondence.)"""
+        return self.pos_points
+
+    @property
     def pos_index_dict(self, pos: tuple | np.ndarray | None = None) -> dict:
         """Position tuple -> index in ``nodes``."""
         if pos is not None:
@@ -109,8 +117,18 @@ class NodeSampler:
 
     @property
     def pos_points(self) -> np.ndarray:
-        """(N, dim) positions of ``nodes``."""
-        return np.array([node.current for node in self._nodes], dtype=np.float64).reshape(-1, self.dim)
+        """``(N, dim)`` positions of ``nodes``, row ``i`` = node ``i``: a
+        read-only view of the position buffer, which is kept up to date as
+        nodes are added (``add_node`` grows it geometrically) or replaced
+        (``set_nodes``, ``set_positions``, ``load_state_dict``). Copy it
+        before editing."""
+        view = self._pos_points[:len(self._nodes)]
+        view.setflags(write=False)
+        return view
+
+    def _set_pos_points(self, points) -> None:
+        """Replace the position buffer with exactly ``points`` (``(N, dim)``)."""
+        self._pos_points = np.ascontiguousarray(np.asarray(points, dtype=np.float64).reshape(-1, self.dim))
 
     @property
     def bounds(self) -> np.ndarray:
@@ -180,12 +198,14 @@ class NodeSampler:
 
     # ------------------------------------------------------------ persistence
     def state_dict(self) -> dict:
-        """Plain-array snapshot of the sampled state, for pickling: node
-        positions ``(N, dim)``, clearances ``(N,)``, per kind the node
-        indices, and ``sampling_dist_dict``. Nothing about the map is included."""
+        """Snapshot of the sampled state, for pickling: ``pos_index_dict``
+        (position tuple -> node index; the positions are rebuilt from it on
+        load, so they are not stored twice), clearances ``(N,)``, per kind the
+        node indices, and ``sampling_dist_dict``. Nothing about the map is
+        included."""
         return {
             "sampling_dist_dict": {kind: dict(cfg) for kind, cfg in self.sampling_dist_dict.items()},
-            "positions": self.pos_points,
+            "pos_index_dict": dict(self._pos_index_dict),
             "clearance": np.array([node.max_clearance for node in self._nodes], dtype=np.float64),
             "kinds": {kind: np.array(sorted(index.values()), dtype=np.int64)
                       for kind, index in self._points_index_dict.items()},
@@ -198,14 +218,30 @@ class NodeSampler:
         ``clearance`` is re-read from the map's ``inflated_esdf``."""
         self.reset()
         self.set_sampling_dist_dict(state.get("sampling_dist_dict"))
-        pts = np.asarray(state["positions"], dtype=np.float64).reshape(-1, self.dim)
+        pos_index_dict = None
+        if "pos_index_dict" in state:
+            # Node i is the key whose value is i; the indices must be exactly 0..N-1.
+            pos_index_dict = dict(state["pos_index_dict"])
+            n = len(pos_index_dict)
+            values = np.fromiter(pos_index_dict.values(), dtype=np.int64, count=n)
+            if not (np.array_equal(np.sort(values), np.arange(n))):
+                raise ValueError("load_state_dict: pos_index_dict indices are not a contiguous 0..N-1 range")
+            keys = np.array(list(pos_index_dict), dtype=np.float64).reshape(n, self.dim)
+            pts = np.empty_like(keys)
+            pts[values] = keys                      # row i <- the key whose index is i (no Python-level sort)
+        else:                                       # earlier snapshots stored the array itself
+            pts = np.asarray(state["positions"], dtype=np.float64).reshape(-1, self.dim)
         clearance = state.get("clearance")
         if clearance is None or len(clearance) != len(pts):
             cells = self.path_world_to_map(pts) if len(pts) else np.zeros((0, self.dim), dtype=np.int64)
             clearance = self.inflated_esdf[tuple(cells.T)] if len(pts) else np.zeros(0)
         self._nodes = [Node(p, None, 0, 0, float(c)) for p, c in zip(convert_np_to_tuple(pts), clearance)]
-        for i, node in enumerate(self._nodes):
-            self._pos_index_dict.setdefault(tuple(node.current), i)
+        self._set_pos_points(pts)
+        if pos_index_dict is not None:              # validated above: it is exactly the index we would rebuild
+            self._pos_index_dict = pos_index_dict
+        else:
+            for i, node in enumerate(self._nodes):
+                self._pos_index_dict.setdefault(tuple(node.current), i)
         for kind, idx in state.get("kinds", {}).items():
             if kind in self._points_index_dict:
                 self._points_index_dict[kind].update(
@@ -222,6 +258,7 @@ class NodeSampler:
         if any(not hasattr(node, "max_clearance") for node in nodes):     # Node objects from an older pickle
             nodes = self.make_points([node.current for node in nodes])    # same positions, clearance from the map
         self._nodes = nodes
+        self._set_pos_points([node.current for node in nodes])
         self._pos_index_dict = {}
         for i, node in enumerate(self._nodes):
             self._pos_index_dict.setdefault(tuple(node.current), i)
@@ -242,6 +279,7 @@ class NodeSampler:
             raise ValueError(f"set_positions: {len(pts)} points for {len(self._nodes)} nodes")
         by_index = {kind: list(index.values()) for kind, index in self._points_index_dict.items()}
         self._nodes = [Node(p, None, 0, 0, old.max_clearance) for p, old in zip(convert_np_to_tuple(pts), self._nodes)]
+        self._set_pos_points(pts)
         self._pos_index_dict = {}
         for i, node in enumerate(self._nodes):
             self._pos_index_dict.setdefault(tuple(node.current), i)
@@ -258,6 +296,11 @@ class NodeSampler:
         if index is not None:
             return index, False
         index = len(self._nodes)
+        if index >= self._pos_points.shape[0]:                  # grow the buffer geometrically (amortised O(1) append)
+            grown = np.empty((max(64, 2 * self._pos_points.shape[0]), self.dim), dtype=np.float64)
+            grown[:index] = self._pos_points[:index]
+            self._pos_points = grown
+        self._pos_points[index] = node.current
         self._nodes.append(node)
         self._pos_index_dict[key] = index
         return index, True

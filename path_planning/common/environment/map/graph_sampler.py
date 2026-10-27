@@ -93,6 +93,10 @@ class GraphSampler(GraphSamplerBase):
         return self.node_sampler.nodes if self.node_sampler is not None else []
 
     @property
+    def position(self) -> np.ndarray:
+        return self.node_sampler.position if self.node_sampler is not None else np.array([])
+
+    @property
     def pos_index_dict(self) -> dict:
         """Position tuple -> node index (the sampler's registry)."""
         return self.node_sampler.pos_index_dict if self.node_sampler is not None else {}
@@ -552,8 +556,7 @@ class GraphSampler(GraphSamplerBase):
             self.roadmap.set_nodes(self.nodes)
             self.roadmap.set_adjacency(data["road_map"], data.get("road_map_edge_weights"))
         # nodes / pos_index_dict / edges / edge_weights / road_map are views over the sampler and roadmap.
-        self.get_start_nodes_with_all_edges()
-        self.get_goal_nodes_with_all_edges()
+        # The start/goal edge lists are built lazily by get_start/goal_nodes_with_all_edges.
 
         # Set up constraint sweep
         self.use_constraint_sweep = data["use_constraint_sweep"] if not 'use_constraint_sweep' in args else args["use_constraint_sweep"]
