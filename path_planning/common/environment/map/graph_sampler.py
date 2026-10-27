@@ -6,7 +6,7 @@ from path_planning.common.environment.node import Node
 from python_motion_planning.common.env.map.grid import GridTypeMap
 from python_motion_planning.common import TYPES
 from path_planning.utils.cgal_sweep import CGAL_Sweep
-from path_planning.common.environment.map.graph_sampler_base import GraphSamplerBase
+from path_planning.common.environment.map.graph_sampler_base import GraphSamplerBase, ROADMAP_TYPES, validate_roadmap_type, snap_to_cell_centers  # re-exported: cluster_map, ctopprm, dataset_ground_truth_map import them from here
 from path_planning.common.environment.roadmap.roadmap_base import RoadmapConfig
 from path_planning.common.environment.node_sampler.node_sampler import NodeSampler
 from path_planning.common.utils.geometry import GeometryNumpy as Geometry
@@ -31,7 +31,7 @@ class GraphSampler(GraphSamplerBase):
         # Roadmap parameters (sample_num, num_neighbors, edge band, RRG rates,
         # ...) live in one RoadmapConfig: a dict, a RoadmapConfig or the path of
         # a YAML file such as config/roadmap.yaml; see set_roadmap_config.
-        self.node_sampler = NodeSampler(self)      # reads the map live; see NodeSampler
+        self.node_sampler = NodeSampler(self, sampling_dist_dict=sampling_dist_dict)      # reads the map live; see NodeSampler
         self.roadmap = Roadmap(self, config=roadmap_config)
         
         self.obstacle_nodes = []
@@ -460,7 +460,8 @@ class GraphSampler(GraphSamplerBase):
         return False
 
     def clear_data(self):
-        self.roadmap = Roadmap(self, config=self.roadmap_config)   # empty roadmap, same parameters
+        self.node_sampler.reset()
+        self.roadmap.reset()
         self.start = []
         self.goal = []
         self.obstacles = []

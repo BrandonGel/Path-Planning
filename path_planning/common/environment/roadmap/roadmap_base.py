@@ -5,200 +5,19 @@ implements ``generate_roadmap`` (see ``prm.py``, ``lattice.py``,
 ``delaunay.py`` and the planar family under ``roadmap_planar.py``).
 """
 import math
-import os
-from dataclasses import dataclass, fields, asdict
-import yaml
 from typing import List, Tuple, TYPE_CHECKING
 import numpy as np
 from numba import njit, prange
 from scipy.sparse import csr_array
-from scipy.sparse.csgraph import dijkstra as _csgraph_dijkstra, shortest_path as _csgraph_shortest_path
+from scipy.sparse.csgraph import shortest_path as _csgraph_shortest_path
+from path_planning.common.environment.roadmap.roadmap_config import RoadmapConfig
 from python_motion_planning.common.env.map.grid import TYPES, _grid_path_world_to_map_int, _grid_path_map_to_world
-
+from path_planning.common.environment.roadmap.roadmap_util import _filter_edges_kernel, _khop_ball, _unique_undirected, _symmetric_csr, shortest_paths
 from path_planning.common.environment.node import Node
-from path_planning.common.environment.map.numbaUtil import _world_in_collision
+
 
 if TYPE_CHECKING:
     from path_planning.common.environment.map.graph_sampler_base import GraphSamplerBase
-
-
-@njit(parallel=True, cache=True)
-def _filter_edges_kernel(pts, u, v, min_len, max_len, check_collision,
-                         bounds, res, shape, type_map, esdf, obs_t, inf_t, strict):
-    """Keep edge ``e`` when ``min_len <= |pts[u[e]] - pts[v[e]]| <= max_len``
-    and (if ``check_collision``) the segment is free in both directions, so
-    an endpoint outside the map or inside an obstacle kills the edge
-    whichever end it is. Returns the keep mask and every edge's length.
-    Edges are independent.
-    """
-    E = len(u)
-    keep = np.zeros(E, np.bool_)
-    w = np.zeros(E)
-    for e in prange(E):
-        d2 = 0.0
-        for k in range(pts.shape[1]):
-            diff = pts[u[e], k] - pts[v[e], k]
-            d2 += diff * diff
-        d = np.sqrt(d2)
-        w[e] = d
-        if d < min_len or d > max_len:
-            continue
-        if check_collision and (
-            _world_in_collision(pts[u[e]], pts[v[e]], bounds, res, shape, type_map, esdf, obs_t, inf_t, strict)
-            or _world_in_collision(pts[v[e]], pts[u[e]], bounds, res, shape, type_map, esdf, obs_t, inf_t, strict)
-        ):
-            continue
-        keep[e] = True
-    return keep, w
-
-
-@njit(cache=True)
-def _khop_ball(indptr, indices, data, src, k, n):
-    """BFS from ``src`` over at most ``k`` hops on a CSR adjacency. Returns the
-    ball (node ids in BFS order, ``src`` first), each node's hop count (``-1``
-    outside the ball) and the length of its BFS-tree path from ``src``, which
-    bounds its true shortest-path length from above. Touches only the ball."""
-    hop = np.full(n, -1, np.int64)
-    bound = np.zeros(n)
-    order = np.empty(n, np.int64)
-    hop[src] = 0
-    order[0] = src
-    head, tail = 0, 1
-    while head < tail:
-        u = order[head]
-        head += 1
-        if hop[u] == k:
-            continue
-        for j in range(indptr[u], indptr[u + 1]):
-            v = indices[j]
-            if hop[v] < 0:
-                hop[v] = hop[u] + 1
-                bound[v] = bound[u] + data[j]
-                order[tail] = v
-                tail += 1
-    return order[:tail], hop, bound
-
-
-def _unique_undirected(u: np.ndarray, v: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Unique undirected edges ``(eu < ev)`` of the pair list and, for every
-    input slot, the id of its edge. Callers drop self-loops beforehand."""
-    u = np.asarray(u, dtype=np.int64).ravel()
-    v = np.asarray(v, dtype=np.int64).ravel()
-    pairs = np.stack([np.minimum(u, v), np.maximum(u, v)], axis=1)
-    if len(pairs) == 0:
-        return np.zeros(0, np.int64), np.zeros(0, np.int64), np.zeros(0, np.int64)
-    uniq, inverse = np.unique(pairs, axis=0, return_inverse=True)
-    return uniq[:, 0], uniq[:, 1], inverse.ravel()
-
-
-def _symmetric_csr(n: int, u: np.ndarray, v: np.ndarray, w: np.ndarray) -> csr_array:
-    """CSR adjacency holding every undirected edge in both directions."""
-    rows = np.concatenate([u, v])
-    cols = np.concatenate([v, u])
-    data = np.concatenate([w, w])
-    adj = csr_array((data, (rows, cols)), shape=(n, n))
-    adj.sort_indices()
-    return adj
-
-def shortest_paths(sources, adj, limit: float = np.inf, return_predecessors: bool = False):
-    """Dijkstra over the roadmap from one or several source nodes.
-
-    Returns ``dist`` of shape ``(len(sources), num_nodes)`` (``inf`` where
-    unreachable, ``limit`` caps the search radius) and, when asked, the
-    ``predecessors`` array of the same shape (``-9999`` for the source and
-    unreachable nodes, scipy's convention). A scalar ``sources`` gives 1-D
-    results.
-    """
-    num_nodes = adj.shape[0]
-    scalar = np.isscalar(sources)
-    idx = np.atleast_1d(np.asarray(sources, dtype=np.int64))
-    if num_nodes == 0:
-        raise ValueError("shortest_paths: the roadmap has no nodes")
-    if idx.size and (idx.min() < 0 or idx.max() >= num_nodes):
-        raise IndexError(f"shortest_paths: source out of range [0, {num_nodes})")
-    out = _csgraph_dijkstra(adj, directed=True, indices=idx, limit=limit,
-                            return_predecessors=return_predecessors)
-    if return_predecessors:
-        dist, pred = out
-        return (dist[0], pred[0]) if scalar else (dist, pred)
-    return out[0] if scalar else out
-
-@dataclass
-class RoadmapConfig:
-    """Tunable parameters shared by every roadmap builder, built from a dict.
-
-    ``RoadmapConfig({"num_neighbors": 6, "max_edge_length": 12})``; keys left
-    out take the defaults below, unknown keys raise. Edge band and k apply to
-    the builders that filter edges (PRM, Delaunay, planar family, RRG,
-    custom); ``Lattice`` edges are fixed by the grid.
-
-    ``RoadmapConfig.from_yaml(path)`` reads a YAML file (``config/roadmap.yaml``
-    is the template) and ``RoadmapConfig.load(x)`` accepts a config, dict,
-    YAML path or ``None``, which is what the sampler and builders call.
-    """
-    YAML_KEY = "roadmap_config"           # optional top-level block in a YAML file
-    min_edge_length: float = 0.0          # drop edges shorter than this
-    max_edge_length: float = math.inf     # drop edges longer than this; RRG steer / connect radius
-    num_neighbors: int = 0                # PRM: accepted edges per node, 0 = unlimited
-    sample_num: int = 0                   # RRG: nodes to add
-    goal_sample_rate: float = 0.1         # RRG: probability of drawing a goal
-    max_iters_ratio: float = 50.0         # RRG: iteration cap = ratio * sample_num
-    filter_collision: bool = True         # line-of-sight test on candidate edges
-    snap_off_grid: bool = True            # Lattice: snap off-centre nodes instead of raising
-    k_query: int | None = None            # PRM: first KD query size (default 4*k+1)
-    grow: int = 4                         # PRM: query growth factor per round
-
-    def __init__(self, config: dict | None = None) -> None:
-        config = dict(config or {})
-        for f in fields(self):                      # every field, default when absent
-            setattr(self, f.name, config.pop(f.name, f.default))
-        if config:
-            raise TypeError(f"RoadmapConfig: unknown keys {sorted(config)}")
-        if self.min_edge_length < 0 or self.max_edge_length < self.min_edge_length:
-            raise ValueError(f"need 0 <= min_edge_length <= max_edge_length, got {self.min_edge_length}, {self.max_edge_length}")
-        if self.num_neighbors < 0 or self.sample_num < 0:
-            raise ValueError("num_neighbors and sample_num must be >= 0")
-        if not 0.0 <= self.goal_sample_rate <= 1.0:
-            raise ValueError(f"goal_sample_rate must be in [0, 1], got {self.goal_sample_rate}")
-        if self.max_iters_ratio <= 0 or self.grow < 2:
-            raise ValueError("max_iters_ratio must be > 0 and grow >= 2")
-        self.min_edge_length = float(self.min_edge_length)
-        self.max_edge_length = float(self.max_edge_length)
-        self.num_neighbors = int(self.num_neighbors)
-        self.sample_num = int(self.sample_num)
-
-    def as_dict(self) -> dict:
-        return asdict(self)
-
-    @classmethod
-    def from_yaml(cls, path: "str | os.PathLike") -> "RoadmapConfig":
-        """Read a config from a YAML file: the fields under a top-level
-        ``roadmap_config:`` block when present, else the whole document. Use
-        ``.inf`` for an unbounded ``max_edge_length`` and ``null`` for ``k_query``."""
-        with open(path, "r") as f:
-            data = yaml.safe_load(f) or {}
-        if not isinstance(data, dict):
-            raise TypeError(f"{path}: expected a mapping of RoadmapConfig fields")
-        if cls.YAML_KEY in data:
-            data = data[cls.YAML_KEY] or {}
-        return cls(data)
-
-    def to_yaml(self, path: "str | os.PathLike") -> None:
-        """Write the config under a ``roadmap_config:`` block (``inf`` is written as ``.inf``)."""
-        with open(path, "w") as f:
-            yaml.safe_dump({self.YAML_KEY: self.as_dict()}, f, sort_keys=False)
-
-    @classmethod
-    def load(cls, source: "RoadmapConfig | dict | str | os.PathLike | None") -> "RoadmapConfig":
-        """``RoadmapConfig`` as is; dict or ``None`` through the constructor;
-        a str / path through ``from_yaml``."""
-        if isinstance(source, cls):
-            return source
-        if isinstance(source, (str, os.PathLike)):
-            return cls.from_yaml(source)
-        if source is None or isinstance(source, dict):
-            return cls(source)
-        raise TypeError(f"RoadmapConfig.load: expected RoadmapConfig, dict, YAML path or None, got {type(source).__name__}")
 
 
 class RoadmapBase:
@@ -225,12 +44,7 @@ class RoadmapBase:
         self.config = RoadmapConfig.load(config)
 
         self._dim = self.graph_map.dim
-        self._num_nodes = 0
-
-        self._nodes: np.ndarray = np.zeros((0, self.dim))
-        self._clearance: np.ndarray = np.zeros(0)
-        self._adj: csr_array = csr_array((0, 0), dtype=float)
-        self._snapped: dict = {}             # original position -> node position, for builders that move nodes
+        self.reset()
 
     @property
     def nodes(self) -> np.ndarray:
@@ -510,3 +324,13 @@ class RoadmapBase:
         if self.num_nodes == 0:
             raise ValueError("No nodes to generate roadmap")
         return self.generate(**kwargs)
+
+    def reset(self) -> None:
+        self._num_nodes = 0
+        self._nodes: np.ndarray = np.zeros((0, self.dim))
+        self._clearance: np.ndarray = np.zeros(0)
+        self._adj: csr_array = csr_array((0, 0), dtype=float)
+        self._snapped: dict = {}             # original position -> node position, for builders that move nodes
+
+
+    

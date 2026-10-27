@@ -16,7 +16,7 @@ class NodeSampler:
     inflation radius (the map's ``shape``, ``bounds`` and ``inflated_esdf``
     all change then).
     """
-    def __init__(self, graph_map: "GraphSamplerBase"):
+    def __init__(self, graph_map: "GraphSamplerBase", sampling_dist_dict: dict = None):
         self.graph_map = graph_map
         self.sampling_dist_dict = {
             'halton': {

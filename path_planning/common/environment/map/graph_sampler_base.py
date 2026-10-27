@@ -7,6 +7,25 @@ from python_motion_planning.common.env.map.grid import _grid_is_expandable, _gri
 from path_planning.common.environment.map.numbaUtil import _world_line_of_sight, _world_in_collision, _grid_vector_is_expandable, convert_np_to_tuple
 from path_planning.common.utils.geometry import GeometryNumpy as Geometry
 
+ROADMAP_TYPES = set(["grid", "prm", "cdt", "rrg", "midpoints", "centroids", "voronoi", "halton"])
+
+
+def validate_roadmap_type(roadmap_type: str) -> bool:
+    return roadmap_type in ROADMAP_TYPES
+
+
+def snap_to_cell_centers(map_, points) -> np.ndarray:
+    """Vectorised map_to_world(world_to_map(p, discrete=True)): snap world points to
+    the centres of the cells containing them (clamped to the grid), the frame all
+    discrete-space roadmap nodes are stored in."""
+    pts = np.asarray(points, dtype=float)
+    b = np.asarray(map_.bounds, dtype=float)[:, 0]
+    res = float(map_.resolution)
+    idx = np.round((pts - b) / res - 0.5 + 1e-10)
+    idx = np.clip(idx, 0, np.asarray(map_.shape, dtype=float) - 1)
+    return b + res * (idx + 0.5)
+
+
 class GraphSamplerBase(Grid):
     def __init__(self,*args,**kwargs):
         super().__init__(*args, **kwargs)
