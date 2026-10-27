@@ -219,12 +219,45 @@ class RoadmapBase:
         self._num_nodes = n
         if len(samples) > 0:
             self._nodes = np.asarray([s.current for s in samples], dtype=float).reshape(n, self.dim)
-            self._clearance = np.asarray([s.max_clearance for s in samples], dtype=float)
+            self._clearance = np.asarray([getattr(s, "max_clearance", np.inf) for s in samples], dtype=float)
             self._adj = csr_array((n, n), dtype=float)
         else:
             self._nodes = np.zeros((0, self.dim))
             self._clearance = np.zeros(0)
             self._adj = csr_array((0, 0), dtype=float)
+
+    # ------------------------------------------------------------ persistence
+    def state_dict(self) -> dict:
+        """Plain-array snapshot for pickling: nodes, clearance, the three CSR
+        arrays of ``adj`` (exact, edge order included), the config as a dict,
+        ``snapped`` and the roadmap type when the instance has one. The map is
+        not included."""
+        return {
+            "roadmap_type": getattr(self, "roadmap_type", None),
+            "config": self.config.as_dict(),
+            "nodes": np.ascontiguousarray(self.nodes, dtype=np.float64),
+            "clearance": np.ascontiguousarray(self.clearance, dtype=np.float64),
+            "indptr": np.ascontiguousarray(self.adj.indptr),
+            "indices": np.ascontiguousarray(self.adj.indices),
+            "data": np.ascontiguousarray(self.adj.data, dtype=np.float64),
+            "snapped": dict(self.snapped),
+        }
+
+    def load_state_dict(self, state: dict) -> None:
+        """Restore a ``state_dict`` snapshot (nodes, clearance, adjacency,
+        ``snapped``; ``config`` and ``roadmap_type`` when present)."""
+        nodes = np.asarray(state["nodes"], dtype=np.float64).reshape(-1, self.dim)
+        n = len(nodes)
+        self._nodes = nodes
+        self._clearance = np.asarray(state.get("clearance", np.zeros(n)), dtype=np.float64).reshape(n)
+        self._num_nodes = n
+        self._adj = csr_array((np.asarray(state["data"], dtype=np.float64), np.asarray(state["indices"], dtype=np.int64),
+                               np.asarray(state["indptr"], dtype=np.int64)), shape=(n, n))
+        self._snapped = dict(state.get("snapped", {}))
+        if state.get("config") is not None:
+            self.config = RoadmapConfig.load(state["config"])
+        if state.get("roadmap_type") is not None and hasattr(self, "roadmap_type"):
+            self.roadmap_type = state["roadmap_type"]
 
     def set_adjacency(self, roadmap_edges: List[List[int]], roadmap_weights: List[List[float]] | None = None) -> None:
         """Install the adjacency from per-node neighbour lists (the

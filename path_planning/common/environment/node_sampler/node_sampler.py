@@ -29,7 +29,18 @@ class NodeSampler:
                 'samp_from_prob_map_ratio': 0.5,
             },
         }
+        self.set_sampling_dist_dict(sampling_dist_dict)
         self.reset()
+
+    def set_sampling_dist_dict(self, sampling_dist_dict: dict | None) -> dict:
+        """Overlay ``sampling_dist_dict`` (``{'halton': {...}, 'distributed': {...}}``,
+        any subset of keys) on the defaults; the merged dict is what
+        ``sample_nodes`` reads. Returns it."""
+        for kind, cfg in (sampling_dist_dict or {}).items():
+            if kind not in self.sampling_dist_dict:
+                raise ValueError(f"sampling_dist_dict: unknown sampler {kind!r}; expected one of {list(self.sampling_dist_dict)}")
+            self.sampling_dist_dict[kind].update(cfg or {})
+        return self.sampling_dist_dict
 
     def reset(self) -> None:
         """Forget every sampled node (and the Halton sequence position).
@@ -158,13 +169,50 @@ class NodeSampler:
 
         return self._nodes   
 
+    # ------------------------------------------------------------ persistence
+    def state_dict(self) -> dict:
+        """Plain-array snapshot of the sampled state, for pickling: node
+        positions ``(N, dim)``, clearances ``(N,)``, per kind the node
+        indices, and ``sampling_dist_dict``. Nothing about the map is included."""
+        return {
+            "sampling_dist_dict": {kind: dict(cfg) for kind, cfg in self.sampling_dist_dict.items()},
+            "positions": self.pos_points,
+            "clearance": np.array([node.max_clearance for node in self._nodes], dtype=np.float64),
+            "kinds": {kind: np.array(sorted(index.values()), dtype=np.int64)
+                      for kind, index in self._points_index_dict.items()},
+        }
+
+    def load_state_dict(self, state: dict) -> List[Node]:
+        """Restore a ``state_dict`` snapshot: replaces every node and kind
+        index (the Halton sequence restarts) and overlays the stored
+        ``sampling_dist_dict``. Unknown kinds are ignored; a missing
+        ``clearance`` is re-read from the map's ``inflated_esdf``."""
+        self.reset()
+        self.set_sampling_dist_dict(state.get("sampling_dist_dict"))
+        pts = np.asarray(state["positions"], dtype=np.float64).reshape(-1, self.dim)
+        clearance = state.get("clearance")
+        if clearance is None or len(clearance) != len(pts):
+            cells = self.path_world_to_map(pts) if len(pts) else np.zeros((0, self.dim), dtype=np.int64)
+            clearance = self.inflated_esdf[tuple(cells.T)] if len(pts) else np.zeros(0)
+        self._nodes = [Node(p, None, 0, 0, float(c)) for p, c in zip(convert_np_to_tuple(pts), clearance)]
+        for i, node in enumerate(self._nodes):
+            self._pos_index_dict.setdefault(tuple(node.current), i)
+        for kind, idx in state.get("kinds", {}).items():
+            if kind in self._points_index_dict:
+                self._points_index_dict[kind].update(
+                    {self._nodes[int(i)]: int(i) for i in np.asarray(idx, dtype=np.int64) if 0 <= i < len(self._nodes)})
+        return self._nodes
+
     def set_nodes(self, nodes: List[Node]) -> List[Node]:
         """Replace the node list, e.g. with the nodes a roadmap builder produced
         (the planar family derives new points, Lattice snaps, start/goal may be
         appended). ``pos_index_dict`` is rebuilt (first index wins for a
         repeated position) and every kind index is re-keyed by position; a
         node whose position is gone is dropped from the kind indices."""
-        self._nodes = list(nodes)
+        nodes = list(nodes)
+        if any(not hasattr(node, "max_clearance") for node in nodes):     # Node objects from an older pickle
+            nodes = self.make_points([node.current for node in nodes])    # same positions, clearance from the map
+        self._nodes = nodes
         self._pos_index_dict = {}
         for i, node in enumerate(self._nodes):
             self._pos_index_dict.setdefault(tuple(node.current), i)

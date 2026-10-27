@@ -39,14 +39,16 @@ class GraphSampler(GraphSamplerBase):
 
         self.use_discrete_space = use_discrete_space
 
+        self.start_to_all_edges_dict = {}
+        self.goal_to_all_edges_dict = {}
+        self._start_edges_khop = None
+        self._goal_edges_khop = None
 
         self.use_constraint_sweep = use_constraint_sweep
         self.record_sweep = record_sweep
         self.use_exact_collision_check = use_exact_collision_check
         self.sweep_backend = sweep_backend
         self.constraint_sweep = self._make_constraint_sweep()
-        self.sampling_dist_dict = sampling_dist_dict if sampling_dist_dict else {}
-
         self._inflated_esdf = None          # inflated esdf cache
         self._inflated_esdf_source = None   # inflated esdf source to update inflated esdf
 
@@ -191,7 +193,7 @@ class GraphSampler(GraphSamplerBase):
         ``u_indices``: ``RoadmapBase.khop_distances`` (``khop=-1`` every node,
         ``inf`` when unreachable; ``khop=k`` the nodes within ``k`` hops)."""
         n = len(self.nodes)
-        if n == 0 or len(self.roadmap_edges) != n:
+        if n == 0 or self.roadmap is None or self.roadmap.num_nodes != n:
             raise ValueError("Edges have not been generated yet. Please generate the roadmap first.")
         return self.roadmap.khop_distances(list(u_indices), khop)
 
@@ -290,8 +292,7 @@ class GraphSampler(GraphSamplerBase):
             generate_boundary_nodes=generate_boundary_nodes,
             prob_map=prob_map,
             samp_from_prob_map_ratio=samp_from_prob_map_ratio,
-            sampling_dist_dict=self.sampling_dist_dict,
-            sampling_type=sampling_type,
+            sampling_type=sampling_type,            # halton / distributed parameters: node_sampler.sampling_dist_dict
         )
         return self.nodes
 
@@ -460,6 +461,10 @@ class GraphSampler(GraphSamplerBase):
         return False
 
     def clear_data(self):
+        self.start_to_all_edges_dict = {}
+        self.goal_to_all_edges_dict = {}
+        self._start_edges_khop = None
+        self._goal_edges_khop = None
         self.node_sampler.reset()
         self.roadmap.reset()
         self.start = []
@@ -470,30 +475,32 @@ class GraphSampler(GraphSamplerBase):
     def __str__(self) -> str:
         return "Graph Sampler"
 
+    PICKLE_VERSION = 2
+
     def save_graph_sampler(self, path: str):
+        """Pickle the map as plain data (version 2): the settings, the
+        obstacles, ``node_sampler.state_dict()`` (nodes, kinds,
+        ``sampling_dist_dict``) and ``roadmap.state_dict()`` (nodes, adjacency,
+        ``roadmap_config``). Neither object is pickled itself: both reference
+        the map (and the CGAL sweep, which cannot be pickled)."""
         data = {
+            "version": self.PICKLE_VERSION,
             "start": self.start,
             "goal": self.goal,
-            "roadmap_config": self.roadmap_config.as_dict(),
             "use_discrete_space": self.use_discrete_space,
-            "nodes": self.nodes,
-            "boundary_points": [node.current for node in self.boundary_nodes_index],   # the boundary kind, re-registered on load
+            "node_sampler": self.node_sampler.state_dict(),
+            "roadmap": self.roadmap.state_dict(),
             # ndarray, not list-of-tuples: pickling 4.5M tuples costs ~10s / ~200MB, the array
             # milliseconds / ~70MB. set_obstacles() accepts either on load.
-            "obstacles": np.asarray(self.obstacles, dtype=np.int64) if len(self.obstacles)
-                         else [],
+            "obstacles": np.asarray(self.obstacles, dtype=np.int64) if len(self.obstacles) else [],
             "obs_size": self.obs_size,
             "inflation_radius": self.inflation_radius,
             "track_with_link": self.track_with_link,
-            "road_map": self.road_map,
-            "road_map_edge_weights": self.road_map_edge_weights,
             "use_constraint_sweep": self.use_constraint_sweep,
             "record_sweep": self.record_sweep,
             "use_exact_collision_check": self.use_exact_collision_check,
             "sweep_backend": getattr(self, "sweep_backend", "cgal"),
-            "sampling_dist_dict": self.sampling_dist_dict,
         }
-
         with open(path, 'wb') as f:
             pickle.dump(data, f)
 
@@ -503,38 +510,41 @@ class GraphSampler(GraphSamplerBase):
         self._load_from_dict(data, args)
 
     def _load_from_dict(self, data: dict, args: dict = {}):
-
+        """Restore a pickle written by ``save_graph_sampler``. Version 2 holds
+        ``node_sampler`` / ``roadmap`` state dicts; the legacy layout holds
+        ``nodes`` (Node list), ``road_map`` / ``road_map_edge_weights``
+        (nested neighbour lists) and optional ``grid_points`` /
+        ``boundary_points`` and is still read."""
         self.use_discrete_space = data["use_discrete_space"]
         self.set_start(data["start"])
         self.set_goal(data["goal"])
-        if "roadmap_config" in data:
-            self.set_roadmap_config(data["roadmap_config"])
-        else:                                   # pickles written before roadmap_config existed
-            self.set_roadmap_config(sample_num=data["sample_num"], num_neighbors=data["num_neighbors"],
-                                    min_edge_length=data["min_edge_length"], max_edge_length=data["max_edge_length"])
-        self.sampling_dist_dict = data.get("sampling_dist_dict", {})
 
-
-        self.node_sampler.set_nodes(data["nodes"])      # nodes / pos_index_dict are views over the sampler
         self.obstacles = data["obstacles"]
         self.obs_size = data["obs_size"] if "obs_size" in data else 0.5
         self.inflation_radius = data["inflation_radius"]
         self.set_obstacles(self.obstacles)
         self.inflate_obstacles(self.inflation_radius)
-        self.track_with_link = data["track_with_link"]
+        self.track_with_link = data.get("track_with_link", False)
 
-        # Kind indices (pos_index_dict was rebuilt by set_nodes): the stored
-        # positions are all nodes already, so this only registers them.
-        self.node_sampler.register_points('start_points', self.start)
-        self.node_sampler.register_points('goal_points', self.goal)
-        self.node_sampler.register_points('boundary_points', data.get("boundary_points", []))
-
-        # Calculate edges (must happen before get_start/goal_nodes_with_all_edges)
-        # The CSR roadmap is the source of road_map / road_map_edge_weights.
-        self.roadmap = Roadmap(self, config=self.roadmap_config)
-        self.roadmap.set_nodes(self.nodes)
-        self.roadmap.set_adjacency(data["road_map"], data.get("road_map_edge_weights"))
-        # edges / edge_weights / road_map are views over self.roadmap.
+        if "node_sampler" in data:              # version 2: plain-array state dicts carry the config and sampling parameters
+            self.node_sampler.load_state_dict(data["node_sampler"])
+            self.roadmap = Roadmap(self, config=data["roadmap"].get("config"))
+            self.roadmap.load_state_dict(data["roadmap"])
+        else:                                   # legacy layout: config and sampling parameters at the top level
+            if "roadmap_config" in data:
+                roadmap_config = data["roadmap_config"]
+            else:                               # pickles written before roadmap_config existed
+                roadmap_config = {"sample_num": data["sample_num"], "num_neighbors": data["num_neighbors"],
+                                  "min_edge_length": data["min_edge_length"], "max_edge_length": data["max_edge_length"]}
+            self.node_sampler.set_sampling_dist_dict(data.get("sampling_dist_dict"))
+            self.node_sampler.set_nodes(data["nodes"])      # nodes / pos_index_dict are views over the sampler
+            self.node_sampler.register_points('start_points', self.start)
+            self.node_sampler.register_points('goal_points', self.goal)
+            self.node_sampler.register_points('boundary_points', data.get("boundary_points", []))
+            self.roadmap = Roadmap(self, config=roadmap_config)
+            self.roadmap.set_nodes(self.nodes)
+            self.roadmap.set_adjacency(data["road_map"], data.get("road_map_edge_weights"))
+        # nodes / pos_index_dict / edges / edge_weights / road_map are views over the sampler and roadmap.
         self.get_start_nodes_with_all_edges()
         self.get_goal_nodes_with_all_edges()
 
@@ -750,7 +760,7 @@ class GraphSampler(GraphSamplerBase):
             "record_sweep": self.record_sweep,
             "use_exact_collision_check": self.use_exact_collision_check,
             "sweep_backend": getattr(self, "sweep_backend", "cgal"),
-            "sampling_dist_dict": self.sampling_dist_dict,
+            "sampling_dist_dict": self.node_sampler.sampling_dist_dict,
         }
 
         # Create a new GraphSampler instance with the same geometric configuration
@@ -766,7 +776,7 @@ class GraphSampler(GraphSamplerBase):
             record_sweep=self.record_sweep,
             use_exact_collision_check=self.use_exact_collision_check,
             sweep_backend=getattr(self, "sweep_backend", "cgal"),
-            sampling_dist_dict=self.sampling_dist_dict,
+            sampling_dist_dict=self.node_sampler.sampling_dist_dict,
         )
         pruned_sampler._load_from_dict(pruned_data)
         return pruned_sampler
