@@ -258,46 +258,28 @@ class RoadmapBase:
         return [r.tolist() for r in np.split(values, self.adj.indptr[1:-1])]
 
     @property
-    def road_map(self) -> List[List[int]]:
+    def roadmap_edges(self) -> List[List[int]]:
         return self._rows(self.adj.indices)
 
     @property
-    def edge_weights(self) -> List[List[float]]:
+    def roadmap_weights(self) -> List[List[float]]:
         return self._rows(self.adj.data)
 
     def neighbors(self, u: int) -> np.ndarray:
         return self.adj.indices[self.adj.indptr[u]:self.adj.indptr[u + 1]]
 
-    def edge_list(self) -> Tuple[List[Tuple[int, int]], dict, List[float]]:
-        """Directed edge export in the sampler's layout: ``edges`` as
-        ``(u, v)`` pairs in row order (same order as walking ``road_map``),
-        ``edge_indices_dict`` mapping each pair to its position, and the
-        matching ``edge_weights``. Built from the CSR arrays directly."""
+    @property
+    def edges(self) -> np.ndarray:
         if self.num_nodes == 0 or self.adj.nnz == 0:
-            return [], {}, []
+            return np.zeros((0, 2), dtype=np.int64)
         u = np.repeat(np.arange(self.num_nodes), np.diff(self.adj.indptr))
-        edges = list(zip(u.tolist(), self.adj.indices.tolist()))
-        return edges, {e: i for i, e in enumerate(edges)}, self.adj.data.tolist()
+        edges = np.stack([u, self.adj.indices], axis=1)
+        return edges
 
-    @staticmethod
-    def edges_from_road_map(road_map: List[List[int]],
-                            road_map_edge_weights: List[List[float]] | None = None
-                            ) -> Tuple[List[Tuple[int, int]], dict, List[float]]:
-        """Same export as ``edge_list`` for a list-of-lists roadmap (e.g. one
-        loaded from a pickle). Repeated pairs keep their first position."""
-        edges, edge_indices_dict, edge_weights = [], {}, []
-        for u, nbrs in enumerate(road_map):
-            ws = road_map_edge_weights[u] if road_map_edge_weights is not None else None
-            for k, v in enumerate(nbrs):
-                e = (int(u), int(v))
-                if e in edge_indices_dict:
-                    continue
-                edge_indices_dict[e] = len(edges)
-                edges.append(e)
-                if ws is not None:
-                    edge_weights.append(ws[k])
-        return edges, edge_indices_dict, edge_weights
-
+    @property
+    def edge_weights(self) -> np.ndarray:
+        return self.adj.data
+        
     # ------------------------------------------------------------- shortest paths
     def dijkstra(self, source: int, target: int | None = None, *, limit: float = np.inf
                  ) -> float | List[Tuple[int, float]]:
@@ -333,6 +315,36 @@ class RoadmapBase:
         self.nodes = np.asarray([s.current for s in samples], dtype=float).reshape(n, self.dim)
         self.clearance = np.asarray([s.max_clearance for s in samples], dtype=float)
         self.adj = csr_array((n, n), dtype=float)
+
+    def set_adjacency(self, roadmap_edges: List[List[int]], roadmap_weights: List[List[float]] | None = None) -> None:
+        """Install the adjacency from per-node neighbour lists (the
+        ``roadmap_edges`` / ``roadmap_weights`` layout, as pickles store it).
+        Missing weights are Euclidean lengths."""
+        n = self.num_nodes
+        if len(roadmap_edges) != n:
+            raise ValueError(f"roadmap_edges has {len(roadmap_edges)} rows for {n} nodes")
+        counts = np.fromiter((len(r) for r in roadmap_edges), dtype=np.int64, count=n)
+        indptr = np.concatenate([[0], np.cumsum(counts)])
+        indices = np.fromiter((v for r in roadmap_edges for v in r), dtype=np.int64, count=int(indptr[-1]))
+        if roadmap_weights is not None and len(roadmap_weights) == n and all(len(w) == c for w, c in zip(roadmap_weights, counts)):
+            data = np.fromiter((d for r in roadmap_weights for d in r), dtype=np.float64, count=int(indptr[-1]))
+        else:
+            u = np.repeat(np.arange(n), counts)
+            data = np.linalg.norm(self.nodes[u] - self.nodes[indices], axis=1) if len(u) else np.zeros(0)
+        self.adj = csr_array((data, indices, indptr), shape=(n, n))
+
+    def append_isolated_nodes(self, points) -> None:
+        """Append nodes with no edges (e.g. a start or goal the builder did
+        not produce); the adjacency grows by empty rows."""
+        pts = np.asarray(points, dtype=np.float64).reshape(-1, self.dim)
+        if len(pts) == 0:
+            return
+        n, k = self.num_nodes, len(pts)
+        self.nodes = np.vstack([self.nodes.reshape(n, self.dim), pts])
+        self.clearance = np.concatenate([self.clearance, self._clearance_at(pts)])
+        self._num_nodes = n + k
+        indptr = np.concatenate([self.adj.indptr, np.full(k, self.adj.indptr[-1])])
+        self.adj = csr_array((self.adj.data, self.adj.indices, indptr), shape=(n + k, n + k))
 
     def _set_points(self, points: np.ndarray) -> None:
         """Replace the nodes with raw points; clearance is read from the map."""

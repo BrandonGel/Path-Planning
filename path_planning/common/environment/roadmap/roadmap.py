@@ -108,22 +108,24 @@ class Roadmap(RoadmapBase):
         return [Node(p, None, 0, 0, float(c)) for p, c in zip(convert_np_to_tuple(self.nodes), self.clearance)]
 
     def apply_to(self, graph_map: "GraphSamplerBase | None" = None, with_cost_matrix: bool = True) -> "GraphSamplerBase":
-        """Install this roadmap into ``graph_map`` the way ``generate_map`` does:
-        ``nodes``, ``pos_index_dict``, start/goal/grid/boundary indices,
-        ``road_map`` + ``road_map_edge_weights``, ``edges`` / ``edge_indices_dict``
-        / ``edge_weights``, ``num_total_nodes``, ``sample_kd_tree`` and (unless
-        ``with_cost_matrix`` is False) the dense ``cost_matrix``. Start and goal
-        positions missing from the roadmap are appended as isolated nodes; a
-        position the builder snapped (``self.snapped``) resolves to the node it
-        became, keyed by the original position."""
+        """Install this roadmap into ``graph_map`` in the layout its planners
+        read: ``nodes``, ``pos_index_dict``, start/goal/grid/boundary indices,
+        ``edges`` / ``edge_weights`` (flat), ``num_total_nodes`` and (unless
+        ``with_cost_matrix`` is False) the dense ``cost_matrix``. The nested
+        ``road_map`` / ``road_map_edge_weights`` views are properties of the
+        map over this object. Start and goal positions missing from the
+        roadmap are appended as isolated nodes; a position the builder snapped
+        (``self.snapped``) resolves to the node it became, keyed by the
+        original position."""
         gm = self.graph_map if graph_map is None else graph_map
+        if gm is None:
+            return
+        old_grid = [n.current for n in gm.nodes if n in gm.grid_nodes_index] if gm.nodes else []
 
-        nodes = self.to_nodes()
-        road_map = self.road_map
-        weights = self.edge_weights
-        index = {}
-        for i, node in enumerate(nodes):
-            index.setdefault(tuple(node.current), i)
+        index: dict = {}
+        for i, p in enumerate(convert_np_to_tuple(self.nodes)):
+            index.setdefault(p, i)
+        extra: list = []                          # isolated nodes to append
 
         def register(points: list, target: dict) -> None:
             target.clear()
@@ -133,26 +135,25 @@ class Roadmap(RoadmapBase):
                 if pos not in index and pos in self.snapped:
                     pos = tuple(self.snapped[pos])    # builder moved it (e.g. Lattice snap)
                 if pos not in index:                  # not produced by the builder: isolated node
-                    index[pos] = len(nodes)
-                    nodes.append(Node(pos, None, 0, 0))
-                    road_map.append([])
-                    weights.append([])
+                    index[pos] = self.num_nodes + len(extra)
+                    extra.append(pos)
                 target[key] = index[pos]
 
-        old_grid = [n.current for n in gm.nodes if n in gm.grid_nodes_index] if gm.nodes else []
-        gm.pos_index_dict = index
         register(list(gm.start), gm.start_nodes_index)
         register(list(gm.goal), gm.goal_nodes_index)
+        self.append_isolated_nodes(extra)
+
+        gm.roadmap = self
+        gm.nodes = self.to_nodes()
+        gm.num_total_nodes = len(gm.nodes)
+        gm.pos_index_dict = index
         gm.grid_nodes_index = {Node(tuple(p), None, 0, 0): index[tuple(p)]
                                for p in old_grid if tuple(p) in index}
-
-        gm.nodes = nodes
-        gm.num_total_nodes = len(nodes)
-        pts = np.asarray([n.current for n in nodes], dtype=float).reshape(len(nodes), self.dim)
-        gm.cost_matrix = cdist(pts, pts, metric="euclidean") if (with_cost_matrix and len(nodes)) else None
-        gm.sample_kd_tree = KDTree(pts) if len(nodes) else None
-        gm.road_map = road_map
-        gm.road_map_edge_weights = weights
-        gm.edges, gm.edge_indices_dict, gm.edge_weights = self.edge_list()   # isolated extra nodes add no edges
         gm._rebuild_boundary_nodes_index()
+        gm.edges = self.edges
+        gm.edge_weights = self.edge_weights
+        gm.start_to_all_edges_dict = {}
+        gm.goal_to_all_edges_dict = {}
+        if with_cost_matrix:
+            gm.cost_matrix = cdist(self.nodes, self.nodes, metric="euclidean")
         return gm

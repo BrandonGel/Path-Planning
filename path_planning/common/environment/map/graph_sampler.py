@@ -13,6 +13,7 @@ from path_planning.common.environment.map.cdt import get_boundary, get_planar_gr
 from path_planning.global_planner.sample_search.rrg import RRG
 from path_planning.common.environment.map.graph_sampler_base import GraphSamplerBase
 from path_planning.common.environment.roadmap.roadmap_base import RoadmapBase
+from path_planning.common.environment.roadmap.roadmap import Roadmap
 
 import faiss
 import pickle
@@ -363,10 +364,12 @@ class GraphSampler(GraphSamplerBase):
         self._rebuild_boundary_nodes_index()
 
         # Calculate edges (must happen before get_start/goal_nodes_with_all_edges)
-        self.road_map = data["road_map"]
-        self.road_map_edge_weights = data["road_map_edge_weights"]
-        self.roadmap = None                     # CSR view rebuilt lazily by roadmap_view()
-        self.edges, self.edge_indices_dict, self.edge_weights = RoadmapBase.edges_from_road_map(self.road_map, self.road_map_edge_weights)
+        # The CSR roadmap is the source of road_map / road_map_edge_weights.
+        self.roadmap = Roadmap(self, config=self.roadmap_config)
+        self.roadmap.set_nodes(self.nodes)
+        self.roadmap.set_adjacency(data["road_map"], data.get("road_map_edge_weights"))
+        self.edges = self.roadmap.edges
+        self.edge_weights = self.roadmap.edge_weights
         self.get_start_nodes_with_all_edges()
         self.get_goal_nodes_with_all_edges()
 
@@ -476,7 +479,9 @@ class GraphSampler(GraphSamplerBase):
         self.nodes = [
             Node(transform_pos(node.current), None, 0, 0) for node in self.nodes
         ]
-        self.roadmap = None                     # node coordinates moved; CSR view rebuilt lazily
+        if self.roadmap is not None and self.roadmap.num_nodes == len(self.nodes):
+            # Same topology, moved coordinates (clearance re-read from the rotated ESDF).
+            self.roadmap._set_points(np.array([node.current for node in self.nodes], dtype=np.float64))
         self.start = [list(transform_pos(tuple(s))) for s in self.start]
         self.goal = [list(transform_pos(tuple(g))) for g in self.goal]
         self.grid_points = [transform_pos(tuple(gp)) for gp in self.grid_points]
