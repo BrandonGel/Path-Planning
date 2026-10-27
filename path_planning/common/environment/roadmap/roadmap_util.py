@@ -34,7 +34,6 @@ def _filter_edges_kernel(pts, u, v, min_len, max_len, check_collision,
         keep[e] = True
     return keep, w
 
-
 @njit(cache=True)
 def _khop_ball(indptr, indices, data, src, k, n):
     """BFS from ``src`` over at most ``k`` hops on a CSR adjacency. Returns the
@@ -61,7 +60,6 @@ def _khop_ball(indptr, indices, data, src, k, n):
                 tail += 1
     return order[:tail], hop, bound
 
-
 def _unique_undirected(u: np.ndarray, v: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Unique undirected edges ``(eu < ev)`` of the pair list and, for every
     input slot, the id of its edge. Callers drop self-loops beforehand."""
@@ -72,7 +70,6 @@ def _unique_undirected(u: np.ndarray, v: np.ndarray) -> Tuple[np.ndarray, np.nda
         return np.zeros(0, np.int64), np.zeros(0, np.int64), np.zeros(0, np.int64)
     uniq, inverse = np.unique(pairs, axis=0, return_inverse=True)
     return uniq[:, 0], uniq[:, 1], inverse.ravel()
-
 
 def _symmetric_csr(n: int, u: np.ndarray, v: np.ndarray, w: np.ndarray) -> csr_array:
     """CSR adjacency holding every undirected edge in both directions."""
