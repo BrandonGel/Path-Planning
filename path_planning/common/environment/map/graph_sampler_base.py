@@ -109,31 +109,6 @@ class GraphSamplerBase(Grid):
         so the sampler and its builders never disagree)."""
         return self.roadmap.config
 
-    @roadmap_config.setter
-    def roadmap_config(self, config: "dict | RoadmapConfig | str | None" = None, **fields) -> None:
-        """Replace or update the roadmap parameters.
-
-        A ``RoadmapConfig`` or a YAML path replaces the current config. A dict
-        and/or keyword fields (``sample_num``, ``num_neighbors``,
-        ``min_edge_length``, ``max_edge_length``, ``goal_sample_rate``, ...)
-        are applied on top of the current values. The result is stored on
-        ``self.roadmap.config`` (assigning ``self.roadmap_config`` here would
-        call this setter again). ``fields`` can only arrive through
-        ``set_roadmap_config``: ``m.roadmap_config = x`` passes one value.
-        """
-        if isinstance(config, (str, os.PathLike)):
-            config = RoadmapConfig.from_yaml(config)
-        if isinstance(config, RoadmapConfig):
-            if fields:
-                raise TypeError("roadmap_config: pass either a RoadmapConfig / YAML path or fields, not both")
-            self.roadmap.config = config
-        else:
-            merged = self.roadmap_config.as_dict()
-            merged.update(config or {})
-            merged.update(fields)
-            self.roadmap.config = RoadmapConfig(merged)
-
-
     @property
     def road_map_edge_weights(self) -> List[List[float]]:
         return self.roadmap.roadmap_weights if self.roadmap is not None else []
@@ -170,15 +145,6 @@ class GraphSamplerBase(Grid):
         """Kind name -> ``Node -> index`` dict (the sampler's registry)."""
         return self.node_sampler.points_index_dict if self.node_sampler is not None else {}
 
-    @property
-    def start_nodes_index(self) -> dict:
-        """``Node -> index`` of the start nodes: the sampler's ``'start_points'`` kind."""
-        return self.points_index_dict.get('start_points', {})
-
-    @property
-    def goal_nodes_index(self) -> dict:
-        """``Node -> index`` of the goal nodes: the sampler's ``'goal_points'`` kind."""
-        return self.points_index_dict.get('goal_points', {})
 
     @property
     def num_total_nodes(self) -> int:
@@ -193,20 +159,21 @@ class GraphSamplerBase(Grid):
         A ``RoadmapConfig`` or a YAML path replaces the current config. A dict
         and/or keyword fields (``sample_num``, ``num_neighbors``,
         ``min_edge_length``, ``max_edge_length``, ``goal_sample_rate``, ...)
-        are applied on top of the current values. ``num_total_nodes`` follows
-        ``sample_num``.
+        are applied on top of the current values. This is the one mutator:
+        ``roadmap_config`` is a read-only view of ``self.roadmap.config``.
+        (``num_total_nodes`` is the live node count, not ``sample_num``.)
         """
         if isinstance(config, (str, os.PathLike)):
             config = RoadmapConfig.from_yaml(config)
         if isinstance(config, RoadmapConfig):
             if fields:
                 raise TypeError("set_roadmap_config: pass either a RoadmapConfig / YAML path or fields, not both")
-            self.roadmap_config = config
+            self.roadmap.config = config
         else:
             merged = self.roadmap_config.as_dict()
             merged.update(config or {})
             merged.update(fields)
-            self.roadmap_config = RoadmapConfig(merged)
+            self.roadmap.config = RoadmapConfig(merged)
         return self.roadmap_config
 
     def set_start(self, start):
@@ -232,10 +199,22 @@ class GraphSamplerBase(Grid):
         self.deliveries = list(deliveries) if deliveries is not None else []
         self.parking = list(parking) if parking is not None else []
 
-    def get_start_nodes(self) -> List[Node]:
+    @property
+    def start_nodes_index(self) -> dict:
+        """``Node -> index`` of the start nodes: the sampler's ``'start_points'`` kind."""
+        return self.points_index_dict.get('start_points', {})
+
+    @property
+    def goal_nodes_index(self) -> dict:
+        """``Node -> index`` of the goal nodes: the sampler's ``'goal_points'`` kind."""
+        return self.points_index_dict.get('goal_points', {})
+
+    @property
+    def start_nodes(self) -> List[Node]:
         return self.node_sampler.get_nodes(index_type='start_points')
     
-    def get_goal_nodes(self) -> List[Node]:
+    @property
+    def goal_nodes(self) -> List[Node]:
         return self.node_sampler.get_nodes(index_type='goal_points')
     
     @property
@@ -256,26 +235,29 @@ class GraphSamplerBase(Grid):
     def get_inflated_obstacles(self):
         return [tuple(int(p) for p in row) for row in np.argwhere(self.type_map.data == TYPES.INFLATION)]
 
-    def _all_edges_from(self, u_indices, type: str = 'Euclidean') -> dict:
-        """``{u: [(v, distance), ...]}`` from each node index in ``u_indices`` to the
-        other nodes, through ``get_distance``, else straight-line distances to all
-        nodes. ``v`` are node indices, in node order."""
-        if len(self.nodes) == 0 or len(self.roadmap_edges) != len(self.nodes):
+    def _all_edges_from(self, u_indices, khop: int = -1) -> dict:
+        """``{u: [(v, distance), ...]}`` along the roadmap for each node index in
+        ``u_indices``: ``RoadmapBase.khop_distances`` (``khop=-1`` every node,
+        ``inf`` when unreachable; ``khop=k`` the nodes within ``k`` hops)."""
+        n = len(self.nodes)
+        if n == 0 or len(self.roadmap_edges) != n:
             raise ValueError("Edges have not been generated yet. Please generate the roadmap first.")
-        pts = [tuple(n.current) for n in self.nodes]
-        return {u: [(v, self.get_distance(pts[u], pts[v], type)) for v in range(len(pts))] for u in u_indices}
+        return self.roadmap.khop_distances(list(u_indices), khop)
 
-    def get_start_nodes_with_all_edges(self):
-        """``{start index: [(v, distance), ...]}``, cached until the roadmap is
-        rebuilt (``Roadmap.apply`` resets the cache)."""
-        if not getattr(self, "start_to_all_edges_dict", None):
-            self.start_to_all_edges_dict = self._all_edges_from(list(self.start_nodes_index.values()))
+    def get_start_nodes_with_all_edges(self, khop: int = -1):
+        """``{start index: [(v, distance), ...]}`` along the roadmap (see
+        ``_all_edges_from`` for ``khop``), cached per ``khop`` until the
+        roadmap is rebuilt (``Roadmap.apply`` resets the cache)."""
+        if not getattr(self, "start_to_all_edges_dict", None) or getattr(self, "_start_edges_khop", None) != khop:
+            self.start_to_all_edges_dict = self._all_edges_from(list(self.start_nodes_index.values()), khop)
+            self._start_edges_khop = khop
         return self.start_to_all_edges_dict
 
-    def get_goal_nodes_with_all_edges(self):
+    def get_goal_nodes_with_all_edges(self, khop: int = -1):
         """Goal twin of ``get_start_nodes_with_all_edges``."""
-        if not getattr(self, "goal_to_all_edges_dict", None):
-            self.goal_to_all_edges_dict = self._all_edges_from(list(self.goal_nodes_index.values()))
+        if not getattr(self, "goal_to_all_edges_dict", None) or getattr(self, "_goal_edges_khop", None) != khop:
+            self.goal_to_all_edges_dict = self._all_edges_from(list(self.goal_nodes_index.values()), khop)
+            self._goal_edges_khop = khop
         return self.goal_to_all_edges_dict
 
     def set_obstacle_map(self, obstacles: np.ndarray | List[tuple]):

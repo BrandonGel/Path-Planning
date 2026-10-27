@@ -12,7 +12,7 @@ from typing import List, Tuple, TYPE_CHECKING
 import numpy as np
 from numba import njit, prange
 from scipy.sparse import csr_array
-from scipy.sparse.csgraph import dijkstra as _csgraph_dijkstra
+from scipy.sparse.csgraph import dijkstra as _csgraph_dijkstra, shortest_path as _csgraph_shortest_path
 from python_motion_planning.common.env.map.grid import TYPES, _grid_path_world_to_map_int, _grid_path_map_to_world
 
 from path_planning.common.environment.node import Node
@@ -50,6 +50,33 @@ def _filter_edges_kernel(pts, u, v, min_len, max_len, check_collision,
             continue
         keep[e] = True
     return keep, w
+
+
+@njit(cache=True)
+def _khop_ball(indptr, indices, data, src, k, n):
+    """BFS from ``src`` over at most ``k`` hops on a CSR adjacency. Returns the
+    ball (node ids in BFS order, ``src`` first), each node's hop count (``-1``
+    outside the ball) and the length of its BFS-tree path from ``src``, which
+    bounds its true shortest-path length from above. Touches only the ball."""
+    hop = np.full(n, -1, np.int64)
+    bound = np.zeros(n)
+    order = np.empty(n, np.int64)
+    hop[src] = 0
+    order[0] = src
+    head, tail = 0, 1
+    while head < tail:
+        u = order[head]
+        head += 1
+        if hop[u] == k:
+            continue
+        for j in range(indptr[u], indptr[u + 1]):
+            v = indices[j]
+            if hop[v] < 0:
+                hop[v] = hop[u] + 1
+                bound[v] = bound[u] + data[j]
+                order[tail] = v
+                tail += 1
+    return order[:tail], hop, bound
 
 
 def _unique_undirected(u: np.ndarray, v: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -311,6 +338,54 @@ class RoadmapBase:
             return float(dist[int(target)])
         reach = np.flatnonzero(np.isfinite(dist))
         return list(zip(reach.tolist(), dist[reach].tolist()))
+
+    def hops(self, sources) -> np.ndarray:
+        """Hop count (unweighted shortest path) from each of ``sources`` to every
+        node: shape ``(len(sources), num_nodes)``, 1-D for a scalar source,
+        ``inf`` where unreachable, 0 at the source itself."""
+        scalar = np.isscalar(sources)
+        idx = np.atleast_1d(np.asarray(sources, dtype=np.int64))
+        if self.num_nodes == 0:
+            raise ValueError("hops: the roadmap has no nodes")
+        if idx.size and (idx.min() < 0 or idx.max() >= self.num_nodes):
+            raise IndexError(f"hops: source out of range [0, {self.num_nodes})")
+        out = _csgraph_shortest_path(self.adj, directed=True, unweighted=True, indices=idx)
+        return out[0] if scalar else out
+
+    def khop_distances(self, sources, khop: int = -1) -> dict:
+        """``{u: [(v, distance), ...]}`` from each node index in ``sources``:
+        ``distance`` is the shortest-path length over the roadmap edges
+        (Dijkstra), ``v`` are node indices in node order.
+
+        ``khop=-1`` (or ``None``): every node, ``inf`` where ``v`` is not
+        reachable from ``u``. ``khop=k >= 0``: only the nodes within ``k`` hops
+        of ``u`` (``u`` itself at hop 0 with distance 0), each with its full
+        shortest-path length, which may use more than ``k`` edges.
+        """
+        idx = [int(u) for u in np.atleast_1d(np.asarray(sources, dtype=np.int64))]
+        if not idx:
+            return {}
+        n = self.num_nodes
+        if n == 0:
+            raise ValueError("khop_distances: the roadmap has no nodes")
+        if min(idx) < 0 or max(idx) >= n:
+            raise IndexError(f"khop_distances: source out of range [0, {n})")
+        if khop is None or khop < 0:
+            dist = shortest_paths(idx, self.adj)                   # (len(idx), n), inf = unreachable
+            return {u: list(zip(range(n), dist[i].tolist())) for i, u in enumerate(idx)}
+        # k-hop ball: BFS limited to k levels (touches only the ball), then a
+        # Dijkstra capped at the longest BFS-tree path in the ball. Every ball
+        # node's shortest path is no longer than its BFS-tree path, so the
+        # capped search is exact there and never expands far beyond the ball.
+        adj = self.adj
+        out = {}
+        for u in idx:
+            ball, _, bound = _khop_ball(adj.indptr, adj.indices, adj.data, u, int(khop), n)
+            limit = float(bound[ball].max()) if len(ball) > 1 else 0.0
+            dist = shortest_paths(u, adj, limit=limit) if limit > 0 else np.where(np.arange(n) == u, 0.0, np.inf)
+            within = np.sort(ball)
+            out[u] = list(zip(within.tolist(), dist[within].tolist()))
+        return out
 
     def shortest_path(self, source: int, target: int) -> Tuple[List[int], float]:
         """Node sequence from ``source`` to ``target`` and its length;
