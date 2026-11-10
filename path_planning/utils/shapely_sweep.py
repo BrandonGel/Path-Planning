@@ -15,6 +15,13 @@ both query methods, reverse-query interval flipping via
 ``convert_bidirectional_interval``) is likewise mirrored between the backends.
 
 Shapely/GEOS is planar, so this backend is 2D only (``set_graph`` raises for 3D).
+
+Footprints. ``r`` is the combined clearance of the two agents: a float (or
+``Disc``) selects the disc sweep above; a ``ConvexPolygon`` (built with
+``agent_shape.regular_polygon`` / ``rectangle`` and combined with
+``agent_shape.pair_clearance``) selects the exact convex-polygon sweep from
+``PolygonSweepMixin``. Only the candidate lookup (``_region_candidates``,
+STRtree ``intersects``) is backend-specific there.
 """
 
 from __future__ import annotations
@@ -23,8 +30,11 @@ import numpy as np
 import shapely
 from shapely import LineString, Point, STRtree
 
+from path_planning.utils.agent_shape import AlignedClearance, ConvexPolygon, Disc
+from path_planning.utils.polygon_sweep import PolygonSweepMixin
 
-class ShapelySweep:
+
+class ShapelySweep(PolygonSweepMixin):
     """Spatial sweep queries against roadmap vertices/edges using Shapely (GEOS)."""
 
     def __init__(self, record_sweep: bool = True, use_exact_collision_check: bool = True):
@@ -207,6 +217,18 @@ class ShapelySweep:
         d = shapely.distance(geom, self.edge_tree.geometries[hits])
         return hits[d < r]
 
+    def _region_candidates(self, region: ConvexPolygon):
+        """Vertices / edges whose geometry intersects the convex ``region``
+        (candidate layer of the polygon sweep; the mixin applies the strict
+        exact test afterwards)."""
+        if self.vertex_tree is None or self.edge_tree is None:
+            empty = np.empty(0, dtype=np.int64)
+            return empty, empty
+        geom = shapely.Polygon(region.points)
+        vert = np.asarray(self.vertex_tree.query(geom, predicate="intersects"), dtype=np.int64)
+        edge = np.asarray(self.edge_tree.query(geom, predicate="intersects"), dtype=np.int64)
+        return vert, edge
+
     def _segment_spatial_hits(self, u, v, r):
         """Raw candidate hits ``(vertex_hits, edge_hits)`` for the capsule sweep u->v (u != v).
 
@@ -230,8 +252,18 @@ class ShapelySweep:
     # ------------------------------------------------------------ overlap (edges)
 
     def overlapping_graph_elements_cgal(
-        self, u: tuple[float, float], v: tuple[float, float], velocity: float = 0.0, r: float = 0.5
+        self,
+        u: tuple[float, float],
+        v: tuple[float, float],
+        velocity: float = 0.0,
+        r: float | Disc | ConvexPolygon | AlignedClearance = 0.5,
     ):
+        if isinstance(r, AlignedClearance):
+            return self._aligned_overlapping_graph_elements(u, v, velocity, r)
+        if isinstance(r, ConvexPolygon):
+            return self._polygon_overlapping_graph_elements(u, v, velocity, r)
+        if isinstance(r, Disc):
+            r = r.radius
         if self.record_sweep and (u, v, velocity, r) in self.overlapping_sweep:
             return self.overlapping_sweep[u, v, velocity, r]
 
@@ -374,9 +406,15 @@ class ShapelySweep:
         u: tuple[float, float],
         v: tuple[float, float],
         velocity: float = 0.0,
-        r: float = 0.5,
+        r: float | Disc | ConvexPolygon | AlignedClearance = 0.5,
         get_time_interval: bool = False,
     ):
+        if isinstance(r, AlignedClearance):
+            return self._aligned_overlapping_interval(u, v, velocity, r, get_time_interval)
+        if isinstance(r, ConvexPolygon):
+            return self._polygon_overlapping_interval(u, v, velocity, r, get_time_interval)
+        if isinstance(r, Disc):
+            r = r.radius
         if self.record_sweep and (u, v, velocity, r) in self.overlapping_interval_sweep:
             return self.overlapping_interval_sweep[u, v, velocity, r]
 

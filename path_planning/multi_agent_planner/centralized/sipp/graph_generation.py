@@ -1,25 +1,35 @@
 from path_planning.common.environment.map.graph_sampler import GraphSampler
 from path_planning.common.environment.node import Node
 from path_planning.multi_agent_planner.agent_params import AgentParamsMixin
+from path_planning.utils.agent_shape import AlignedClearance, AlignedShape, ConvexPolygon, heading_key, heading_of, path_headings, schedule_headings
 from typing import Any, List, Tuple
 import bisect
 import math
 import numpy as np
 
 class State(object):
-    def __init__(self, position=(-1,-1), t=0, interval=(0,float('inf'))):
+    """SIPP search state. ``heading`` is only set for agents with a heading-aligned
+    footprint (``AlignedShape``): the heading (``agent_shape.heading_key``) the
+    agent holds while it sits at ``position`` -- the direction of the edge it
+    arrived along (or will leave along, at its start). ``None`` for discs /
+    fixed polygons, whose tables and keys are unchanged."""
+    def __init__(self, position=(-1,-1), t=0, interval=(0,float('inf')), heading=None):
         self.position = tuple(position)
         self.time = t
         self.interval = interval # safe interval (start_time, end_time)
+        self.heading = heading
     
     def __eq__(self, other):
-        return self.position == other.position and self.time == other.time and self.interval == other.interval
+        return (self.position == other.position and self.time == other.time and self.interval == other.interval
+                and self.heading == getattr(other, "heading", None))
     def __hash__(self):
-        return hash((self.position, self.time, self.interval))
+        return hash((self.position, self.time, self.interval, self.heading))
     def __str__(self):
-        return str((self.position, self.time, self.interval))
+        if self.heading is None:
+            return str((self.position, self.time, self.interval))
+        return str((self.position, self.time, self.interval, self.heading))
     def __repr__(self):
-        return str((self.position, self.time, self.interval))
+        return str(self)
     def is_equal_location(self, other):
         return self.position == other.position
 
@@ -240,8 +250,27 @@ class SippGraph(AgentParamsMixin):
     Homogeneous runs therefore use exactly one table, written in the same order
     as before. Per-obstacle radius / speed come from ``agent_radii`` /
     ``agent_velocities`` (``{name: value}``, scalars as fallback).
+
+    Heading-aligned footprints (``agent_shapes`` values that are ``AlignedShape``):
+    the planning agent's table is keyed by its shape and holds one vertex
+    record per ``(position, heading)`` (see :meth:`vertex_key`); its edge
+    records are per directed edge as before but now differ between the two
+    directions. Obstacles sweep facing their direction of travel; while they
+    wait they face the heading carried on their states / schedule entries.
+
+    Turning speed (``agent_turning_speeds``, rad/s; absent = instantaneous): the
+    search tracks the heading of every turning agent (discs too) and must face an
+    edge before departing along it. While a polygon agent rotates in place the
+    planner reserves its bounding disc: the "turn table" of an aligned agent is
+    the ordinary disc table of its bounding radius (``_table_for(R)``), which is
+    kept up to date with every committed plan like any other table. On the
+    obstacle side a rotation stretch (``turn_to`` schedule key / a same-position
+    step with a move time) is swept with the envelope footprint.
+
+    Speed zones (``graph_map.speed_zones``): move times come from
+    ``graph_map.edge_speed`` and committed plans are swept at that edge speed.
     """
-    def __init__(self, graph_map: GraphSampler,dynamic_obstacles:dict = {},radius:float = 0.0,velocity:float = 0.0,use_constraint_sweep:bool = True, heuristic_type: str = 'manhattan',time_limit: float | None = None, max_iterations: int | None = None,verbose: bool = False, obstacle_horizon: float | dict | None = None, agent_radii: dict | None = None, agent_velocities: dict | None = None):
+    def __init__(self, graph_map: GraphSampler,dynamic_obstacles:dict = {},radius:float = 0.0,velocity:float = 0.0,use_constraint_sweep:bool = True, heuristic_type: str = 'manhattan',time_limit: float | None = None, max_iterations: int | None = None,verbose: bool = False, obstacle_horizon: float | dict | None = None, agent_radii: dict | None = None, agent_velocities: dict | None = None, agent_shapes: dict | None = None, agent_turning_speeds: dict | None = None, agent_headings: dict | None = None):
         self.graph_map = graph_map
         self.dyn_obstacles = {}
         # How long a dynamic obstacle's FINAL (resting) position blocks its footprint.
@@ -265,7 +294,8 @@ class SippGraph(AgentParamsMixin):
             if hasattr(self.graph_map, "use_constraint_sweep") and not self.graph_map.use_constraint_sweep:
                 self.graph_map.use_constraint_sweep = True
             self.graph_map.set_constraint_sweep()
-        self._init_agent_params(radius, velocity, agent_radii, agent_velocities)
+        self._init_agent_params(radius, velocity, agent_radii, agent_velocities, agent_shapes=agent_shapes,
+                                agent_turning_speeds=agent_turning_speeds, agent_headings=agent_headings)
         self.use_constraint_sweep = use_constraint_sweep
         self.heuristic_type = heuristic_type
         self.dynamic_obstacles = dynamic_obstacles
@@ -280,7 +310,18 @@ class SippGraph(AgentParamsMixin):
     def init_graph(self):
         self._init_graph_into(self.sipp_graph)
 
-    def _init_graph_into(self, table: dict):
+    @staticmethod
+    def vertex_key(position, heading=None):
+        """Table key of a vertex record: the position itself for disc / fixed
+        footprints, ``(position, heading)`` for a heading-aligned planning agent
+        (one safe-interval record per heading the agent can hold there)."""
+        return position if heading is None else (position, heading)
+
+    def _init_graph_into(self, table: dict, aligned: bool = False):
+        """Roadmap records of a safe-interval table. ``aligned`` tables (planning
+        agent with an ``AlignedShape``) additionally hold one vertex record per
+        ``(position, heading)`` for both headings of every incident edge; their
+        plain ``table[position]`` records are never written and stay (0, inf)."""
         for node in self.graph_map.nodes:
             node_sipp_dict = {node.current:SippNode()}
             table.update(node_sipp_dict)
@@ -301,6 +342,13 @@ class SippGraph(AgentParamsMixin):
                 table[(src_pos, tgt_pos)] = SippEdge()
             if (tgt_pos, src_pos) not in table:
                 table[(tgt_pos, src_pos)] = SippEdge()
+            if aligned and src_pos != tgt_pos:
+                h = heading_of(src_pos, tgt_pos)
+                hr = heading_of(tgt_pos, src_pos)
+                for pos in (src_pos, tgt_pos):
+                    for hh in (h, hr):
+                        if (pos, hh) not in table:
+                            table[(pos, hh)] = SippNode()
 
     @staticmethod
     def _norm_horizon(horizon) -> float:
@@ -340,9 +388,20 @@ class SippGraph(AgentParamsMixin):
                 self.dyn_obstacles[dyn_name] = np.array([State(position=(location["x"],location["y"]), t=location["t"]) for location in schedule])
             horizon = self._horizon_for(dyn_name)
             # Pairwise clearance with this obstacle and its nominal speed
-            # (== 2 * radius / velocity when every agent is the same).
-            r_sum = r_plan + self._radius_for(dyn_name)
+            # (== 2 * radius / velocity when every agent is the same); a
+            # combined polygon when either footprint is a polygon. The sweep's
+            # query agent is the OBSTACLE (it moves along the swept segment); the
+            # planning footprint sits on the roadmap elements.
+            r_sum = self._sweep_clearance(dyn_name, r_plan)
             v_obs = self._velocity_for(dyn_name)
+            # Heading-aligned obstacle: a moving sweep faces its direction of travel
+            # on its own; a stationary one (wait / final rest) is told the heading
+            # the obstacle holds there (explicit ``heading`` keys, else carried
+            # from its moves, see ``agent_shape.path_headings``).
+            aligned_query = isinstance(r_sum, AlignedClearance) and r_sum.aligned_query
+            heads = schedule_headings(schedule) if aligned_query else None
+            def r_at(i):
+                return r_sum.with_query_heading(heads[i]) if aligned_query else r_sum
             n_points = len(schedule)
             for i in range(n_points):
                 location = schedule[i]
@@ -353,7 +412,7 @@ class SippGraph(AgentParamsMixin):
 
                 if self.radius > 0:
                     if last_t:
-                        overlapping_vertices,overlapping_edges = self._get_constraint_sweep_cached(position, position, v_obs, r_sum)
+                        overlapping_vertices,overlapping_edges = self._get_constraint_sweep_cached(position, position, v_obs, r_at(i))
                         next_t = t + horizon  # inf -> blocks forever
                         for vertex_pos in overlapping_vertices:
                             table[vertex_pos].split_interval(t, next_t)
@@ -366,8 +425,11 @@ class SippGraph(AgentParamsMixin):
                     next_t = max(0.0, float(next_location["t"]))
                     if next_position == position:
                         # Wait: block the footprint for the schedule's own window only.
+                        # A point carrying ``turn_to`` is rotating until the next point:
+                        # reserve the envelope (bounding disc) footprint instead.
                         if next_t - t > 1e-9:
-                            overlapping_vertices,overlapping_edges = self._get_constraint_sweep_cached(position, position, v_obs, r_sum)
+                            r_stat = r_sum.with_query_heading(None) if (aligned_query and location.get("turn_to") is not None) else r_at(i)
+                            overlapping_vertices,overlapping_edges = self._get_constraint_sweep_cached(position, position, v_obs, r_stat)
                             for vertex_pos in overlapping_vertices:
                                 table[vertex_pos].split_interval(t, next_t)
                             for edge_pos in overlapping_edges:
@@ -413,9 +475,18 @@ class SippGraph(AgentParamsMixin):
 
     def _apply_plan(self, table: dict, r_plan: float, plan, action_cost, dyn_name):
         """Block ``table`` with one committed plan of agent ``dyn_name`` (clearance
-        ``r_plan + agent_radii[dyn_name]``, swept at that agent's speed)."""
-        r_sum = r_plan + self._radius_for(dyn_name)
+        ``r_plan + agent_radii[dyn_name]`` or the combined polygon footprint, swept
+        at that agent's speed)."""
+        r_sum = self._sweep_clearance(dyn_name, r_plan)  # query = obstacle, element = planning agent
         v_obs = self._velocity_for(dyn_name)
+        # Heading-aligned obstacle: stationary sweeps (waits, in-place turns, the
+        # final rest) use the heading stored on the plan's states (carried from
+        # its moves when a state has none); moving sweeps face their own motion.
+        aligned_query = isinstance(r_sum, AlignedClearance) and r_sum.aligned_query
+        if aligned_query:
+            heads = path_headings([st.position for st in plan], headings=[getattr(st, "heading", None) for st in plan])
+        def r_at(i):
+            return r_sum.with_query_heading(heads[i]) if aligned_query else r_sum
         if True:
             for i in range(len(plan)):
                 location = plan[i]
@@ -426,7 +497,7 @@ class SippGraph(AgentParamsMixin):
                 if self.radius > 0:
                     # Last time step
                     if last_t:
-                        overlapping_vertices,overlapping_edges = self._get_constraint_sweep_cached(position, position, v_obs, r_sum)
+                        overlapping_vertices,overlapping_edges = self._get_constraint_sweep_cached(position, position, v_obs, r_at(i))
                         next_t = float('inf')
                         for vertex_pos, vertex_interval in overlapping_vertices.items():
                             table[vertex_pos].split_interval(t, next_t)
@@ -439,16 +510,50 @@ class SippGraph(AgentParamsMixin):
                     next_position = next_location.position
                     next_t = next_location.time
                     wait_time, move_time = action_cost[i]
+                    if next_position == position:
+                        # In-place turn: the agent waits with this state's heading for
+                        # ``wait_time`` and then rotates for ``move_time`` (the turn
+                        # duration; 0 for instantaneous turns), during which its
+                        # envelope (bounding disc) is reserved. There is no move to
+                        # sweep (a stationary sweep reports (0, inf)).
+                        t_s = min(next_t, t + wait_time) if move_time > 1e-10 else next_t
+                        if t_s - t > 1e-10:
+                            overlapping_vertices,overlapping_edges = self._get_constraint_sweep_cached(position, position, v_obs, r_at(i))
+                            for vertex_pos, vertex_interval in overlapping_vertices.items():
+                                table[vertex_pos].split_interval(t, t_s)
+                            for edge_pos, edge_interval in overlapping_edges.items():
+                                table[edge_pos].add_unsafe_interval(t, t_s)
+                        if next_t - t_s > 1e-10:
+                            r_turn = r_sum.with_query_heading(None) if aligned_query else r_sum
+                            overlapping_vertices,overlapping_edges = self._get_constraint_sweep_cached(position, position, v_obs, r_turn)
+                            for vertex_pos, vertex_interval in overlapping_vertices.items():
+                                table[vertex_pos].split_interval(t_s, next_t)
+                            for edge_pos, edge_interval in overlapping_edges.items():
+                                table[edge_pos].add_unsafe_interval(t_s, next_t)
+                        continue
                     if wait_time > 1e-10:
                         t0 = t+wait_time
-                        overlapping_vertices,overlapping_edges = self._get_constraint_sweep_cached(position, position, v_obs, r_sum)
+                        overlapping_vertices,overlapping_edges = self._get_constraint_sweep_cached(position, position, v_obs, r_at(i))
                         for vertex_pos, vertex_interval in overlapping_vertices.items():
                             table[vertex_pos].split_interval(t, t0)
                         for edge_pos, edge_interval in overlapping_edges.items():
                             table[edge_pos].add_unsafe_interval(t, t0)
                     else:
                         t0 = t
-                    overlapping_vertices,overlapping_edges = self._get_constraint_sweep_cached(position, next_position, v_obs, r_sum)
+                    # Sweep the move at the speed the plan used on this edge (speed
+                    # zones): the edge speed the planner computed, else the speed the
+                    # timestamps imply.
+                    sweep_velocity = v_obs
+                    if v_obs > 0:
+                        edge_speed = getattr(self.graph_map, "edge_speed", None)
+                        if edge_speed is not None:
+                            sweep_velocity = edge_speed(position, next_position, v_obs)
+                        duration = next_t - t0
+                        if duration > 1e-9:
+                            implied = math.dist(position, next_position) / duration
+                            if abs(implied - sweep_velocity) > 1e-6:
+                                sweep_velocity = implied
+                    overlapping_vertices,overlapping_edges = self._get_constraint_sweep_cached(position, next_position, sweep_velocity, r_sum)
                     for vertex_pos, vertex_interval in overlapping_vertices.items():
                         t_start,t_end = vertex_interval
                         t1 = t0+t_start
@@ -491,19 +596,26 @@ class SippGraph(AgentParamsMixin):
         self._committed = []
         self.dyn_obstacles = {}
         self.sipp_graph = self._table_for(self.radius)
+        self._aligned_search = False
+        self._heading_search = False
+        self._omega = float("inf")
+        self._turn_table = None
         # Fresh: only dynamic obstacles are in it. compute_plan skips its own
         # reset while this holds (a planner built and used once pays one build).
         self._graph_fresh = True
 
-    def _table_for(self, r_plan: float) -> dict:
-        """Safe-interval table for a planning agent of radius ``r_plan`` (lazily
-        built: roadmap records, dynamic obstacles, then every committed plan)."""
-        r_plan = float(r_plan)
+    def _table_for(self, r_plan) -> dict:
+        """Safe-interval table for a planning agent of footprint ``r_plan`` -- a
+        float radius, a ``ConvexPolygon`` or an ``AlignedShape`` (see
+        ``_plan_key_for``) -- lazily built: roadmap records, dynamic obstacles,
+        then every committed plan."""
+        if not isinstance(r_plan, (ConvexPolygon, AlignedShape)):
+            r_plan = float(r_plan)
         table = self.sipp_graphs.get(r_plan)
         if table is not None:
             return table
         table = {}
-        self._init_graph_into(table)
+        self._init_graph_into(table, aligned=isinstance(r_plan, AlignedShape))
         self._apply_dyn_obstacles(table, r_plan, self.dynamic_obstacles)
         for plan, action_cost, dyn_name in self._committed:
             self._apply_plan(table, r_plan, plan, action_cost, dyn_name)
@@ -511,6 +623,18 @@ class SippGraph(AgentParamsMixin):
         return table
 
     def _bind_table(self, agent_name) -> dict:
-        """Point ``self.sipp_graph`` at the table of ``agent_name``'s radius."""
-        self.sipp_graph = self._table_for(self._radius_for(agent_name))
+        """Point ``self.sipp_graph`` at the table of ``agent_name``'s footprint
+        (and flag whether the search must track the agent's heading)."""
+        key = self._plan_key_for(agent_name)
+        self.sipp_graph = self._table_for(key)
+        self._aligned_search = isinstance(key, AlignedShape)
+        # Turning: every agent with a finite turning speed (body mode) tracks its
+        # heading. The record it occupies WHILE rotating is its envelope: the disc
+        # table of its bounding radius for aligned shapes, its own table otherwise.
+        self._omega = self._turning_speed_for(agent_name)
+        self._heading_search = self._aligned_search or (self.radius > 0 and math.isfinite(self._omega))
+        if self._aligned_search and math.isfinite(self._omega):
+            self._turn_table = self._table_for(float(key.bounding_radius))
+        else:
+            self._turn_table = self.sipp_graph
         return self.sipp_graph

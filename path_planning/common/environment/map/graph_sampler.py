@@ -10,6 +10,8 @@ from scipy.spatial.distance import cdist
 from itertools import product
 from python_motion_planning.common import TYPES
 from path_planning.utils.cgal_sweep import CGAL_Sweep
+from path_planning.utils.agent_shape import AlignedClearance, ConvexPolygon, Disc, heading_of, moving_point_interval
+from path_planning.common.environment.map.speed_zones import SpeedZone, parse_speed_zones, segment_speed_limit, zones_to_specs
 from path_planning.common.environment.map.cdt import get_boundary, get_planar_graph
 from path_planning.global_planner.sample_search.rrg import RRG
 import faiss
@@ -59,6 +61,11 @@ class GraphSampler(Grid):
         self.max_edge_length = max_edge_len
         self.goal_sample_rate = goal_sample_rate
         self.cost_matrix = None
+        # Speed zones (see speed_zones.py): world-frame rectangles with a speed
+        # limit. ``speed_zones_version`` lets planners invalidate cached edge times.
+        self.speed_zones: list[SpeedZone] = []
+        self.speed_zones_version = 0
+        self._edge_speed_cache = {}
         self.node_index_dict = {}
         self.start_nodes_index = {}
         self.goal_nodes_index = {}
@@ -289,6 +296,39 @@ class GraphSampler(Grid):
 
     def get_obstacle_nodes(self) -> List[Node]:
         return self.obstacle_nodes
+
+    # ------------------------------------------------------------------ speed zones
+
+    def set_speed_zones(self, zones) -> None:
+        """Replace the map's speed zones (``SpeedZone``s or YAML-style dicts, see
+        ``speed_zones.parse_speed_zone``). Clears the cached per-edge limits and bumps
+        ``speed_zones_version`` so planners drop their cached move times."""
+        self.speed_zones = parse_speed_zones(zones)
+        self._edge_speed_cache = {}
+        self.speed_zones_version = getattr(self, "speed_zones_version", 0) + 1
+
+    def edge_speed_limit(self, p1, p2) -> float:
+        """Lowest limit of the zones the closed segment ``p1 -> p2`` touches
+        (``inf`` when it touches none). Memoised per ``(p1, p2)``."""
+        if not self.speed_zones:
+            return float("inf")
+        key = (tuple(p1), tuple(p2))
+        cache = self._edge_speed_cache
+        lim = cache.get(key)
+        if lim is None:
+            lim = segment_speed_limit(self.speed_zones, key[0], key[1])
+            lim = float("inf") if lim is None else float(lim)
+            cache[key] = lim
+        return lim
+
+    def edge_speed(self, p1, p2, v_max: float) -> float:
+        """Speed an agent of maximum speed ``v_max`` may travel ``p1 -> p2`` at:
+        ``min(v_max, edge_speed_limit)``. ``v_max <= 0`` (unit-time mode) is
+        returned unchanged."""
+        v_max = float(v_max)
+        if v_max <= 0.0 or not self.speed_zones:
+            return v_max
+        return min(v_max, self.edge_speed_limit(p1, p2))
 
     def get_cost(self, p1_node: tuple, p2_node: tuple) -> float:
         """
@@ -571,6 +611,27 @@ class GraphSampler(Grid):
             unchosen_prob_map_indices_weighted_points = unchosen_prob_map_points_world + unchosen_normalized_points
             points = np.concatenate((weighted_points,unchosen_prob_map_indices_weighted_points))
             return points,num_prob_map_samples
+
+    def update_esdf(self) -> None:
+        """ESDF with a well-defined value on an obstacle-free map.
+
+        ``Grid.update_esdf`` runs ``scipy.ndimage.distance_transform_edt`` on the
+        free-space mask. With no obstacle cell at all that result is undefined and
+        scipy returns distances to a phantom point just outside the array at
+        index (-1, 0), so the cells next to the origin got an ESDF of 1 and
+        sqrt(2) and ``inflate_obstacles`` painted them INFLATION. An empty map
+        now gets a uniform ESDF equal to its world-unit diagonal (further than
+        any wall could be, finite so bilinear sampling in
+        :meth:`min_wall_distance` stays NaN-free).
+        """
+        if np.any(self.type_map.data == TYPES.OBSTACLE):
+            super().update_esdf()
+            return
+        far = float(np.linalg.norm(np.asarray(self.shape, dtype=float) * float(self.resolution)))
+        self._esdf = np.full(self.shape, far, dtype=np.float32)
+        # python-motion-planning >= 2.1 computes the ESDF lazily; 2.0.dev2 has no flag.
+        if hasattr(type(self), "_esdf_lazy_flag_"):
+            self._esdf_lazy_flag_ = False
 
     # Return the minimum distance from a point to the nearest obstacle or inflation
     def min_wall_distance(self, p):
@@ -1235,7 +1296,19 @@ class GraphSampler(Grid):
         # don't re-pay the set-comprehension cost on every CBS conflict check.
         self._constraint_sweep_locations_cache = {}
 
-    def get_constraint_sweep(self, p1: tuple[float,float], p2: tuple[float,float],v: float = 0.0, r: float = 0.5, use_interval: bool = False,get_time_interval: bool = False):
+    def get_constraint_sweep(self, p1: tuple[float,float], p2: tuple[float,float],v: float = 0.0, r: float | Disc | ConvexPolygon | AlignedClearance = 0.5, use_interval: bool = False,get_time_interval: bool = False):
+        """Roadmap vertices / edges swept by an agent moving ``p1 -> p2`` at speed ``v``.
+
+        ``r`` is the COMBINED clearance of the two agents involved: a float
+        radius ``r_i + r_j`` (disc footprints; a ``Disc`` is equivalent), a
+        ``ConvexPolygon`` footprint ``P_i (+) (-P_j)`` from
+        ``agent_shape.pair_clearance`` (rectangles / regular polygons, 2D only,
+        fixed world orientation), or an ``AlignedClearance`` (heading-aligned
+        footprints; with an aligned ELEMENT agent the vertex results are keyed
+        ``(position, heading)`` -- one entry per heading the element may hold
+        there -- and edge results are per directed edge). All shapes are
+        hashable and take part in the memo keys unchanged.
+        """
         if not self.use_constraint_sweep:
             return None
         if use_interval:
@@ -1243,11 +1316,14 @@ class GraphSampler(Grid):
             node_tuples = getattr(self, "_node_current_tuples", None)
             if node_tuples is None:
                 node_tuples = [tuple(n.current) for n in self.nodes]
+            def _vkey(k):
+                # ``(vertex_index, heading)`` keys of the heading-aligned sweep
+                return (node_tuples[k[0]], k[1]) if isinstance(k, tuple) else node_tuples[k]
             if get_time_interval:
-                vertices_interval = {node_tuples[vi]: iv for vi, iv in overlapping_vertices.items()}
+                vertices_interval = {_vkey(vi): iv for vi, iv in overlapping_vertices.items()}
                 edges_interval = {(node_tuples[e[0]], node_tuples[e[1]]): iv for e, iv in overlapping_edges.items()}
                 return vertices_interval, edges_interval
-            vertices_locations = set(node_tuples[vi] for vi in overlapping_vertices)
+            vertices_locations = set(_vkey(vi) for vi in overlapping_vertices)
             edges_locations = set((node_tuples[e[0]], node_tuples[e[1]]) for e in overlapping_edges)
             return vertices_locations, edges_locations
 
@@ -1267,14 +1343,21 @@ class GraphSampler(Grid):
             cache[cache_key] = edges_locations
         return edges_locations
 
-    def get_constraint_segment(self, p1a: Tuple[float, ...],p1b: Tuple[float, ...],p2a: Tuple[float, ...],p2b: Tuple[float, ...],v1: float = 0.0,v2: float | None = None,r_sum: float = 1.0) -> bool:
+    def get_constraint_segment(self, p1a: Tuple[float, ...],p1b: Tuple[float, ...],p2a: Tuple[float, ...],p2b: Tuple[float, ...],v1: float = 0.0,v2: float | None = None,r_sum: float | Disc | ConvexPolygon | AlignedClearance = 1.0) -> bool:
         """Closest-approach test of two agents moving ``p1a->p1b`` (speed ``v1``) and
         ``p2a->p2b`` (speed ``v2``, defaults to ``v1``) that start at the same moment.
 
-        ``r_sum`` is the COMBINED clearance ``r_1 + r_2`` (``2r`` for equal radii).
+        ``r_sum`` is the COMBINED clearance ``r_1 + r_2`` (``2r`` for equal radii),
+        or a ``ConvexPolygon`` combined footprint ``P_1 (+) (-P_2)`` (see
+        ``agent_shape.pair_clearance``), in which case the relative position
+        ``p2 - p1`` is tested for entering that polygon. An ``AlignedClearance``
+        is resolved with each agent facing its own motion (envelope disc when
+        stationary).
         ``v1 == 0`` means unit-time steps for both agents. For ``v1 > 0`` the test
         covers the shorter of the two traversals (existing approximation).
         """
+        if isinstance(r_sum, AlignedClearance):
+            r_sum = r_sum.resolve(heading_of(p1a, p1b), heading_of(p2a, p2b))
         p1a = np.array(p1a)
         p2a = np.array(p2a)
         p1b = np.array(p1b)
@@ -1294,9 +1377,12 @@ class GraphSampler(Grid):
                 t_dur = 1.0
             v1 = (p1b-p1a)/t_dur1 if dist1 > 0.0 and np.isfinite(t_dur1) else np.zeros(self.dim)
             v2 = (p2b-p2a)/t_dur2 if dist2 > 0.0 and np.isfinite(t_dur2) else np.zeros(self.dim)
-        r = r_sum
         r_vec = p2a-p1a
         vel = v2-v1
+        if isinstance(r_sum, ConvexPolygon):
+            _, _, hit = moving_point_interval(r_vec.reshape(1, -1), vel, r_sum.normals, r_sum.offsets, t_dur)
+            return bool(hit[0])
+        r = r_sum.radius if isinstance(r_sum, Disc) else r_sum
         tmin = np.clip(-np.dot(vel,r_vec)/(np.dot(vel,vel)+1e-10),0.0,t_dur)
         r_min_vec = r_vec + vel*tmin
         if np.linalg.norm(r_min_vec) < r:
@@ -1409,6 +1495,7 @@ class GraphSampler(Grid):
             "use_exact_collision_check": self.use_exact_collision_check,
             "sweep_backend": getattr(self, "sweep_backend", "cgal"),
             "sampling_dist_dict": self.sampling_dist_dict,
+            "speed_zones": zones_to_specs(self.speed_zones),
         }
 
         with open(path, 'wb') as f:
@@ -1422,6 +1509,7 @@ class GraphSampler(Grid):
     def _load_from_dict(self, data: dict, args: dict = {}):
 
         self.use_discrete_space = data["use_discrete_space"]
+        self.set_speed_zones(data.get("speed_zones", []))
         self.set_start(data["start"])
         self.set_goal(data["goal"])
         self.set_parameters(data["sample_num"], data["num_neighbors"], data["min_edge_length"], data["max_edge_length"])
@@ -1488,6 +1576,8 @@ class GraphSampler(Grid):
         Example: for a 2D map, ``rotate(1, (0, 1))`` is a 90° CCW rotation in the
         plane of dimensions 0 and 1.
         """
+        if getattr(self, "speed_zones", None):
+            raise NotImplementedError("rotate() does not rotate speed zones yet; clear them first.")
         a, b = int(axes[0]), int(axes[1])
         if a == b or not (0 <= a < self.dim) or not (0 <= b < self.dim):
             raise ValueError(
@@ -1687,6 +1777,7 @@ class GraphSampler(Grid):
             "use_exact_collision_check": self.use_exact_collision_check,
             "sweep_backend": getattr(self, "sweep_backend", "cgal"),
             "sampling_dist_dict": self.sampling_dist_dict,
+            "speed_zones": zones_to_specs(self.speed_zones),
         }
 
         # Create a new GraphSampler instance with the same geometric configuration

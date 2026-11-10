@@ -256,12 +256,18 @@ class Environment(AgentParamsMixin):
         # Pairwise clearance r_i + r_j (== 2r when homogeneous). A sweep of agent
         # i is reused by every pair sharing the same clearance, so the homogeneous
         # case computes exactly one sweep per (agent, t) as before.
-        pair_r = {(a1, a2): self._pair_clearance(a1, a2) for a1, a2 in agent_pairs}
+        # ``pair_r[(a1, a2)]`` is the clearance for sweeping a1's motion against
+        # a2 (and ``pair_r[(a2, a1)]`` the reverse). Both are the same float for
+        # discs; polygon footprints that are not centrally symmetric differ.
+        pair_r = {}
+        for a1, a2 in agent_pairs:
+            pair_r[(a1, a2)] = self._sweep_clearance(a1, a2)
+            pair_r[(a2, a1)] = self._sweep_clearance(a2, a1)
         if self.radius > 0 and self.use_constraint_sweep:
             needed = {agent: set() for agent in solution}
-            for (a1, a2), rs in pair_r.items():
-                needed[a1].add(rs)
-                needed[a2].add(rs)
+            for a1, a2 in agent_pairs:
+                needed[a1].add(pair_r[(a1, a2)])
+                needed[a2].add(pair_r[(a2, a1)])
             agent_edges = {agent: [] for agent in solution}
             sweeps = {}
             for agent in solution:
@@ -317,9 +323,8 @@ class Environment(AgentParamsMixin):
                     if self.use_constraint_sweep:
                         edge_1 = agent_edges[agent_1][t]
                         edge_2 = agent_edges[agent_2][t]
-                        rs = pair_r[(agent_1, agent_2)]
-                        sweep_1 = sweeps[(agent_1, rs)][t]
-                        sweep_2 = sweeps[(agent_2, rs)][t]
+                        sweep_1 = sweeps[(agent_1, pair_r[(agent_1, agent_2)])][t]
+                        sweep_2 = sweeps[(agent_2, pair_r[(agent_2, agent_1)])][t]
                         sweep_conflict = edge_1 in sweep_2 or edge_2 in sweep_1
                         loc_1_pt, loc_1_pt_f = edge_1
                         loc_2_pt, loc_2_pt_f = edge_2

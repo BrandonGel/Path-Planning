@@ -11,7 +11,7 @@ from typing import List, Tuple
 import numpy as np
 import time
 from path_planning.utils.checker import check_collision
-from path_planning.utils.util import agents_yaml_to_roadmap_frame, agent_radii_dict, agent_velocities_dict, is_heterogeneous
+from path_planning.utils.util import agents_yaml_to_roadmap_frame, agent_radii_dict, agent_velocities_dict, is_heterogeneous, agent_shapes_dict, agent_footprints_dict, agent_turning_speeds_dict, agent_headings_dict
 from typing import Mapping
 
 
@@ -74,6 +74,19 @@ def solve_mapf(map_, agents,mapf_solver_config:dict) -> Tuple[dict, float]:
     # roadmap was inflated with). Collision checks use r_i + r_j per pair.
     agent_radii = agent_radii_dict(agents, agent_radius)
     agent_velocities = agent_velocities_dict(agents, agent_velocity)
+    # Polygon footprints (rectangles / regular polygons): per-agent ``shape`` keys.
+    # Their ``radius`` is the bounding radius (conservative, used for inflation);
+    # the collision checker and SIPP use the exact polygon.
+    agent_shapes = agent_shapes_dict(agents)
+    agent_footprints = agent_footprints_dict(agents, agent_radius)
+    # Kinematics (SIPP only): per-agent ``turning_speed`` (config scalar
+    # ``agent_turning_speed`` as fallback; None = instantaneous) and initial ``heading``.
+    agent_turning_speeds = agent_turning_speeds_dict(agents, mapf_solver_config.get("agent_turning_speed"))
+    agent_headings = agent_headings_dict(agents)
+    speed_zones = list(getattr(map_, "speed_zones", []) or [])
+    if mapf_solver_name != "sipp" and (speed_zones or agent_turning_speeds):
+        print(f"[solve_mapf] warning: speed zones / turning speeds are only honoured by SIPP "
+              f"(solver {mapf_solver_name!r} ignores them)")
     planner_radius = max([float(agent_radius)] + list(agent_radii.values()))
     time_limit = mapf_solver_config['time_limit']
     max_iterations = mapf_solver_config['max_iterations']
@@ -102,7 +115,7 @@ def solve_mapf(map_, agents,mapf_solver_config:dict) -> Tuple[dict, float]:
                 "low_level_iterations": 0,
                 "failure_reason": "start/goal not a roadmap node: " + "; ".join(off_nodes),
             }
-            solution_info = check_solution_collision({}, agent_radii, solution_info)
+            solution_info = check_solution_collision({}, agent_footprints, solution_info)
             return summarize_solution({}, solution_info, mapf_solver_config, map_, agents=agents)
     else:
         # cdt/rrg/prm roadmaps may not include the exact start/goal as nodes; snap to the
@@ -177,7 +190,7 @@ def solve_mapf(map_, agents,mapf_solver_config:dict) -> Tuple[dict, float]:
         solution, solution_info = planner.get_solution_dict(solution_config)
     elif mapf_solver_name == 'sipp':
         dynamic_obstacles = dict()
-        sipp_planner = SippPlanner(map_,dynamic_obstacles,agents_rt,planner_radius,agent_velocity,heuristic_type=heuristic_type,time_limit=time_limit,max_iterations=max_iterations,agent_radii=agent_radii,agent_velocities=agent_velocities)
+        sipp_planner = SippPlanner(map_,dynamic_obstacles,agents_rt,planner_radius,agent_velocity,heuristic_type=heuristic_type,time_limit=time_limit,max_iterations=max_iterations,agent_radii=agent_radii,agent_velocities=agent_velocities,agent_shapes=agent_shapes,agent_turning_speeds=agent_turning_speeds,agent_headings=agent_headings)
         solution,solution_info = sipp_planner.compute_plan()
     elif mapf_solver_name == 'ccbs':
         env = CCBS_Environment(map_,{}, agents_rt, radius=planner_radius, velocity=agent_velocity, use_constraint_sweep=True,heuristic_type=heuristic_type, agent_radii=agent_radii, agent_velocities=agent_velocities)
@@ -189,7 +202,7 @@ def solve_mapf(map_, agents,mapf_solver_config:dict) -> Tuple[dict, float]:
         solution, solution_info = iccbs.search()
     else:
         raise ValueError(f"Invalid algorithm: {mapf_solver_name}")
-    solution_info = check_solution_collision(solution,agent_radii,solution_info)
+    solution_info = check_solution_collision(solution,agent_footprints,solution_info)
     summary = summarize_solution(solution,solution_info,mapf_solver_config,map_,agents=agents)
     return summary
 
@@ -222,9 +235,10 @@ def computer_solution_cost(solution:dict):
     success = True if solution is not None and solution != {} and solution != False else False
     if success:
         for agent, path in solution.items():
-            path_array = np.array([list(p.values())[1:] for p in path]) # (N, 2)
+            # Index by key: schedule points may carry extra keys (heading, turn_to).
+            path_array = np.array([[float(p["x"]), float(p["y"])] for p in path]) # (N, 2)
             dist_travel = np.linalg.norm(path_array[1:] - path_array[:-1], axis=1) # (N-1,)
-            time_stamp = np.array([list(p.values())[0] for p in path]) # (N,)
+            time_stamp = np.array([float(p["t"]) for p in path]) # (N,)
             delta_time = np.diff(time_stamp) # (N-1,)
 
             wait_time = delta_time[dist_travel == 0]
@@ -258,10 +272,15 @@ def computer_solution_cost(solution:dict):
     return cost_dict, all_cost_dict
 
 def check_solution_collision(solution,agent_radius,solution_info):
-    """``agent_radius``: one scalar or ``{agent_name: radius}`` (collision at r_i + r_j)."""
+    """``agent_radius``: one scalar or ``{agent_name: radius | ConvexPolygon}``
+    (collision at r_i + r_j for discs, inside the combined footprint for polygons)."""
     solution_info_collision = solution_info.copy()
     solution_info_collision["collision"] = False
-    max_r = max(agent_radius.values(), default=0.0) if isinstance(agent_radius, Mapping) else agent_radius
+    if isinstance(agent_radius, Mapping):
+        # Polygon footprints count as a positive extent (their bounding radius).
+        max_r = max((float(getattr(v, "bounding_radius", v)) for v in agent_radius.values()), default=0.0)
+    else:
+        max_r = agent_radius
     if max_r != 0 and solution_info["success"]:
         collisions = check_collision(solution, agent_radius, verbose=False)
         if collisions:
@@ -283,6 +302,11 @@ def summarize_solution(solution,solution_info,mapf_solver_config,map_,agents=Non
         # Per-agent values (== the scalars for homogeneous instances).
         summary["agent_radii"] = agent_radii_dict(agents, mapf_solver_config["agent_radius"])
         summary["agent_velocities"] = agent_velocities_dict(agents, mapf_solver_config["agent_velocity"])
+        summary["agent_shapes"] = agent_shapes_dict(agents)
+        summary["agent_footprints"] = agent_footprints_dict(agents, mapf_solver_config["agent_radius"])
+        summary["agent_turning_speeds"] = agent_turning_speeds_dict(agents, mapf_solver_config.get("agent_turning_speed"))
+        summary["agent_headings"] = agent_headings_dict(agents)
+    summary["speed_zones"] = [z.to_spec() for z in (getattr(map_, "speed_zones", []) or [])]
     summary["time_limit"] = mapf_solver_config["time_limit"]
     summary["max_iterations"] = mapf_solver_config["max_iterations"]
     summary["heuristic_type"] = mapf_solver_config["heuristic_type"]

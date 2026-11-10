@@ -7,11 +7,19 @@ same queries), reporting per-backend timing and result agreement (overlapping
 vertex/edge sets equal; time intervals within tolerance).
 
 Usage:
-    python scripts/roadmaps/benchmark_sweep.py [n_queries] [radius]
+    python scripts/roadmaps/benchmark_sweep.py [n_queries] [radius] [shape]
+
+``shape`` (optional) swaps the disc for a convex-polygon footprint:
+``rect:W:H[:angle_deg]`` or ``poly:N:circumradius[:angle_deg]`` (the polygon
+replaces ``radius`` as the combined clearance, fixed world orientation; see
+``agent_shape``). Prefix with ``a`` (``arect:W:H``, ``apoly:N:R``) for a
+heading-ALIGNED footprint on both agents (``AlignedClearance``: the query faces
+its motion, the element faces each roadmap edge).
 """
 
 from __future__ import annotations
 
+import math
 import os
 import random
 import sys
@@ -22,6 +30,7 @@ _PROJECT_ROOT = os.path.abspath(os.path.join(_SCRIPT_DIR, "..", ".."))
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
+from path_planning.utils.agent_shape import AlignedClearance, AlignedShape, rectangle, regular_polygon
 from path_planning.utils.cgal_sweep import CGAL_Sweep
 from path_planning.utils.shapely_sweep import ShapelySweep
 from path_planning.utils.util import read_graph_sampler_from_yaml, set_global_seed
@@ -100,6 +109,19 @@ def _agreement(cgal_res, shp_res, cgal_iv, shp_iv, atol=1e-6):
 def main():
     n_queries = int(sys.argv[1]) if len(sys.argv) > 1 else 3000
     r = float(sys.argv[2]) if len(sys.argv) > 2 else 1.0
+    if len(sys.argv) > 3:
+        kind, *params = sys.argv[3].split(":")
+        angle = math.radians(float(params[2])) if len(params) > 2 else 0.0
+        aligned = kind.startswith("a")
+        kind = kind[1:] if aligned else kind
+        if kind == "rect":
+            r = rectangle(float(params[0]), float(params[1]), angle=angle)
+        elif kind == "poly":
+            r = regular_polygon(int(params[0]), float(params[1]), angle=angle)
+        else:
+            raise SystemExit(f"unknown shape {sys.argv[3]!r}; use [a]rect:W:H[:deg] or [a]poly:N:R[:deg]")
+        if aligned:
+            r = AlignedClearance(AlignedShape(r), AlignedShape(r))
     velocity = 1.0
     seed = 42
     map_yaml = "path_planning/maps/2d/2d_mapd.yaml"

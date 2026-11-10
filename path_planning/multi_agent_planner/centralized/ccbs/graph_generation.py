@@ -125,6 +125,13 @@ class Environment(SippBaseEnvironment):
         self.agent_dict = {}
         self.make_agent_dict()
         SippBaseEnvironment.__init__(self, graph_map, dynamic_obstacles,agents,radius,velocity,use_constraint_sweep,heuristic_type,time_limit,max_iterations,verbose, agent_radii=agent_radii, agent_velocities=agent_velocities)
+        if getattr(self, "has_polygon_agents", False):
+            # CCBS's pairwise closest-approach test (check_collision(r_sum=...)) is
+            # disc-only; polygon footprints are supported by SIPP / CBS.
+            raise NotImplementedError("CCBS does not support polygon agent footprints yet; use SIPP or CBS.")
+        if getattr(graph_map, "speed_zones", None) or getattr(self, "has_turning_agents", False):
+            # CCBS sweeps conflicts at the nominal speed and has no heading state.
+            raise NotImplementedError("CCBS does not support speed zones / turning speeds; use SIPP.")
         assert radius >= 0, "Radius must be non-negative"
         assert velocity >= 0, "Velocity must be non-negative"
         self.sipp = SIPP(self, sipp_max_iterations=sipp_max_iterations, verbose=verbose)

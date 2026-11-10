@@ -19,19 +19,26 @@ from path_planning.common.environment.node import Node
 import math
 from path_planning.multi_agent_planner.data_type import HEURISTIC_TYPE
 from path_planning.multi_agent_planner.centralized.sipp.graph_generation import SippNode
+from path_planning.utils.agent_shape import heading_of, heading_key, turn_angle
 
 class SippPlanner(SippGraph):
-    def __init__(self, graph_map: GraphSampler,dynamic_obstacles:dict = {},agents:list = [],radius:float = 0.0,velocity:float = 0.0,use_constraint_sweep:bool = True, heuristic_type: str = 'manhattan',time_limit: float | None = None, max_iterations: int | None = None,verbose: bool = False,sipp_max_iterations: int = 10000, obstacle_horizon: float | dict | None = None, require_goal_safe_forever: bool = True, goal_safe_until=None, agent_radii: dict | None = None, agent_velocities: dict | None = None):
-        # Per-agent radius / speed: explicit dicts win, else the agents' own
-        # ``radius`` / ``velocity`` keys, else the scalars. The dicts must be known
+    def __init__(self, graph_map: GraphSampler,dynamic_obstacles:dict = {},agents:list = [],radius:float = 0.0,velocity:float = 0.0,use_constraint_sweep:bool = True, heuristic_type: str = 'manhattan',time_limit: float | None = None, max_iterations: int | None = None,verbose: bool = False,sipp_max_iterations: int = 10000, obstacle_horizon: float | dict | None = None, require_goal_safe_forever: bool = True, goal_safe_until=None, agent_radii: dict | None = None, agent_velocities: dict | None = None, agent_shapes: dict | None = None, agent_turning_speeds: dict | None = None, agent_headings: dict | None = None):
+        # Per-agent radius / speed / footprint: explicit dicts win, else the agents' own
+        # ``radius`` / ``velocity`` / ``shape`` keys, else the scalars. The dicts must be known
         # before the first table is built (``reset_graph`` inside SippGraph).
         if agent_radii is None:
             agent_radii = {a["name"]: a["radius"] for a in agents if a.get("radius") is not None}
         if agent_velocities is None:
             agent_velocities = {a["name"]: a["velocity"] for a in agents if a.get("velocity") is not None}
+        if agent_shapes is None:
+            agent_shapes = {a["name"]: a["shape"] for a in agents if a.get("shape") is not None}
+        if agent_turning_speeds is None:
+            agent_turning_speeds = {a["name"]: a["turning_speed"] for a in agents if a.get("turning_speed") is not None}
+        if agent_headings is None:
+            agent_headings = {a["name"]: a["heading"] for a in agents if a.get("heading") is not None}
         self._active_agent = None
         self._active_velocity = float(velocity)
-        SippGraph.__init__(self,graph_map,dynamic_obstacles,radius,velocity,use_constraint_sweep,heuristic_type,time_limit,max_iterations,verbose,obstacle_horizon,agent_radii,agent_velocities)
+        SippGraph.__init__(self,graph_map,dynamic_obstacles,radius,velocity,use_constraint_sweep,heuristic_type,time_limit,max_iterations,verbose,obstacle_horizon,agent_radii,agent_velocities,agent_shapes,agent_turning_speeds,agent_headings)
         self.agents = agents
         # A finished agent occupies its goal for all future time, so a goal
         # arrival is only truly collision-free if the accepted safe interval
@@ -61,12 +68,97 @@ class SippPlanner(SippGraph):
         else:
             self.heuristic_type = HEURISTIC_TYPE[heuristic_type]
 
-    def _interval_containing(self, position, t: float):
-        """The safe interval of ``position`` that contains time ``t`` (None if blocked)."""
-        for interval in self.sipp_graph[position].interval_list:
+    def _interval_containing(self, position, t: float, heading=None):
+        """The safe interval of ``position`` (record ``(position, heading)`` for an
+        aligned agent) that contains time ``t`` (None if blocked)."""
+        record = self.sipp_graph.get(self.vertex_key(position, heading))
+        if record is None:
+            return None
+        for interval in record.interval_list:
             if interval[0] <= t <= interval[1]:
                 return interval
         return None
+
+    @staticmethod
+    def _state_key(state):
+        return (state.position, getattr(state, "heading", None), state.interval)
+
+    def _incident_headings(self, position):
+        """Headings an aligned agent can hold at ``position``: both directions of
+        every incident roadmap edge (matches the sweep's ``(vertex, heading)``
+        records)."""
+        cache = self.__dict__.setdefault("_incident_headings_cache", {})
+        hs = cache.get(position)
+        if hs is None:
+            hs = set()
+            for n in self.get_valid_neighbours(position):
+                h = heading_of(position, n)
+                if h is None:
+                    continue
+                hs.add(h)
+                hs.add(heading_of(n, position))
+            hs = tuple(sorted(hs))
+            cache[position] = hs
+        return hs
+
+    def _initial_states(self, start):
+        """Start states at t=0.
+
+        - Finite turning speed: exactly one state facing the agent's initial
+          heading (``agent_headings``, default 0; snapped onto an incident edge
+          heading when within 1e-9 rad). An aligned agent whose start heading is
+          not an incident heading sits in its envelope record (the turn table)
+          until its first turn.
+        - Instantaneous turns: one state (the interval containing 0) for a disc /
+          fixed footprint; for an aligned agent one per heading it may start with
+          (it is assumed to already face the edge it first leaves along, or any
+          incident edge while it waits), each in the matching ``(start, heading)``
+          record.
+        """
+        aligned = getattr(self, "_aligned_search", False)
+        omega = getattr(self, "_omega", float("inf"))
+        if getattr(self, "_heading_search", False) and math.isfinite(omega):
+            h0 = self._heading_for(self._active_agent)
+            incident = self._incident_headings(start)
+            for h in incident:
+                if abs(turn_angle(h0, h)) <= 1e-9:
+                    h0 = h
+                    break
+            if aligned and h0 in incident:
+                interval = self._interval_containing(start, 0.0, h0)
+            elif aligned:
+                interval = self._interval_containing_in(self._turn_table, start, 0.0)
+            else:
+                interval = self._interval_containing(start, 0.0)
+            return [] if interval is None else [State(start, 0, interval, heading=h0)]
+        if not aligned:
+            interval = self._interval_containing(start, 0.0)
+            return [] if interval is None else [State(start, 0, interval)]
+        states = []
+        for h in self._incident_headings(start):
+            interval = self._interval_containing(start, 0.0, h)
+            if interval is not None:
+                states.append(State(start, 0, interval, heading=h))
+        return states
+
+    @staticmethod
+    def _interval_containing_in(table, position, t: float):
+        record = table.get(position) if table is not None else None
+        if record is None:
+            return None
+        for interval in record.interval_list:
+            if interval[0] <= t <= interval[1]:
+                return interval
+        return None
+
+    def _goal_reachable(self, goal) -> bool:
+        if not getattr(self, "_aligned_search", False):
+            return len(self.sipp_graph[goal].interval_list) > 0
+        return any(
+            len(self.sipp_graph[self.vertex_key(goal, h)].interval_list) > 0
+            for h in self._incident_headings(goal)
+            if self.vertex_key(goal, h) in self.sipp_graph
+        )
 
     def shuffle_agents(self):
         random.shuffle(self.agents)
@@ -79,13 +171,19 @@ class SippPlanner(SippGraph):
         self._active_velocity = self._velocity_for(agent_name)
 
     def get_mtime(self, position1, position2):
+        """Move time along the edge: length / min(agent speed, zone limit) in body
+        mode (``graph_map.edge_speed``), unit time when ``velocity == 0``."""
         v = getattr(self, "_active_velocity", self.velocity)
-        key = (position1, position2, v)
+        key = (position1, position2, v, getattr(self.graph_map, "speed_zones_version", 0))
         if key in self._mtime_cache:
             return self._mtime_cache[key]
         m_cost = float(self.graph_map.get_cost(Node(tuple(position1)), Node(tuple(position2))))
         if v > 0:
-            m_time = m_cost / v
+            v_edge = v
+            edge_speed = getattr(self.graph_map, "edge_speed", None)
+            if self.radius > 0 and edge_speed is not None:
+                v_edge = edge_speed(position1, position2, v)
+            m_time = m_cost / v_edge
         else:
             m_time = 1.0
         self._mtime_cache[key] = m_time
@@ -126,6 +224,8 @@ class SippPlanner(SippGraph):
         return arrive_t
 
     def get_successors(self, state):
+        if getattr(self, "_heading_search", False) or getattr(self, "_aligned_search", False):
+            return self._get_successors_heading(state)
         successors = []
         costs = []
         time_taken = []
@@ -191,6 +291,101 @@ class SippPlanner(SippGraph):
                         successors.append(s)
                         costs.append(cost)
                         time_taken.append((w_cost, m_time))                     
+        return successors, costs, time_taken
+
+    def _get_successors_heading(self, state):
+        """Successors of a heading-tracking agent (body mode): heading-aligned
+        polygons and / or agents with a finite turning speed ``omega``.
+
+        A move along ``p -> n`` faces the edge: its departure window comes from
+        the directed edge record ``(p, n)`` and its arrival interval from the
+        vertex record of ``n`` (``(n, heading)`` for aligned footprints, plain
+        ``n`` for discs). With a finite ``omega`` the agent must already face the
+        edge (``state.heading == heading(p -> n)``); otherwise it may leave with
+        any heading. An in-place turn to another incident heading ``h'`` waits
+        with the old heading until ``t_s``, rotates for ``tau = |dh| / omega``
+        occupying its envelope record (``_turn_table[p]``), and lands in the
+        ``h'`` record at ``t_s + tau``; action ``(wait = t_s - t, move = tau)``.
+        Instantaneous turns (``omega = inf``) are zero-length as before.
+        """
+        successors = []
+        costs = []
+        time_taken = []
+        aligned = getattr(self, "_aligned_search", False)
+        omega = getattr(self, "_omega", float("inf"))
+        finite_turn = math.isfinite(omega)
+        start_pos = state.position
+        early_depart_t = state.time
+        late_depart_t = state.interval[1]
+        for neighbour_pos in self.get_valid_neighbours(start_pos):
+            if neighbour_pos == start_pos:
+                continue
+            heading = heading_of(start_pos, neighbour_pos)
+            if finite_turn and heading != state.heading:
+                continue  # must face the edge first (turn action below)
+            node = self.sipp_graph.get(self.vertex_key(neighbour_pos, heading if aligned else None))
+            edge = self.sipp_graph.get((start_pos, neighbour_pos))
+            if node is None or edge is None:
+                continue
+            m_time = self.get_mtime(start_pos, neighbour_pos)
+            start_t = state.time + m_time
+            end_t = late_depart_t + m_time
+            unsafe_interval_list = edge.get_unsafe_intervals(early_depart_t, end_t)
+            safe_node = SippNode()
+            safe_node.interval_list = [(early_depart_t, late_depart_t)]
+            for t1_unsafe, t2_unsafe in unsafe_interval_list:
+                safe_node.split_interval(t1_unsafe - m_time, t2_unsafe)
+            for i in node.interval_list:
+                if i[0] > end_t or i[1] < start_t:
+                    continue
+                for i_edge in safe_node.interval_list:
+                    if i_edge[0] > late_depart_t or i_edge[1] < early_depart_t:
+                        continue
+                    t = self.get_earliest_no_collision_arrival_time_body(start_t, i, i_edge, start_pos, neighbour_pos, m_time)
+                    if t is None:
+                        continue
+                    cost = t - state.time
+                    successors.append(State(neighbour_pos, t, i, heading=heading))
+                    costs.append(cost)
+                    time_taken.append((cost - m_time, m_time))
+        # In-place turns.
+        turn_table = getattr(self, "_turn_table", None) or self.sipp_graph
+        for h in self._incident_headings(start_pos):
+            if h == state.heading:
+                continue
+            node = self.sipp_graph.get(self.vertex_key(start_pos, h if aligned else None))
+            if node is None:
+                continue
+            tau = abs(turn_angle(state.heading, h)) / omega if finite_turn and state.heading is not None else 0.0
+            if tau <= 1e-12:
+                for i in node.interval_list:
+                    if i[0] > late_depart_t or i[1] < early_depart_t:
+                        continue
+                    t = max(state.time, i[0])
+                    successors.append(State(start_pos, t, i, heading=h))
+                    costs.append(t - state.time)
+                    time_taken.append((t - state.time, 0.0))
+                continue
+            env_record = turn_table.get(start_pos)
+            if env_record is None:
+                continue
+            best = {}
+            for j in env_record.interval_list:
+                if j[1] - j[0] < tau - 1e-12 or j[0] > late_depart_t or j[1] < early_depart_t:
+                    continue
+                for i in node.interval_list:
+                    if i[0] > late_depart_t + tau or i[1] < early_depart_t + tau:
+                        continue
+                    t_s = max(state.time, j[0], i[0] - tau)
+                    if t_s > late_depart_t + 1e-12 or t_s + tau > j[1] + 1e-12 or t_s + tau > i[1] + 1e-12:
+                        continue
+                    if i not in best or t_s < best[i]:
+                        best[i] = t_s
+            for i, t_s in best.items():
+                t = t_s + tau
+                successors.append(State(start_pos, t, i, heading=h))
+                costs.append(t - state.time)
+                time_taken.append((t_s - state.time, tau))
         return successors, costs, time_taken
 
     def get_heuristic(self, position,goal):
@@ -295,40 +490,41 @@ class SippPlanner(SippGraph):
                 self._set_active_agent(agent["name"])
                 self._bind_table(agent["name"])
 
-                if len(self.sipp_graph[start].interval_list) == 0 or len(self.sipp_graph[goal].interval_list) == 0:
+                if not self._goal_reachable(goal):
                     success = False
                     break
                 # The agent is at ``start`` at t=0, so its initial safe interval must be the
                 # one containing t=0. Seeding with interval_list[0] regardless would let the
                 # search "wait" at the start through a blocked window (another agent
                 # sweeping over it) and emit a plan that collides before it even moves.
-                start_interval = self._interval_containing(start, 0.0)
-                if start_interval is None:
+                # (Aligned agents: one start state per heading they may hold there.)
+                initial_states = self._initial_states(start)
+                if not initial_states:
                     success = False
                     break
                 # If start already equals goal, low-level search should terminate immediately.
                 # Treat this as a zero-cost single-state plan and continue.
                 if start == goal:
-                    initial_state = State(start, 0, start_interval)
+                    initial_state = initial_states[0]
                     self.plan[agent["name"]] = [initial_state]
                     self.plan_cost[agent["name"]] = 0.0
                     self.action_cost[agent["name"]] = [(0.0, 0.0)]
                     self.update_intervals([[initial_state]], [[(0.0, 0.0)]], [agent["name"]])
                     continue
-                initial_state = State(start, 0, start_interval)
-                initial_state_key = (start, initial_state.interval)
 
                 # Min-heap: (f, counter, state); counter ensures we never compare State objects
                 open_heap = []
                 counter = 0
-                closed_set = set()  # (position, interval) already expanded
-                g_score  = {initial_state_key:0.0}      # (position, interval) -> g
-                came_from   = {}      # (position, interval) -> State
-                action_cost = {}    # (position, interval) -> (wait_cost, move_cost)
+                closed_set = set()  # (position, heading, interval) already expanded
+                g_score  = {}      # (position, heading, interval) -> g
+                came_from   = {}      # (position, heading, interval) -> State
+                action_cost = {}    # (position, heading, interval) -> (wait_cost, move_cost)
                 
                 f_start = self.get_heuristic(start, goal)
-                heapq.heappush(open_heap, (f_start, counter, initial_state))
-                counter += 1
+                for initial_state in initial_states:
+                    g_score[self._state_key(initial_state)] = 0.0
+                    heapq.heappush(open_heap, (f_start, counter, initial_state))
+                    counter += 1
 
                 goal_reached = False
                 goal_state   = None
@@ -339,7 +535,7 @@ class SippPlanner(SippGraph):
                     _, _, current = heapq.heappop(open_heap)
                     # if round(current.position[0],2) == 11. and round(current.position[1],2) == 17. and round(current.time,2) == 2.19:
                     #     print(current)
-                    current_state_key = (current.position, current.interval)
+                    current_state_key = self._state_key(current)
                     if current_state_key in closed_set:
                         continue
                     closed_set.add(current_state_key)
@@ -347,7 +543,7 @@ class SippPlanner(SippGraph):
                     successors, costs, time_takens = self.get_successors(current)
 
                     for cost, time_taken, successor in zip(costs, time_takens, successors):
-                        succ_key = (successor.position, successor.interval)
+                        succ_key = self._state_key(successor)
                         if succ_key in closed_set:
                             continue
 
@@ -410,12 +606,12 @@ class SippPlanner(SippGraph):
     def reconstruct_path(self, came_from, came_from_action_cost, current):
         total_path = deque([current])
         total_path_action_cost = deque([(0, 0)])
-        key = (current.position, current.interval)
+        key = self._state_key(current)
         while key in came_from:
             current = came_from[key]
             total_path.appendleft(current)
             total_path_action_cost.appendleft(came_from_action_cost[key])
-            key = (current.position, current.interval)
+            key = self._state_key(current)
         return list(total_path), list(total_path_action_cost)
                 
     def get_plan(self):
@@ -443,13 +639,37 @@ class SippPlanner(SippGraph):
                     temp_dict = {"t":setpoint.time,"x":setpoint.position[0], "y":setpoint.position[1]}
                     path_list.append(temp_dict)
             else:
-                for action,state in zip(action_cost,plan):
+                # Heading-tracking agents (aligned polygons / finite turning speed)
+                # get a ``heading`` per point = the orientation held from that point
+                # until the next, and ``turn_to`` on the point where an in-place
+                # rotation starts (it ends at the next point).
+                headed = any(getattr(st, "heading", None) is not None for st in plan)
+                for k, (action, state) in enumerate(zip(action_cost, plan)):
+                    action_wait_cost, action_move_cost = action
+                    nxt = plan[k + 1] if k + 1 < len(plan) else None
+                    same = nxt is not None and nxt.position == state.position
+                    if headed and same and nxt.time - state.time <= 1e-10:
+                        continue  # zero-duration in-place turn: the next state coincides
                     temp_dict = {"t":state.time,"x":state.position[0], "y":state.position[1]}
+                    if headed:
+                        held = state.heading if (nxt is None or action_wait_cost > 1e-10 or same) else nxt.heading
+                        temp_dict["heading"] = held
+                        if same and action_move_cost > 1e-10 and action_wait_cost <= 1e-10:
+                            temp_dict["turn_to"] = nxt.heading  # rotation starts right away
                     path_list.append(temp_dict)
 
-                    action_wait_cost, action_move_cost = action
                     if action_wait_cost > 1e-10:
-                        temp_dict = {"t":state.time+action_wait_cost,"x":state.position[0], "y":state.position[1]}
-                        path_list.append(temp_dict)
+                        if same:
+                            if headed and action_move_cost > 1e-10:
+                                # wait with the old heading, then rotate until the next point
+                                path_list.append({"t": state.time + action_wait_cost, "x": state.position[0],
+                                                  "y": state.position[1], "heading": state.heading,
+                                                  "turn_to": nxt.heading})
+                            # instantaneous turn after a wait: the next state coincides
+                        else:
+                            temp_dict = {"t":state.time+action_wait_cost,"x":state.position[0], "y":state.position[1]}
+                            if headed:
+                                temp_dict["heading"] = nxt.heading
+                            path_list.append(temp_dict)
             solution[agent] = path_list
         return solution

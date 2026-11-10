@@ -7,6 +7,10 @@
 from typing import List, Mapping
 from python_motion_planning.common.env import TYPES,  Grid,  Node
 from matplotlib.patches import Circle, RegularPolygon
+from matplotlib.patches import Polygon as MplPolygon
+from matplotlib.patches import Rectangle as MplRectangle
+
+from path_planning.utils.agent_shape import AlignedShape, ConvexPolygon, Disc, oriented_pair_clearance, resolve_shape, schedule_headings, turn_angle
 import matplotlib.pyplot as plt
 from matplotlib import animation
 import re
@@ -159,6 +163,22 @@ class Visualizer2D(BaseVisualizer2D):
             
         if equal: 
             self.ax.axis("equal")
+
+        if getattr(grid_map, "speed_zones", None):
+            self.plot_speed_zones(grid_map)
+
+    def plot_speed_zones(self, grid_map, alpha: float = 0.28, color: str = "#ff7f0e", label: bool = True):
+        """Shade the map's speed zones (``grid_map.speed_zones``, world-frame
+        rectangles) just above the obstacle grid and print each limit."""
+        zones = getattr(grid_map, "speed_zones", None) or []
+        for z in zones:
+            self.ax.add_patch(MplRectangle((z.x0, z.y0), z.width, z.height, facecolor=color, edgecolor=color,
+                                           alpha=alpha, linewidth=1.0, linestyle="--",
+                                           zorder=self.zorder['grid_map'] + 1))
+            if label:
+                txt = f"v \u2264 {z.speed_limit:g}" if z.name is None else f"{z.name}: v \u2264 {z.speed_limit:g}"
+                self.ax.text(0.5 * (z.x0 + z.x1), z.y1 - 0.15 * z.height, txt, ha="center", va="top",
+                             fontsize=7, color="#7f3f00", zorder=self.zorder['grid_map'] + 1)
         
     def plot_road_map(self,
                         map_: Grid,
@@ -355,11 +375,18 @@ class Visualizer2D(BaseVisualizer2D):
                 show_paths=True, show_legend=True, rack_pts=None, roadmap_specials=True,
                 background_img=None, background_extent=None,
                 agent_colors=None,extra_special_specs=None,special_patch_radius=None,
-                nodes=None, writer=None, dpi=200):
+                nodes=None, writer=None, dpi=200, view_bounds=None, annotations=None,
+                show_time=False):
         """nodes: optional node list aligned with ``road_map`` (e.g. a k-hop
         subgraph from k_hop_subgraph). Defaults to map.nodes.
         writer: matplotlib animation writer name. Defaults to 'ffmpeg' when it
-        is available, otherwise 'pillow' (use a .gif file_name in that case)."""
+        is available, otherwise 'pillow' (use a .gif file_name in that case).
+        view_bounds: optional ``((x_min, x_max), (y_min, y_max))`` world window to
+        zoom the animation on (the figure aspect follows the window).
+        annotations: optional list of ``(x, y, text)`` or ``(x, y, text, text_kwargs)``
+        static labels drawn in world coordinates over the map.
+        show_time: draw a ``t = .. s`` stamp; ``True`` = top-left corner, or one of
+        ``"top-left" | "top-right" | "bottom-left" | "bottom-right"``."""
         _nodes = map.nodes if nodes is None else nodes
 
         combined_schedule = {}
@@ -375,7 +402,11 @@ class Visualizer2D(BaseVisualizer2D):
         # otherwise let the axes fill the whole figure (no white margin).
         _right = 0.82 if show_legend else 1.0
         self.fig.subplots_adjust(left=0,right=_right,bottom=0,top=1, wspace=None, hspace=None)
-        self.set_fig_size(self.figsize[0], self.figsize[1], map.shape[0]/map.shape[1])
+        if view_bounds is not None:
+            (_vx0, _vx1), (_vy0, _vy1) = view_bounds
+            self.set_fig_size(self.figsize[0], self.figsize[1], (_vx1 - _vx0) / (_vy1 - _vy0))
+        else:
+            self.set_fig_size(self.figsize[0], self.figsize[1], map.shape[0]/map.shape[1])
 
         # Size the agent markers (Circle, in data units) to visually match the rack
         # scatter markers (s=RACK_S points^2). Convert the marker's point-diameter to
@@ -385,12 +416,44 @@ class Visualizer2D(BaseVisualizer2D):
         # _ax_w_pts = self.figsize[0] * _right * 72.0
         # _marker_dia_pts = np.sqrt(RACK_S)
         # agent_radius_vis = (_marker_dia_pts / 2.0) * (_data_w / _ax_w_pts)
-        # ``radius``: one value for every agent, or ``{agent_name: radius}`` for
-        # heterogeneous agents (unknown names draw as points).
+        # ``radius``: one value for every agent, or ``{agent_name: radius | ConvexPolygon
+        # | AlignedShape}`` for heterogeneous agents (unknown names draw as points). A
+        # polygon footprint (rectangle / regular polygon) is drawn as a polygon patch;
+        # an ``AlignedShape`` is rotated to the heading the agent holds on each segment
+        # (``heading`` keys of the schedule, else carried from its moves). Pairs
+        # involving a polygon are collision-tested with the combined footprint
+        # ``P_i (+) (-P_j)`` at those headings.
         if isinstance(radius, Mapping):
-            _radius_of = lambda n: float(radius.get(n, 0.0))
+            _footprint_of = lambda n: radius.get(n, 0.0)
         else:
-            _radius_of = lambda n: float(radius)
+            _footprint_of = lambda n: radius
+        _POLY = (ConvexPolygon, AlignedShape)
+        def _radius_of(n):
+            fp = _footprint_of(n)
+            if isinstance(fp, _POLY):
+                return float(fp.bounding_radius)
+            if isinstance(fp, Disc):
+                return float(fp.radius)
+            return float(fp)
+        _pair_cache = {}
+        def _pair_collides(n1, p1, h1, n2, p2, h2):
+            f1, f2 = _footprint_of(n1), _footprint_of(n2)
+            if isinstance(f1, _POLY) or isinstance(f2, _POLY):
+                key = (n1, h1, n2, h2)
+                combo = _pair_cache.get(key)
+                if combo is None:
+                    s1 = f1 if isinstance(f1, _POLY) else Disc(_radius_of(n1))
+                    s2 = f2 if isinstance(f2, _POLY) else Disc(_radius_of(n2))
+                    combo = _pair_cache[key] = oriented_pair_clearance(s1, h1, s2, h2)
+                rel = np.asarray(p2, float).reshape(1, 2) - np.asarray(p1, float).reshape(1, 2)
+                if isinstance(combo, Disc):  # both resolved to discs (e.g. rotating envelope)
+                    return bool(np.linalg.norm(rel) < combo.radius)
+                return bool(combo.contains(rel)[0])
+            return np.linalg.norm(np.asarray(p1) - np.asarray(p2)) < _radius_of(n1) + _radius_of(n2)
+        _headings = {
+            name: schedule_headings(path) if isinstance(_footprint_of(name), AlignedShape) else None
+            for name, path in schedule["schedule"].items()
+        }
 
         # Draw static map and paths
         if agent_colors is None:
@@ -399,6 +462,12 @@ class Visualizer2D(BaseVisualizer2D):
             Colors = agent_colors
         self.ax.clear()
         self.plot_grid_map(map)
+        for ann in (annotations or []):
+            ax_, ay_, atext = ann[0], ann[1], ann[2]
+            akw = dict(fontsize=8, ha="left", va="bottom", color="black", zorder=self.zorder['robot_text'])
+            if len(ann) > 3 and ann[3]:
+                akw.update(ann[3])
+            self.ax.text(ax_, ay_, atext, **akw)
         # Optionally draw a detailed background image (e.g. the photographic occupancy
         # map) over the plain obstacle grid. It is already oriented/rotated by the caller
         # and stretched to the env world ``background_extent`` so it aligns with the
@@ -432,6 +501,15 @@ class Visualizer2D(BaseVisualizer2D):
         artists = []
         agents = dict()
         agent_names = dict()
+        time_text = None
+        if show_time:
+            corner = show_time if isinstance(show_time, str) else "top-left"
+            _v, _h = corner.split("-")
+            time_text = self.ax.text(0.01 if _h == "left" else 0.99, 0.99 if _v == "top" else 0.01, "",
+                                     transform=self.ax.transAxes, ha=_h, va=_v,
+                                     fontsize=10, fontweight="bold", zorder=self.zorder['robot_text'],
+                                     bbox=dict(facecolor="white", alpha=0.75, edgecolor="none", pad=2))
+            artists.append(time_text)
 
         # create agents:
         T = 0
@@ -442,7 +520,16 @@ class Visualizer2D(BaseVisualizer2D):
             x,y = start["x"], start["y"]
             color = Colors[ii%len(Colors)]
 
-            agents[name] = Circle((x, y), _radius_of(name), facecolor=color, edgecolor='black',zorder=self.zorder['robot_circle'])
+            fp = _footprint_of(name)
+            if isinstance(fp, _POLY):
+                h0 = _headings[name][0] if _headings.get(name) else None
+                agents[name] = MplPolygon(resolve_shape(fp, h0).points + np.array([x, y]), closed=True,
+                                          facecolor=color, edgecolor='black', zorder=self.zorder['robot_circle'])
+                agents[name].footprint = fp
+                agents[name].center = (x, y)
+                agents[name].heading = h0
+            else:
+                agents[name] = Circle((x, y), _radius_of(name), facecolor=color, edgecolor='black',zorder=self.zorder['robot_circle'])
             agents[name].original_face_color = color
             patches.append(agents[name])
 
@@ -464,6 +551,9 @@ class Visualizer2D(BaseVisualizer2D):
         if show_legend:
             self.add_legend()
         self.ax.set_axis_off()
+        if view_bounds is not None:
+            self.ax.set_xlim(_vx0, _vx1)
+            self.ax.set_ylim(_vy0, _vy1)
 
         def init_func():
             for p in patches:
@@ -473,10 +563,20 @@ class Visualizer2D(BaseVisualizer2D):
             return patches + artists
 
         def animate_func(i):
+            t_now = i*skip_frames / intermediate_frames
+            if time_text is not None:
+                time_text.set_text(f"t = {t_now:5.1f} s")
             for agent_name, agent in combined_schedule.items():
-                pos = getState(i*skip_frames / intermediate_frames, agent)
+                pos = getState(t_now, agent)
                 p = (pos[0], pos[1])
-                agents[agent_name].center = p
+                patch = agents[agent_name]
+                if isinstance(patch, MplPolygon):
+                    h = getHeading(t_now, agent, _headings.get(agent_name))
+                    patch.set_xy(resolve_shape(patch.footprint, h).points + np.asarray(p))
+                    patch.center = p
+                    patch.heading = getHeading(t_now, agent, _headings.get(agent_name), for_collision=True)
+                else:
+                    patch.center = p
                 agent_names[agent_name].set_position(p)
 
             # reset all colors
@@ -492,12 +592,32 @@ class Visualizer2D(BaseVisualizer2D):
                     d2 = agents_array[j]
                     pos1 = np.array(d1.center)
                     pos2 = np.array(d2.center)
-                    if np.linalg.norm(pos1 - pos2) < _radius_of(agent_names_arr[i]) + _radius_of(agent_names_arr[j]):
+                    if _pair_collides(agent_names_arr[i], pos1, getattr(d1, "heading", None),
+                                      agent_names_arr[j], pos2, getattr(d2, "heading", None)):
                         d1.set_facecolor('red')
                         d2.set_facecolor('red')
                         print("COLLISION! (agent-agent) ({}, {})".format(i, j))
 
             return patches + artists
+
+        def getHeading(t, d, heads, for_collision=False):
+            """Heading held at time ``t`` (the segment starting at or before ``t``).
+            On a rotation stretch (``turn_to`` on the segment's start point) the
+            drawn heading follows the shortest arc; the collision test uses the
+            envelope (``None``) there."""
+            if not heads:
+                return None
+            k = 0
+            while k + 1 < len(d) and d[k + 1]["t"] <= t:
+                k += 1
+            h = heads[k]
+            if k + 1 < len(d) and d[k].get("turn_to") is not None:
+                if for_collision:
+                    return None
+                dt = float(d[k + 1]["t"]) - float(d[k]["t"])
+                frac = 0.0 if dt <= 1e-12 else min(1.0, max(0.0, (t - float(d[k]["t"])) / dt))
+                return h + frac * turn_angle(h, float(d[k]["turn_to"]))
+            return h
 
         def getState(t, d):
             idx = 0

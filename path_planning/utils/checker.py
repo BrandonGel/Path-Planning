@@ -1,20 +1,64 @@
 import numpy as np
 from typing import Mapping, Union
 
-# Agent radius spec: one scalar for every agent, or ``{agent_name: radius}`` for
-# heterogeneous agents. Two agents collide when their centre distance is
-# ``<= r_i + r_j`` (``2r`` for a scalar).
-RadiusSpec = Union[float, Mapping[str, float]]
+from path_planning.utils.agent_shape import (
+    AlignedShape,
+    ConvexPolygon,
+    Disc,
+    heading_key,
+    moving_point_interval,
+    oriented_pair_clearance,
+    schedule_headings,
+)
+
+# Agent footprint spec: one scalar radius for every agent, or ``{agent_name:
+# radius | ConvexPolygon | AlignedShape}`` for heterogeneous agents. Two discs
+# collide when their centre distance is ``<= r_i + r_j`` (``2r`` for a scalar);
+# when either agent is a polygon the pair collides when ``c_j - c_i`` lies inside
+# the combined footprint ``P_i (+) (-P_j)`` (``agent_shape.pair_clearance``). An
+# ``AlignedShape`` is rotated to the heading the agent holds on each segment
+# (``heading`` keys of the schedule entries, else ``agent_shape.path_headings``).
+RadiusSpec = Union[float, Mapping[str, Union[float, ConvexPolygon, AlignedShape, Disc]]]
 VelocitySpec = Union[float, Mapping[str, float], None]
 
 
-def _radius_for(r: RadiusSpec, name: str) -> float:
-    """Radius of ``name`` under spec ``r`` (scalar or per-name mapping)."""
+def _footprint_for(r: RadiusSpec, name: str):
+    """Footprint of ``name`` under spec ``r``: a float radius, a ``ConvexPolygon``
+    or an ``AlignedShape``."""
     if isinstance(r, Mapping):
         if name not in r:
             raise ValueError(f"no radius given for agent {name!r}")
-        return float(r[name])
-    return float(r)
+        val = r[name]
+    else:
+        val = r
+    if isinstance(val, (ConvexPolygon, AlignedShape)):
+        return val
+    if isinstance(val, Disc):
+        return float(val.radius)
+    return float(val)
+
+
+def _radius_for(r: RadiusSpec, name: str) -> float:
+    """Radius of ``name`` under spec ``r`` (bounding radius for polygon agents)."""
+    fp = _footprint_for(r, name)
+    return float(fp.bounding_radius) if isinstance(fp, (ConvexPolygon, AlignedShape)) else fp
+
+
+def _pair_footprint(r: RadiusSpec, name_i: str, name_j: str, heading_i=None, heading_j=None):
+    """``(collision_radius, polygon)``: the float ``r_i + r_j`` with ``polygon=None``
+    for a disc pair, else ``(None, P_i (+) (-P_j))`` with each aligned footprint
+    rotated to its heading."""
+    fi = _footprint_for(r, name_i)
+    fj = _footprint_for(r, name_j)
+    if isinstance(fi, (ConvexPolygon, AlignedShape)) or isinstance(fj, (ConvexPolygon, AlignedShape)):
+        si = fi if isinstance(fi, (ConvexPolygon, AlignedShape)) else Disc(fi)
+        sj = fj if isinstance(fj, (ConvexPolygon, AlignedShape)) else Disc(fj)
+        combo = oriented_pair_clearance(si, heading_i, sj, heading_j)
+        if isinstance(combo, Disc):
+            # both resolved to discs (e.g. an aligned shape rotating in place -> envelope)
+            return combo.radius, None
+        return None, combo
+    return fi + fj, None
 
 
 def _velocity_for(v: VelocitySpec, name: str):
@@ -38,20 +82,26 @@ def check_time_anomaly(solution,verbose: bool = True):
     return no_anomaly
 
 
-def check_velocity_anomaly(solution,is_using_constant_speed: bool = False,verbose: bool = True, velocity: VelocitySpec = None, tol: float = 1e-6):
+def check_velocity_anomaly(solution,is_using_constant_speed: bool = False,verbose: bool = True, velocity: VelocitySpec = None, tol: float = 1e-6, speed_zones=None):
     """Flag agents whose motion speed is inconsistent.
 
     ``velocity`` (scalar or ``{agent_name: speed}``): when given and > 0 for an
     agent, every moving segment of that agent must run at that nominal speed
     (relative tolerance ``tol``); 0 / None keeps the historical median-based
-    constant-speed check driven by ``is_using_constant_speed``.
+    constant-speed check driven by ``is_using_constant_speed``. With
+    ``speed_zones`` (``SpeedZone`` list, see ``speed_zones.segment_speed_limit``)
+    the expected speed of a segment is ``min(nominal, lowest limit of the zones the
+    segment touches)``.
     """
+    from path_planning.common.environment.map.speed_zones import segment_speed_limit
+
     agents = {agent:np.array([[p['t'],p['x'], p['y']] for p in path] ) for agent,path in solution.items()}
     no_anomaly = True
     for agent, path in agents.items():
         diff = np.diff(path[:,1:], axis=0)
         t_diff = np.diff(path[:,0], axis=0)
-        v_diff = diff[t_diff > 1e-10] / t_diff[t_diff > 1e-10].reshape(-1,1)
+        keep = t_diff > 1e-10
+        v_diff = diff[keep] / t_diff[keep].reshape(-1,1)
         speed = np.linalg.norm(v_diff, axis=1)
         if speed.size == 0:
             # No motion segments for this agent (e.g., start==goal), so nothing to validate.
@@ -59,9 +109,19 @@ def check_velocity_anomaly(solution,is_using_constant_speed: bool = False,verbos
 
         v_nom = _velocity_for(velocity, agent)
         if v_nom is not None and v_nom > 0:
-            moving = speed[speed > 1e-9]
-            if moving.size and np.any(np.abs(moving - v_nom) > tol * max(1.0, v_nom)):
-                print(f"Agent {agent} moves at {moving.min():.4f}..{moving.max():.4f}, nominal speed {v_nom:.4f}")
+            moving_mask = speed > 1e-9
+            moving = speed[moving_mask]
+            expected = np.full(moving.shape, float(v_nom))
+            if speed_zones:
+                seg_pts = path[:-1, 1:][keep][moving_mask]
+                seg_nxt = path[1:, 1:][keep][moving_mask]
+                for k, (a, b) in enumerate(zip(seg_pts, seg_nxt)):
+                    lim = segment_speed_limit(speed_zones, a, b)
+                    if lim is not None:
+                        expected[k] = min(expected[k], lim)
+            if moving.size and np.any(np.abs(moving - expected) > tol * np.maximum(1.0, expected)):
+                print(f"Agent {agent} moves at {moving.min():.4f}..{moving.max():.4f}, nominal speed {v_nom:.4f}"
+                      + (" (zone limits applied)" if speed_zones else ""))
                 no_anomaly = False
             continue
 
@@ -86,6 +146,10 @@ def check_collision(solution, r: RadiusSpec, verbose: bool = True):
     Agents are modeled as discs; ``r`` is either one radius for every agent or a
     ``{agent_name: radius}`` mapping (heterogeneous agents). Two agents collide
     when their centre distance is <= r_i + r_j (2r for a scalar) at any time.
+    Polygon footprints (``ConvexPolygon`` / heading-aligned ``AlignedShape``
+    values, see ``RadiusSpec``) collide when the relative position enters the
+    combined polygon; aligned ones are rotated to the heading held on each
+    segment (``heading`` keys in the schedule, else carried from the moves).
 
     Returns
     -------
@@ -98,6 +162,35 @@ def check_collision(solution, r: RadiusSpec, verbose: bool = True):
     agent_names = list(agents.keys())
     no_collision = True
     collisions = {}
+    # Per-point headings (the orientation held from that point to the next).
+    aligned_names = {
+        name for name in agent_names if isinstance(_footprint_for(r, name), AlignedShape)
+    }
+    headings = {name: schedule_headings(agents[name]) for name in aligned_names}
+    pair_cache = {}
+
+    def get_heading(name, traj, t):
+        """Heading of ``name`` on the segment that starts at or before ``t``;
+        ``None`` (envelope footprint) while the agent rotates in place
+        (``turn_to`` key on the segment's start point)."""
+        if name not in headings:
+            return None
+        hs = headings[name]
+        n = len(traj)
+        k = 0
+        while k + 1 < n and traj[k + 1]["t"] <= t:
+            k += 1
+        if k + 1 < n and traj[k].get("turn_to") is not None:
+            return None
+        return hs[k]
+
+    def pair_footprint(name_i, name_j, h_i, h_j):
+        key = (name_i, name_j, h_i, h_j)
+        fp = pair_cache.get(key)
+        if fp is None:
+            fp = _pair_footprint(r, name_i, name_j, h_i, h_j)
+            pair_cache[key] = fp
+        return fp
 
     def get_pos(traj, t):
         """Linear interpolation for position at time t along a trajectory."""
@@ -130,7 +223,9 @@ def check_collision(solution, r: RadiusSpec, verbose: bool = True):
 
             pair_key = (name_i, name_j)
             pair_intervals = []
-            collision_radius_sq = (_radius_for(r, name_i) + _radius_for(r, name_j)) ** 2
+            oriented = name_i in aligned_names or name_j in aligned_names
+            collision_radius, pair_polygon = pair_footprint(name_i, name_j, None, None)
+            collision_radius_sq = None if pair_polygon is not None else collision_radius ** 2
 
             # Collect all unique time breakpoints from both trajectories
             times_i = [p["t"] for p in traj_i]
@@ -145,6 +240,13 @@ def check_collision(solution, r: RadiusSpec, verbose: bool = True):
                 duration = t_end - t_start
                 if duration <= 0:
                     continue
+
+                if oriented:
+                    # Footprints rotated to the headings held on this slice.
+                    collision_radius, pair_polygon = pair_footprint(
+                        name_i, name_j, get_heading(name_i, traj_i, t_start), get_heading(name_j, traj_j, t_start)
+                    )
+                    collision_radius_sq = None if pair_polygon is not None else collision_radius ** 2
 
                 # Positions and velocities over this slice
                 p_i_start = get_pos(traj_i, t_start)
@@ -163,7 +265,18 @@ def check_collision(solution, r: RadiusSpec, verbose: bool = True):
                 # Solve for times in [0, duration] where distance^2(t) <= collision_radius_sq
                 # i.e. a t^2 + b t + (c - collision_radius_sq) <= 0
                 eps = 1e-9
-                if a < eps:
+                if pair_polygon is not None:
+                    # Polygon pair: relative position strictly inside P_i (+) (-P_j).
+                    t_lo, t_hi, hit = moving_point_interval(
+                        P_rel.reshape(1, -1), V_rel, pair_polygon.normals, pair_polygon.offsets,
+                        duration, exit_slack=0.0,
+                    )
+                    if not hit[0]:
+                        continue
+                    local_start, local_end = float(t_lo[0]), float(t_hi[0])
+                    if local_start >= local_end - eps:
+                        continue
+                elif a < eps:
                     # Relative velocity ~ 0: distance approximately constant over this slice.
                     if c + eps < collision_radius_sq:
                         # Entire local interval is colliding.
@@ -256,6 +369,7 @@ def check_solution_full(
     is_using_constant_speed: bool = False,
     verbose: bool = True,
     velocity: VelocitySpec = None,
+    speed_zones=None,
 ):
     """
     Run all anomaly checks (time, velocity, collision) in one call.
@@ -286,6 +400,7 @@ def check_solution_full(
         is_using_constant_speed=is_using_constant_speed,
         verbose=verbose,
         velocity=velocity,
+        speed_zones=speed_zones,
     )
     collisions = check_collision(solution, r, verbose=verbose)
 

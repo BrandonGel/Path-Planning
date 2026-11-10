@@ -4,6 +4,7 @@ from typing import Any
 import python_motion_planning as pmp
 from python_motion_planning.common import Grid, TYPES
 from path_planning.common.environment.map.graph_sampler import GraphSampler
+from path_planning.utils.agent_shape import AlignedShape, ConvexPolygon, Disc, heading_key, shape_from_spec
 import numpy as np
 import yaml
 import os
@@ -273,6 +274,11 @@ def read_graph_sampler_from_yaml(filename: str,use_discrete_space: bool = True,g
             env.load_graph_sampler(graph_file, args=args)
         else:
             print(f"Graph file {graph_file} not found")
+    # ``map.speed_zones``: world-frame rectangles with a speed limit (the YAML wins
+    # over whatever a graph pickle carried).
+    zones = yaml_data.get("map", {}).get("speed_zones")
+    if zones:
+        env.set_speed_zones(zones)
     return env
 
 def read_map_from_yaml(filename: str):
@@ -351,6 +357,18 @@ def _coord_to_tuple(v, *, as_int: bool) -> tuple:
 # ---------------------------------------------------------------------------
 AGENT_RADIUS_KEY = "radius"
 AGENT_VELOCITY_KEY = "velocity"
+# Optional per-agent footprint (see ``path_planning.utils.agent_shape.shape_from_spec``):
+# a rectangle / regular polygon makes the sweep backends use the exact
+# convex-polygon sweep for that agent (heading-aligned by default, ``align:
+# false`` for a world-fixed polygon); agents without it stay discs of ``radius``.
+AGENT_SHAPE_KEY = "shape"
+# Optional kinematics: ``turning_speed`` (rad/s; absent = turns are instantaneous)
+# makes SIPP rotate the agent in place (shortest arc) before it departs along an
+# edge it is not facing; ``heading`` (radians, or ``heading_deg``) is its orientation
+# at t=0 (default 0 = +x). Zones never limit turning.
+AGENT_TURNING_SPEED_KEY = "turning_speed"
+AGENT_HEADING_KEY = "heading"
+AGENT_HEADING_DEG_KEY = "heading_deg"
 
 
 def _agent_name(agent: dict, index: int) -> str:
@@ -358,15 +376,85 @@ def _agent_name(agent: dict, index: int) -> str:
 
 
 def agent_radius_of(agent: dict, default: float = 0.0) -> float:
-    """Per-agent ``radius`` when present (and not None), else ``default``."""
+    """Per-agent ``radius`` when present (and not None); otherwise the bounding
+    radius of the agent's polygon ``shape`` when it has one (conservative disc,
+    used for obstacle inflation and the scalar planner radius); else ``default``."""
     r = agent.get(AGENT_RADIUS_KEY)
-    return float(default) if r is None else float(r)
+    if r is None:
+        shape = agent_shape_of(agent)
+        if isinstance(shape, (ConvexPolygon, AlignedShape)):
+            return float(shape.bounding_radius)
+        return float(default)
+    return float(r)
+
+
+def agent_shape_of(agent: dict, default=None):
+    """Per-agent footprint (``Disc`` / ``ConvexPolygon``) parsed from the ``shape``
+    key, else ``default`` (``None`` means "a disc of the agent's radius")."""
+    spec = agent.get(AGENT_SHAPE_KEY)
+    if spec is None:
+        return default
+    return shape_from_spec(spec, default_radius=agent.get(AGENT_RADIUS_KEY))
+
+
+def agent_shapes_dict(agents: Sequence[dict]) -> Dict[str, ConvexPolygon | AlignedShape]:
+    """``{agent name: ConvexPolygon | AlignedShape}`` for the agents with a polygon
+    footprint (disc-shaped agents are omitted: their ``radius`` describes them)."""
+    out: Dict[str, ConvexPolygon | AlignedShape] = {}
+    for i, a in enumerate(agents):
+        shape = agent_shape_of(a)
+        if isinstance(shape, (ConvexPolygon, AlignedShape)):
+            out[_agent_name(a, i)] = shape
+    return out
+
+
+def agent_footprints_dict(agents: Sequence[dict], default_radius: float = 0.0) -> Dict[str, object]:
+    """``{agent name: ConvexPolygon | AlignedShape | radius}`` -- the per-agent spec
+    accepted by ``checker.check_collision`` and ``Visualizer2D.animate(radius=...)``."""
+    shapes = agent_shapes_dict(agents)
+    radii = agent_radii_dict(agents, default_radius)
+    return {name: shapes.get(name, radii[name]) for name in radii}
 
 
 def agent_velocity_of(agent: dict, default: float = 0.0) -> float:
     """Per-agent ``velocity`` when present (and not None), else ``default``."""
     v = agent.get(AGENT_VELOCITY_KEY)
     return float(default) if v is None else float(v)
+
+
+def agent_turning_speed_of(agent: dict, default=None):
+    """Per-agent ``turning_speed`` (rad/s) when present and > 0, else ``default``
+    (``None`` = instantaneous turns)."""
+    w = agent.get(AGENT_TURNING_SPEED_KEY)
+    if w is None:
+        return default
+    w = float(w)
+    return w if w > 0.0 and math.isfinite(w) else default
+
+
+def agent_heading_of(agent: dict, default: float = 0.0) -> float:
+    """Initial heading of the agent in radians (``heading`` or ``heading_deg`` key)."""
+    if agent.get(AGENT_HEADING_KEY) is not None:
+        return heading_key(float(agent[AGENT_HEADING_KEY]))
+    if agent.get(AGENT_HEADING_DEG_KEY) is not None:
+        return heading_key(math.radians(float(agent[AGENT_HEADING_DEG_KEY])))
+    return heading_key(float(default))
+
+
+def agent_turning_speeds_dict(agents: Sequence[dict], default=None) -> Dict[str, float]:
+    """``{agent name: turning speed}`` for the agents that turn at a finite speed
+    (``default`` applies to agents without a key; ``None`` entries are omitted)."""
+    out: Dict[str, float] = {}
+    for i, a in enumerate(agents):
+        w = agent_turning_speed_of(a, default)
+        if w is not None:
+            out[_agent_name(a, i)] = float(w)
+    return out
+
+
+def agent_headings_dict(agents: Sequence[dict], default: float = 0.0) -> Dict[str, float]:
+    """``{agent name: initial heading}`` (radians, ``heading_key``-canonical)."""
+    return {_agent_name(a, i): agent_heading_of(a, default) for i, a in enumerate(agents)}
 
 
 def max_agent_radius(agents: Sequence[dict], default: float = 0.0) -> float:
@@ -397,7 +485,9 @@ def is_heterogeneous(values: Mapping[str, float], tol: float = 1e-12) -> bool:
 
 
 def normalize_agent_specs(agents: Sequence[dict]) -> List[dict]:
-    """Copies of ``agents`` with ``radius`` / ``velocity`` coerced to float.
+    """Copies of ``agents`` with ``radius`` / ``velocity`` coerced to float and
+    ``shape`` parsed into a ``Disc`` / ``ConvexPolygon`` / ``AlignedShape`` (a disc
+    shape is folded into ``radius`` and dropped).
 
     ``None`` values are dropped (so the scalar fallback applies) and negative
     values raise ``ValueError``. All other keys are passed through untouched.
@@ -405,7 +495,17 @@ def normalize_agent_specs(agents: Sequence[dict]) -> List[dict]:
     out: List[dict] = []
     for i, a in enumerate(agents or []):
         b = dict(a)
-        for key in (AGENT_RADIUS_KEY, AGENT_VELOCITY_KEY):
+        if AGENT_SHAPE_KEY in b:
+            if b[AGENT_SHAPE_KEY] is None:
+                del b[AGENT_SHAPE_KEY]
+            else:
+                shape = shape_from_spec(b[AGENT_SHAPE_KEY], default_radius=b.get(AGENT_RADIUS_KEY))
+                if isinstance(shape, Disc):
+                    del b[AGENT_SHAPE_KEY]
+                    b.setdefault(AGENT_RADIUS_KEY, shape.radius)
+                else:
+                    b[AGENT_SHAPE_KEY] = shape
+        for key in (AGENT_RADIUS_KEY, AGENT_VELOCITY_KEY, AGENT_TURNING_SPEED_KEY):
             if key not in b:
                 continue
             if b[key] is None:
@@ -415,6 +515,15 @@ def normalize_agent_specs(agents: Sequence[dict]) -> List[dict]:
             if val < 0.0:
                 raise ValueError(f"agent {_agent_name(a, i)!r}: {key} must be non-negative, got {val}")
             b[key] = val
+        if AGENT_HEADING_DEG_KEY in b:
+            deg = b.pop(AGENT_HEADING_DEG_KEY)
+            if deg is not None and b.get(AGENT_HEADING_KEY) is None:
+                b[AGENT_HEADING_KEY] = heading_key(math.radians(float(deg)))
+        if AGENT_HEADING_KEY in b:
+            if b[AGENT_HEADING_KEY] is None:
+                del b[AGENT_HEADING_KEY]
+            else:
+                b[AGENT_HEADING_KEY] = heading_key(float(b[AGENT_HEADING_KEY]))
         out.append(b)
     return out
 

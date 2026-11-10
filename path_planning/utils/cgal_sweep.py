@@ -11,9 +11,21 @@ import numpy as np
 from scipy.spatial import KDTree
 from rtree import index
 
+from path_planning.utils.agent_shape import AlignedClearance, ConvexPolygon, Disc
+from path_planning.utils.polygon_sweep import PolygonSweepMixin
 
-class CGAL_Sweep:
-    """Spatial sweep queries against roadmap vertices/edges using CGAL primitives."""
+
+class CGAL_Sweep(PolygonSweepMixin):
+    """Spatial sweep queries against roadmap vertices/edges using CGAL primitives.
+
+    ``r`` is the combined clearance of the two agents: a float (or ``Disc``)
+    selects the disc/sphere sweep implemented here (2D and 3D); a
+    ``ConvexPolygon`` (``agent_shape.regular_polygon`` / ``rectangle``,
+    combined with ``agent_shape.pair_clearance``) selects the exact
+    convex-polygon sweep from ``PolygonSweepMixin`` (2D only). Only the
+    candidate lookup (``_region_candidates``: vertex KD-tree ball + edge R-tree
+    box) is backend-specific there.
+    """
 
     def __init__(self, record_sweep: bool = True, use_exact_collision_check: bool = True):
         self.reset()
@@ -133,7 +145,7 @@ class CGAL_Sweep:
             self.vertices.append(p_pt)
 
         # Build KDTree for vertex queries
-        self.vertex_positions = np.array([list(v) for v in vertices])
+        self.vertex_positions = np.array([list(v) for v in vertices], dtype=float)
         self.vertex_kdtree = KDTree(self.vertex_positions)
 
         # Deduplicate undirected edges: index geometry once, expand to every
@@ -361,6 +373,18 @@ class CGAL_Sweep:
             query_max[2],
         )
 
+    def _region_candidates(self, region: ConvexPolygon):
+        """Candidate vertices / edges for a convex 2D ``region``: vertex KD-tree
+        ball around the region's bounding circle and edge R-tree box query (the
+        mixin applies the strict exact test afterwards)."""
+        pts = region.points
+        min_x, min_y, max_x, max_y = region.bbox
+        center = np.array([0.5 * (min_x + max_x), 0.5 * (min_y + max_y)])
+        radius = float(np.max(np.linalg.norm(pts - center, axis=1)))
+        vert = np.asarray(self.vertex_kdtree.query_ball_point(center, radius + 1e-9), dtype=np.int64)
+        edge = np.fromiter(self.edge_rtree.intersection((min_x, min_y, max_x, max_y)), dtype=np.int64)
+        return vert, edge
+
     def _segment_spatial_hits(self, u, v, r):
         """Raw candidate hits ``(vertex_hits, edge_hits)`` for the capsule sweep u->v (u != v).
 
@@ -386,8 +410,18 @@ class CGAL_Sweep:
         return result
 
     def overlapping_graph_elements_cgal(
-        self, u: tuple[float, float], v: tuple[float, float], velocity: float = 0.0, r: float = 0.5
+        self,
+        u: tuple[float, float],
+        v: tuple[float, float],
+        velocity: float = 0.0,
+        r: float | Disc | ConvexPolygon | AlignedClearance = 0.5,
     ):
+        if isinstance(r, AlignedClearance):
+            return self._aligned_overlapping_graph_elements(u, v, velocity, r)
+        if isinstance(r, ConvexPolygon):
+            return self._polygon_overlapping_graph_elements(u, v, velocity, r)
+        if isinstance(r, Disc):
+            r = r.radius
         if self.record_sweep and (u, v, velocity, r) in self.overlapping_sweep:
             return self.overlapping_sweep[u, v, velocity, r]
 
@@ -549,9 +583,15 @@ class CGAL_Sweep:
         u: tuple[float, float],
         v: tuple[float, float],
         velocity: float = 0.0,
-        r: float = 0.5,
+        r: float | Disc | ConvexPolygon | AlignedClearance = 0.5,
         get_time_interval: bool = False,
     ):
+        if isinstance(r, AlignedClearance):
+            return self._aligned_overlapping_interval(u, v, velocity, r, get_time_interval)
+        if isinstance(r, ConvexPolygon):
+            return self._polygon_overlapping_interval(u, v, velocity, r, get_time_interval)
+        if isinstance(r, Disc):
+            r = r.radius
         if self.record_sweep and (u, v, velocity, r) in self.overlapping_interval_sweep:
             return self.overlapping_interval_sweep[u, v, velocity, r]
 
