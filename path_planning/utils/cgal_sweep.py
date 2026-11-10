@@ -470,8 +470,8 @@ class CGAL_Sweep(PolygonSweepMixin):
                 )
             ]
             if crossing_idxs:
-                crossing_src = np.array([self.edge_indices[i][0] for i in crossing_idxs], dtype=np.int64)
-                crossing_tgt = np.array([self.edge_indices[i][1] for i in crossing_idxs], dtype=np.int64)
+                crossing_src = np.array([self._edge_motion(i)[0] for i in crossing_idxs], dtype=np.int64)
+                crossing_tgt = np.array([self._edge_motion(i)[1] for i in crossing_idxs], dtype=np.int64)
                 a_pos = self.vertex_positions[crossing_src]
                 b_pos = self.vertex_positions[crossing_tgt]
 

@@ -166,6 +166,8 @@ class Visualizer2D(BaseVisualizer2D):
 
         if getattr(grid_map, "speed_zones", None):
             self.plot_speed_zones(grid_map)
+        if getattr(grid_map, "direction_zones", None):
+            self.plot_direction_zones(grid_map)
 
     def plot_speed_zones(self, grid_map, alpha: float = 0.28, color: str = "#ff7f0e", label: bool = True):
         """Shade the map's speed zones (``grid_map.speed_zones``, world-frame
@@ -180,6 +182,51 @@ class Visualizer2D(BaseVisualizer2D):
                 self.ax.text(0.5 * (z.x0 + z.x1), z.y1 - 0.15 * z.height, txt, ha="center", va="top",
                              fontsize=7, color="#7f3f00", zorder=self.zorder['grid_map'] + 1)
         
+    def plot_direction_zones(self, grid_map, alpha: float = 0.22, one_way_color: str = "#9467bd",
+                             angle_color: str = "#17becf", label: bool = True):
+        """Shade the map's direction zones (``grid_map.direction_zones``) just above
+        the obstacle grid. A one-way zone gets an arrow per allowed heading, an
+        angle zone a double-headed arrow per allowed line angle."""
+        import math
+        zones = getattr(grid_map, "direction_zones", None) or []
+        z_order = self.zorder['grid_map'] + 1
+        for z in zones:
+            color = angle_color if z.bidirectional else one_way_color
+            w, h = z.x1 - z.x0, z.y1 - z.y0
+            self.ax.add_patch(MplRectangle((z.x0, z.y0), w, h, facecolor=color, edgecolor=color,
+                                           alpha=alpha, linewidth=1.0, linestyle="--", zorder=z_order))
+            cx, cy = 0.5 * (z.x0 + z.x1), 0.5 * (z.y0 + z.y1)
+            for hd in z.headings_deg:
+                c, sn = math.cos(math.radians(hd)), math.sin(math.radians(hd))
+                # half-length that keeps the glyph inside the rectangle
+                half = 0.38 * min(w / max(abs(c), 1e-9), h / max(abs(sn), 1e-9))
+                half = min(half, 0.38 * max(w, h))
+                self.ax.annotate("", xy=(cx + half * c, cy + half * sn), xytext=(cx - half * c, cy - half * sn),
+                                 arrowprops=dict(arrowstyle="<|-|>" if z.bidirectional else "-|>", color=color,
+                                                 lw=2.0, alpha=0.75, mutation_scale=16),
+                                 zorder=z_order)
+            if label:
+                rule = ("angles " if z.bidirectional else "one-way ") + "/".join(f"{hd:g}\u00b0" for hd in z.headings_deg)
+                txt = rule if z.name is None else f"{z.name}: {rule}"
+                self.ax.text(cx, z.y1 - 0.06 * h, txt, ha="center", va="top", fontsize=7, color="#3b2a57",
+                             zorder=z_order)
+
+    def _plot_one_way_arrows(self, x_coords, y_coords, road_map, color: str = "#5b3a8c",
+                             alpha: float = 0.85, scale: float = 7.0):
+        """Arrowhead at the middle of every roadmap edge that exists in ONE direction
+        only (``j in road_map[i]`` but ``i not in road_map[j]``)."""
+        n = len(x_coords)
+        directed = {(i, int(j)) for i, nbrs in enumerate(road_map) for j in nbrs if int(j) < n}
+        for (i, j) in directed:
+            if (j, i) in directed:
+                continue
+            x1, y1, x2, y2 = x_coords[i], y_coords[i], x_coords[j], y_coords[j]
+            self.ax.annotate("", xy=(x1 + 0.62 * (x2 - x1), y1 + 0.62 * (y2 - y1)),
+                             xytext=(x1 + 0.38 * (x2 - x1), y1 + 0.38 * (y2 - y1)),
+                             arrowprops=dict(arrowstyle="-|>", color=color, lw=0.8, alpha=alpha,
+                                             mutation_scale=scale),
+                             zorder=self.zorder['road_map'] + 1)
+
     def plot_road_map(self,
                         map_: Grid,
                         nodes: List[Node],
@@ -237,6 +284,7 @@ class Visualizer2D(BaseVisualizer2D):
                     if edge_idx < len(x_coords):  # Safety check
                         x2, y2 = x_coords[edge_idx], y_coords[edge_idx]
                         self.ax.plot([x1, x2], [y1, y2], edge_color, linewidth=linewidth, alpha=edge_alpha, zorder=self.zorder['road_map'])
+            self._plot_one_way_arrows(x_coords, y_coords, road_map)
 
         # Collect special endpoints (start/goal/task endpoints). Waypoints that
         # coincide with one of these are NOT drawn as generic sample nodes; the
@@ -486,12 +534,14 @@ class Visualizer2D(BaseVisualizer2D):
                 _coords = np.array([n.current for n in _nodes], dtype=float)
                 for _i, _nbrs in enumerate(road_map):
                     for _j in _nbrs:
-                        if _j > _i and _j < len(_coords):
+                        # each undirected edge once; a one-way edge from its only side
+                        if _j < len(_coords) and (_j > _i or _i not in road_map[_j]):
                             self.ax.plot([_coords[_i,0],_coords[_j,0]],[_coords[_i,1],_coords[_j,1]],
                                          color="#e377c2", linewidth=0.5, alpha=0.3,
                                          zorder=self.zorder['road_map'])
                 self.ax.scatter(_coords[:,0], _coords[:,1], c="#8c564b", s=6,
                                 zorder=self.zorder['road_map'])
+                self._plot_one_way_arrows(_coords[:,0], _coords[:,1], road_map)
         if rack_pts is not None and len(rack_pts):
             _rp = np.asarray(rack_pts, dtype=float)
             self.ax.scatter(_rp[:,0], _rp[:,1], c="blue", marker="s", s=RACK_S,

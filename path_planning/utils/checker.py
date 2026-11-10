@@ -137,6 +137,43 @@ def check_velocity_anomaly(solution,is_using_constant_speed: bool = False,verbos
     return no_anomaly
 
 
+def check_direction_anomaly(solution, direction_zones, verbose: bool = True):
+    """Moves that break a direction zone (``DirectionZone`` list or YAML-style
+    dicts, see ``direction_zones.py``): driving a one-way region against its
+    heading, or an angle region at a forbidden angle.
+
+    Every moving segment of every agent's schedule is tested with the zones it
+    touches. Returns the list of violations
+    ``{"agent", "t", "from", "to", "heading_deg", "zone"}`` (empty = clean).
+    """
+    import math
+    from path_planning.common.environment.map.direction_zones import parse_direction_zones, violated_zone
+
+    zones = parse_direction_zones(direction_zones)
+    violations = []
+    if not zones:
+        return violations
+    for agent, path in solution.items():
+        for a, b in zip(path, path[1:]):
+            pa = (float(a["x"]), float(a["y"]))
+            pb = (float(b["x"]), float(b["y"]))
+            if math.dist(pa, pb) <= 1e-9:
+                continue
+            z = violated_zone(zones, pa, pb)
+            if z is None:
+                continue
+            item = {"agent": agent, "t": float(a["t"]), "from": pa, "to": pb,
+                    "heading_deg": math.degrees(math.atan2(pb[1] - pa[1], pb[0] - pa[0])) % 360.0,
+                    "zone": z.name if z.name is not None else z.to_spec()}
+            violations.append(item)
+            if verbose:
+                print(f"Direction violation: {agent} at t={item['t']:.3f} moves {pa} -> {pb} "
+                      f"(heading {item['heading_deg']:.1f} deg) in zone {item['zone']}")
+    if verbose and not violations:
+        print("No direction violation detected")
+    return violations
+
+
 def check_collision(solution, r: RadiusSpec, verbose: bool = True):
     """
     Check for collisions between all pairs of agents in a solution, and
@@ -370,9 +407,11 @@ def check_solution_full(
     verbose: bool = True,
     velocity: VelocitySpec = None,
     speed_zones=None,
+    direction_zones=None,
 ):
     """
-    Run all anomaly checks (time, velocity, collision) in one call.
+    Run all anomaly checks (time, velocity, collision, and direction zones when
+    ``direction_zones`` is given: key ``"direction_violations"``) in one call.
 
     Parameters
     ----------
@@ -404,8 +443,11 @@ def check_solution_full(
     )
     collisions = check_collision(solution, r, verbose=verbose)
 
-    return {
+    result = {
         "no_time_anomaly": no_time_anomaly,
         "no_velocity_anomaly": no_velocity_anomaly,
         "collisions": collisions,
     }
+    if direction_zones:
+        result["direction_violations"] = check_direction_anomaly(solution, direction_zones, verbose=verbose)
+    return result

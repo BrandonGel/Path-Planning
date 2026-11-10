@@ -714,7 +714,7 @@ class NeuralATTF:
         returned ``t_reach`` lets the caller shift the world by the time that move
         takes. Both endpoints of the edge are offered (nearest first) so the caller
         can fall back to the other one when the move to the nearest is not safe
-        (see :meth:`_reach_segment_safe`). Points already on a node (or off every
+        (see :meth:`_reach_segment_safe`); on a one-way edge only its target is. Points already on a node (or off every
         edge) snap as before with ``t_reach = 0``.
         """
         from path_planning.common.environment.node import Node
@@ -746,7 +746,10 @@ class NeuralATTF:
                 d_edge = float(np.linalg.norm(p - (a + s * ab)))
                 if d_edge > 1e-6:
                     continue
-                for end in (a, b):
+                # Driving back to ``a`` runs the edge in reverse: only offered when
+                # that direction exists (one-way edges, see direction zones).
+                ends = (a, b) if (int(j), i) in self.graph_map.edge_indices_dict else (b,)
+                for end in ends:
                     key = tuple(float(c) for c in end)
                     d_end = float(np.linalg.norm(p - end))
                     if key not in found or (d_edge, d_end) < found[key]:

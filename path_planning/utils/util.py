@@ -279,6 +279,11 @@ def read_graph_sampler_from_yaml(filename: str,use_discrete_space: bool = True,g
     zones = yaml_data.get("map", {}).get("speed_zones")
     if zones:
         env.set_speed_zones(zones)
+    # ``map.direction_zones``: rectangles whose edges are one-way or restricted to
+    # given angles (applied to the roadmap when it is generated or loaded).
+    dzones = yaml_data.get("map", {}).get("direction_zones")
+    if dzones:
+        env.set_direction_zones(dzones)
     return env
 
 def read_map_from_yaml(filename: str):

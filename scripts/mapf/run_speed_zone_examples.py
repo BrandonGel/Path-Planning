@@ -124,8 +124,9 @@ def draw_overview_panel(map_, road_map, sched, footprints, title, out_png):
     coords = np.array([n.current for n in map_.nodes], dtype=float)
     for i, nbrs in enumerate(road_map):
         for j in nbrs:
-            if j > i:
+            if j > i or i not in road_map[j]:  # each edge once; one-way edges from their only side
                 ax.plot(coords[[i, j], 0], coords[[i, j], 1], color="#cccccc", linewidth=0.3, zorder=20)
+    vis._plot_one_way_arrows(coords[:, 0], coords[:, 1], road_map)
     for k, (name, path) in enumerate(sched.items()):
         color = COLORS[k % len(COLORS)]
         xs = [p["x"] for p in path]

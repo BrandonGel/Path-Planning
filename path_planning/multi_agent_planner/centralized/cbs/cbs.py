@@ -196,19 +196,24 @@ class Environment(AgentParamsMixin):
     def _goal_distance_map(self, goal_idx: int):
         """Single-source Dijkstra from the goal over the roadmap.
 
-        Roadmap edges are bidirectional with symmetric costs, so distances from
-        the goal equal shortest-path costs to the goal from every node. Computed
+        The search runs over the REVERSE adjacency (``graph_map.predecessors()``),
+        so the distances are shortest-path costs TO the goal from every node, also
+        when some edges are one-way (direction zones) or the kNN roadmap is not
+        symmetric. Computed
         once per goal and cached; used as the exact (admissible, consistent)
         low-level A* heuristic.
         """
-        cached = self._goal_dist_maps.get(goal_idx)
+        cache_key = (goal_idx, getattr(self.graph_map, "direction_zones_version", 0))
+        cached = self._goal_dist_maps.get(cache_key)
         if cached is not None:
             return cached
         road_map = getattr(self.graph_map, "road_map", None)
         dist = {goal_idx: 0.0}
         if road_map is None or len(road_map) == 0:
-            self._goal_dist_maps[goal_idx] = dist
+            self._goal_dist_maps[cache_key] = dist
             return dist
+        if hasattr(self.graph_map, "predecessors"):
+            road_map = self.graph_map.predecessors()  # u in road_map[v]  <=>  edge u -> v
         heap = [(0.0, goal_idx)]
         seen = set()
         while heap:
@@ -222,7 +227,7 @@ class Environment(AgentParamsMixin):
                 if nd < dist.get(v, float("inf")):
                     dist[v] = nd
                     heapq.heappush(heap, (nd, v))
-        self._goal_dist_maps[goal_idx] = dist
+        self._goal_dist_maps[cache_key] = dist
         return dist
 
     def get_neighbors(self, state):

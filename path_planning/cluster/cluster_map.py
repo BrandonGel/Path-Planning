@@ -78,6 +78,12 @@ def _build_setup_sampler(source_map: GraphSampler) -> GraphSampler:
         fresh.set_obstacles(np.asarray(source_map.obstacles, dtype=np.int64))
     # ``inflation_radius`` is the APPLIED mask radius: copy it verbatim.
     fresh.set_inflation_radius(source_map.inflation_radius, use_expand=False)
+    # Zones are part of the world setup: speed limits and the direction rules
+    # (re-applied to the distilled edges when the roadmap is generated).
+    if getattr(source_map, "speed_zones", None):
+        fresh.set_speed_zones(source_map.speed_zones)
+    if getattr(source_map, "direction_zones", None):
+        fresh.set_direction_zones(source_map.direction_zones)
     fresh.requested_inflation_radius = float(
         getattr(source_map, "requested_inflation_radius", source_map.inflation_radius)
     )

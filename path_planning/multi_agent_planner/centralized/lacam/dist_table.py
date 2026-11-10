@@ -11,6 +11,7 @@ import numpy as np
 
 from path_planning.common.environment.map.graph_sampler import GraphSampler
 from path_planning.multi_agent_planner.centralized.lacam.utility import Coord,is_valid_coord,get_neighbors
+from path_planning.multi_agent_planner.centralized.lacam.utility import get_in_neighbors
 
 
 @dataclass
@@ -68,7 +69,8 @@ class DistTable:
         while len(self.Q) > 0:
             u = self.Q.popleft()
             d = int(self.table[u])
-            for v in get_neighbors(self.graph_map, u):
+            # backward search from the goal: expand the nodes that can step INTO u
+            for v in get_in_neighbors(self.graph_map, u):
                 if d + 1 < self.table[v]:
                     self.table[v] = d + 1
                     self.Q.append(v)
