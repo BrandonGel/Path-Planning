@@ -53,7 +53,7 @@ def load_and_visualize_case(perm_path: Path,graph_file: Path = None,mapf_solver_
     map_.set_start(start)
     map_.set_goal(goal)
 
-    n_obstacles = len(map_.obstacles) if getattr(map_, "obstacles", None) else 0
+    n_obstacles = len(map_.obstacles) if getattr(map_, "obstacles", None) is not None else 0
 
     # Print case info
     if verbose:
