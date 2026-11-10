@@ -202,6 +202,21 @@ def get_neighbors(graph_map: GraphSampler, coord: Coord) -> list[Coord]:
     return neigh
 
 
+def get_in_neighbors(graph_map: GraphSampler, coord: Coord) -> list[Coord]:
+    """Coordinates with a roadmap edge INTO ``coord``.
+
+    Equal to :func:`get_neighbors` on a bidirectional roadmap; with one-way edges
+    (direction zones) a search "towards a goal" must expand these instead.
+    """
+    neigh: list[Coord] = []
+    if not is_valid_coord(graph_map, coord):
+        return neigh
+    for node in graph_map.get_neighbors(Node(tuple[Any, ...](coord)), incoming=True):
+        if is_valid_coord(graph_map, node.current):
+            neigh.append(tuple(int(pt) for pt in node.current))
+    return neigh
+
+
 def save_configs_for_visualizer(configs: Configs, filename: str | Path) -> None:
     """Save solution configurations to a file for visualization tools.
 

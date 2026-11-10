@@ -307,6 +307,7 @@ def summarize_solution(solution,solution_info,mapf_solver_config,map_,agents=Non
         summary["agent_turning_speeds"] = agent_turning_speeds_dict(agents, mapf_solver_config.get("agent_turning_speed"))
         summary["agent_headings"] = agent_headings_dict(agents)
     summary["speed_zones"] = [z.to_spec() for z in (getattr(map_, "speed_zones", []) or [])]
+    summary["direction_zones"] = [z.to_spec() for z in (getattr(map_, "direction_zones", []) or [])]
     summary["time_limit"] = mapf_solver_config["time_limit"]
     summary["max_iterations"] = mapf_solver_config["max_iterations"]
     summary["heuristic_type"] = mapf_solver_config["heuristic_type"]

@@ -112,6 +112,8 @@ class PIBT:
                 swap_agent != self.NIL
                 and Q_to[swap_agent] == self.NIL_COORD
                 and self.occupied_nxt[v_from] == self.NIL
+                # one-way edges (direction zones): the pull must be a real move
+                and v_from in get_neighbors(self.graph_map, Q_from[swap_agent])
             ):
                 self.occupied_nxt[v_from] = swap_agent
                 Q_to[swap_agent] = v_from

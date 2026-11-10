@@ -12,6 +12,9 @@ from python_motion_planning.common import TYPES
 from path_planning.utils.cgal_sweep import CGAL_Sweep
 from path_planning.utils.agent_shape import AlignedClearance, ConvexPolygon, Disc, heading_of, moving_point_interval
 from path_planning.common.environment.map.speed_zones import SpeedZone, parse_speed_zones, segment_speed_limit, zones_to_specs
+from path_planning.common.environment.map.direction_zones import (
+    DirectionZone, direction_zones_to_specs, parse_direction_zones, segment_allowed,
+)
 from path_planning.common.environment.map.cdt import get_boundary, get_planar_graph
 from path_planning.global_planner.sample_search.rrg import RRG
 import faiss
@@ -66,6 +69,15 @@ class GraphSampler(Grid):
         self.speed_zones: list[SpeedZone] = []
         self.speed_zones_version = 0
         self._edge_speed_cache = {}
+        # Direction zones (see direction_zones.py): world-frame rectangles that make
+        # the edges touching them one-way or restrict them to given angles. They
+        # filter ``road_map`` (lists of OUTGOING neighbours); the unfiltered
+        # adjacency is kept so zones can be replaced or cleared.
+        self.direction_zones: list[DirectionZone] = []
+        self.direction_zones_version = 0
+        self._road_map_full = None
+        self._road_map_edge_weights_full = None
+        self._predecessors_cache = None
         self.node_index_dict = {}
         self.start_nodes_index = {}
         self.goal_nodes_index = {}
@@ -254,7 +266,11 @@ class GraphSampler(Grid):
             raise ValueError("Edges have not been generated yet. Please generate the roadmap first.")
         u_indices = [self.goal_nodes_index[node] for node in self.get_goal_nodes()]
         if self.use_dijkstra:
-            self.goal_to_all_edges_dict = {u: self._dijkstra(u) for u in u_indices}
+            # With one-way edges the cost of reaching the goal FROM each node needs the
+            # reverse adjacency; without direction zones the historical forward search
+            # is kept (bit-identical dataset features).
+            search = self._dijkstra_to if self.direction_zones else self._dijkstra
+            self.goal_to_all_edges_dict = {u: search(u) for u in u_indices}
         else:
             self.goal_to_all_edges_dict = {u: [(v,self.get_cost(self.nodes[u],self.nodes[v])) for v in range(len(self.nodes))] for u in u_indices}
         return self.goal_to_all_edges_dict
@@ -330,6 +346,114 @@ class GraphSampler(Grid):
             return v_max
         return min(v_max, self.edge_speed_limit(p1, p2))
 
+    # -------------------------------------------------------------- direction zones
+
+    def _finalize_roadmap(self, road_map, edge_weights, nodes=None):
+        """Common tail of every roadmap builder / loader: remember the unfiltered
+        adjacency, apply the direction zones and derive the edge tables. Returns
+        the (filtered) ``road_map``."""
+        self._road_map_full = road_map
+        self._road_map_edge_weights_full = edge_weights
+        self._apply_direction_zones(nodes)
+        return self.road_map
+
+    def _apply_direction_zones(self, nodes=None) -> None:
+        """Filter the full adjacency with ``direction_zones`` into ``road_map`` /
+        ``road_map_edge_weights`` (index-aligned), then rebuild ``edges``,
+        ``edge_indices_dict``, ``edge_weights`` and drop the caches derived from
+        the adjacency. Without zones the full adjacency is used as is."""
+        full, full_w = self._road_map_full, self._road_map_edge_weights_full
+        zones = getattr(self, "direction_zones", None)
+        if not zones or not full:
+            road_map, weights = full, full_w
+        else:
+            nodes = self.nodes if nodes is None else nodes
+            pts = [tuple(float(c) for c in n.current) for n in nodes]
+            road_map, weights = [], []
+            for i, nbrs in enumerate(full):
+                keep = [k for k, j in enumerate(nbrs) if segment_allowed(zones, pts[i], pts[j])]
+                road_map.append([nbrs[k] for k in keep])
+                weights.append([full_w[i][k] for k in keep] if full_w is not None else [])
+        self.road_map = road_map
+        self.road_map_edge_weights = weights
+        self.edges, self.edge_indices_dict, self.edge_weights = self.calculate_edges(road_map, weights)
+        self.start_to_all_edges_dict = {}
+        self.goal_to_all_edges_dict = {}
+        self._predecessors_cache = None
+
+    def set_direction_zones(self, zones) -> None:
+        """Replace the map's direction zones (``DirectionZone``s or YAML-style dicts,
+        see ``direction_zones.parse_direction_zone``) and re-filter the roadmap from
+        its unfiltered adjacency. Bumps ``direction_zones_version`` (planners key
+        their adjacency-derived caches on it) and rebinds the constraint sweep."""
+        self.direction_zones = parse_direction_zones(zones)
+        self.direction_zones_version = getattr(self, "direction_zones_version", 0) + 1
+        if self._road_map_full is None:
+            return  # roadmap not generated yet: applied by _finalize_roadmap
+        self._apply_direction_zones()
+        if getattr(self, "_constraint_sweep_signature", None) is not None:
+            self.set_constraint_sweep()
+        self._warn_direction_dead_ends()
+
+    def _warn_direction_dead_ends(self) -> None:
+        """Warn when direction zones leave a start without an outgoing edge or a
+        goal without an incoming edge (the instance is then unsolvable)."""
+        if not self.direction_zones or not self.road_map:
+            return
+        pred = self.predecessors()
+        full = self._road_map_full
+        for kind, index in (("start", self.start_nodes_index), ("goal", self.goal_nodes_index)):
+            for node, i in index.items():
+                if i >= len(self.road_map) or not full[i]:
+                    continue
+                if kind == "start" and not self.road_map[i]:
+                    print(f"Warning: direction zones leave start {tuple(node.current)} without an outgoing edge.")
+                if kind == "goal" and not pred[i]:
+                    print(f"Warning: direction zones leave goal {tuple(node.current)} without an incoming edge.")
+
+    def edge_allowed(self, p1, p2) -> bool:
+        """Directed motion ``p1 -> p2`` satisfies every direction zone it touches."""
+        return segment_allowed(self.direction_zones, p1, p2) if self.direction_zones else True
+
+    def predecessors(self) -> List[List[int]]:
+        """Reverse adjacency: ``predecessors()[v]`` lists every ``u`` with ``v`` in
+        ``road_map[u]``. Cached until the roadmap or the zones change. Searches
+        "to a goal" (goal distance maps) must run over this, not ``road_map``."""
+        cache = self._predecessors_cache
+        if cache is not None and cache[0] is self.road_map:
+            return cache[1]
+        pred = [[] for _ in range(len(self.road_map))]
+        for u, nbrs in enumerate(self.road_map):
+            for v in nbrs:
+                pred[v].append(u)
+        self._predecessors_cache = (self.road_map, pred)
+        return pred
+
+    def is_bidirectional(self, u: int, v: int) -> bool:
+        """Both ``u -> v`` and ``v -> u`` are roadmap edges."""
+        d = self.edge_indices_dict
+        return (u, v) in d and (v, u) in d
+
+    def _dijkstra_to(self, target: int) -> List[Tuple[int, float]]:
+        """``(v, cost of the cheapest v -> target route)`` for every node that can
+        reach ``target`` (Dijkstra over the reverse adjacency)."""
+        pred = self.predecessors()
+        dist = {target: 0.0}
+        heap = [(0.0, target)]
+        while heap:
+            d, u = heapq.heappop(heap)
+            if d > dist.get(u, float("inf")):
+                continue
+            for v in pred[u]:
+                idx = self.edge_indices_dict.get((v, u))
+                if idx is None:
+                    continue
+                nd = d + self.edge_weights[idx]
+                if nd < dist.get(v, float("inf")):
+                    dist[v] = nd
+                    heapq.heappush(heap, (nd, v))
+        return [(v, dist[v]) for v in sorted(dist)]
+
     def get_cost(self, p1_node: tuple, p2_node: tuple) -> float:
         """
         Get the cost between two nodes. (default: distance defined in the map)
@@ -368,6 +492,9 @@ class GraphSampler(Grid):
                 idx = None
         if idx is None:
             return []
+        if kwargs.get("incoming", False):
+            # nodes with an edge INTO ``node`` (same set on a bidirectional roadmap)
+            return [self.nodes[i] for i in self.predecessors()[int(idx)]]
         neighbors = [self.nodes[i] for i in self.road_map[int(idx)]]
         if self.track_with_link:
             neighbors = [neighbor.link(node) for neighbor in neighbors]
@@ -899,10 +1026,7 @@ class GraphSampler(Grid):
             road_map.append(edge_id)
             edge_weights.append(edge_weight)
 
-        self.road_map = road_map
-        self.road_map_edge_weights = edge_weights
-        self.edges, self.edge_indices_dict, self.edge_weights = self.calculate_edges(road_map, edge_weights)
-        return road_map
+        return self._finalize_roadmap(road_map, edge_weights, samples)
 
     def generate_planar_map(self, samples: List[Node], use_option: str = 'cdt'):
         """Build a planar roadmap from CDT over obstacles or from sample-point Delaunay (`dt`)."""
@@ -959,12 +1083,7 @@ class GraphSampler(Grid):
             self.nodes = samples
             self.num_total_nodes = n
             self.cost_matrix = cdist(pts, pts, metric='euclidean')
-            self.road_map = planar_map
-            self.road_map_edge_weights = edge_weights
-            self.edges, self.edge_indices_dict, self.edge_weights = self.calculate_edges(
-                planar_map, edge_weights
-            )
-            return planar_map
+            return self._finalize_roadmap(planar_map, edge_weights)
 
         nodes = []
         mask = (self.type_map.data == TYPES.OBSTACLE) | (self.type_map.data == TYPES.INFLATION)
@@ -1024,10 +1143,7 @@ class GraphSampler(Grid):
                 edge_weights[ii].append(w)
         planar_map = filtered_map
 
-        self.road_map = planar_map
-        self.road_map_edge_weights = edge_weights
-        self.edges, self.edge_indices_dict,self.edge_weights  = self.calculate_edges(planar_map,edge_weights)
-        return planar_map
+        return self._finalize_roadmap(planar_map, edge_weights)
 
     def generate_rrg(self, samples: List[Node]):
         # Re-register the nodes after applying constrained delaunay triangulation
@@ -1148,10 +1264,7 @@ class GraphSampler(Grid):
         self.num_total_nodes = len(nodes)
         self.cost_matrix = cdist(np.array([node.current for node in nodes]), np.array([node.current for node in nodes]), metric='euclidean')
         self.nodes = nodes
-        self.road_map = road_map
-        self.road_map_edge_weights = edge_weights
-        self.edges, self.edge_indices_dict,self.edge_weights  = self.calculate_edges(road_map,edge_weights)
-        return road_map
+        return self._finalize_roadmap(road_map, edge_weights)
 
     def generate_custom_nodes(self,points: List[int],filter_points: bool = True):
         # filter_points=False keeps every point (preserving the caller's edge
@@ -1219,10 +1332,7 @@ class GraphSampler(Grid):
             edge_weights[s_idx].append(e_weight)
             edge_weights[n_idx].append(e_weight)
 
-        self.road_map = road_map
-        self.road_map_edge_weights = edge_weights
-        self.edges, self.edge_indices_dict,self.edge_weights  = self.calculate_edges(road_map,edge_weights)
-        return road_map
+        return self._finalize_roadmap(road_map, edge_weights)
 
     def _make_constraint_sweep(self):
         """Build the spatial-sweep backend.
@@ -1448,6 +1558,9 @@ class GraphSampler(Grid):
 
     def clear_data(self):
         self.road_map = []
+        self._road_map_full = None
+        self._road_map_edge_weights_full = None
+        self._predecessors_cache = None
         self.edges = []
         self.edge_indices_dict = {}
         self.edge_weights = []
@@ -1490,12 +1603,17 @@ class GraphSampler(Grid):
             "track_with_link": self.track_with_link,
             "road_map": self.road_map,
             "road_map_edge_weights": self.road_map_edge_weights,
+            # unfiltered adjacency, only when direction zones removed edges
+            **({"road_map_full": self._road_map_full,
+                "road_map_edge_weights_full": self._road_map_edge_weights_full}
+               if self.direction_zones and self._road_map_full is not None else {}),
             "use_constraint_sweep": self.use_constraint_sweep,
             "record_sweep": self.record_sweep,
             "use_exact_collision_check": self.use_exact_collision_check,
             "sweep_backend": getattr(self, "sweep_backend", "cgal"),
             "sampling_dist_dict": self.sampling_dist_dict,
             "speed_zones": zones_to_specs(self.speed_zones),
+            "direction_zones": direction_zones_to_specs(self.direction_zones),
         }
 
         with open(path, 'wb') as f:
@@ -1539,9 +1657,12 @@ class GraphSampler(Grid):
         self._rebuild_boundary_nodes_index()
 
         # Calculate edges (must happen before get_start/goal_nodes_with_all_edges)
-        self.road_map = data["road_map"]
-        self.road_map_edge_weights = data["road_map_edge_weights"]
-        self.edges, self.edge_indices_dict, self.edge_weights = self.calculate_edges(self.road_map, self.road_map_edge_weights)
+        # A pickle saved with direction zones also carries the unfiltered adjacency,
+        # so the zones can still be replaced or cleared after a reload.
+        self.direction_zones = parse_direction_zones(data.get("direction_zones", []))
+        self.direction_zones_version = getattr(self, "direction_zones_version", 0) + 1
+        self._finalize_roadmap(data.get("road_map_full", data["road_map"]),
+                               data.get("road_map_edge_weights_full", data["road_map_edge_weights"]))
         self.get_start_nodes_with_all_edges()
         self.get_goal_nodes_with_all_edges()
 
@@ -1578,6 +1699,8 @@ class GraphSampler(Grid):
         """
         if getattr(self, "speed_zones", None):
             raise NotImplementedError("rotate() does not rotate speed zones yet; clear them first.")
+        if getattr(self, "direction_zones", None):
+            raise NotImplementedError("rotate() does not rotate direction zones yet; clear them first.")
         a, b = int(axes[0]), int(axes[1])
         if a == b or not (0 <= a < self.dim) or not (0 <= b < self.dim):
             raise ValueError(
@@ -1778,6 +1901,7 @@ class GraphSampler(Grid):
             "sweep_backend": getattr(self, "sweep_backend", "cgal"),
             "sampling_dist_dict": self.sampling_dist_dict,
             "speed_zones": zones_to_specs(self.speed_zones),
+            "direction_zones": direction_zones_to_specs(self.direction_zones),
         }
 
         # Create a new GraphSampler instance with the same geometric configuration

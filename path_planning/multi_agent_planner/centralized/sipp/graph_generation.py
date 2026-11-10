@@ -586,6 +586,18 @@ class SippGraph(AgentParamsMixin):
             neighbors.append(node.current)
         return neighbors
 
+    def get_in_neighbours(self, position):
+        """Positions with a roadmap edge INTO ``position`` (equal to
+        get_valid_neighbours on a bidirectional roadmap)."""
+        gm = self.graph_map
+        idx = getattr(gm, "node_index_dict", {}).get(Node(tuple(position)))
+        if idx is None or not hasattr(gm, "predecessors"):
+            return []
+        pred = gm.predecessors()
+        if idx >= len(pred):
+            return []
+        return [gm.nodes[u].current for u in pred[idx]]
+
     def _get_constraint_sweep_cached(self, p1, p2,v, r):
         """Memoized ``get_constraint_sweep`` (interval form); see
         :func:`cached_constraint_sweep`."""

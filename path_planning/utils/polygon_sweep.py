@@ -80,6 +80,16 @@ class PolygonSweepMixin:
     #   _expand_directed_pairs / _expand_directed_intervals /
     #   convert_bidirectional_interval.
 
+    def _edge_motion(self, edge_idx: int):
+        """``(src, tgt)`` the element agent is modelled to drive on a spatially hit
+        edge in the exact velocity refinement. A bidirectional edge keeps the
+        canonical (min -> max) motion for both of its directed keys; a ONE-WAY edge
+        (direction zones) uses the only direction that exists."""
+        directed = self.edge_directed_map[int(edge_idx)]
+        if len(directed) == 1:
+            return directed[0]
+        return self.edge_indices[int(edge_idx)]
+
     def _region_candidates(self, region: ConvexPolygon):  # pragma: no cover - abstract
         raise NotImplementedError
 
@@ -228,8 +238,8 @@ class PolygonSweepMixin:
                 )
             ]
             if crossing_idxs:
-                crossing_src = np.array([self.edge_indices[i][0] for i in crossing_idxs], dtype=np.int64)
-                crossing_tgt = np.array([self.edge_indices[i][1] for i in crossing_idxs], dtype=np.int64)
+                crossing_src = np.array([self._edge_motion(i)[0] for i in crossing_idxs], dtype=np.int64)
+                crossing_tgt = np.array([self._edge_motion(i)[1] for i in crossing_idxs], dtype=np.int64)
                 a_pos = self.vertex_positions[crossing_src]
                 b_pos = self.vertex_positions[crossing_tgt]
 
