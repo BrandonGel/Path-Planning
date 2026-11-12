@@ -1,7 +1,8 @@
 import math
-from dataclasses import dataclass, fields, asdict
+from dataclasses import dataclass, field, fields, asdict, MISSING
 import yaml
 import os
+from path_planning.common.environment.roadmap.edge_zones import parse_zones
 
 @dataclass
 class RoadmapConfig:
@@ -10,7 +11,9 @@ class RoadmapConfig:
     ``RoadmapConfig({"num_neighbors": 6, "max_edge_length": 12})``; keys left
     out take the defaults below, unknown keys raise. Edge band and k apply to
     the builders that filter edges (PRM, Delaunay, planar family, RRG,
-    custom); ``Lattice`` edges are fixed by the grid.
+    custom); ``Lattice`` edges are fixed by the grid. ``direction_zones`` /
+    ``edge_zones`` (lists of zone dicts, see ``roadmap/edge_zones.py``) are
+    applied after every builder, ``Lattice`` included.
 
     ``RoadmapConfig.from_yaml(path)`` reads a YAML file (``config/roadmap.yaml``
     is the template) and ``RoadmapConfig.load(x)`` accepts a config, dict,
@@ -27,11 +30,14 @@ class RoadmapConfig:
     snap_off_grid: bool = True            # Lattice: snap off-centre nodes instead of raising
     k_query: int | None = None            # PRM: first KD query size (default 4*k+1)
     grow: int = 4                         # PRM: query growth factor per round
+    direction_zones: list = field(default_factory=list)   # one-way zones, see roadmap/edge_zones.py
+    edge_zones: list = field(default_factory=list)        # allowed line-angle zones, see roadmap/edge_zones.py
 
     def __init__(self, config: dict | None = None) -> None:
         config = dict(config or {})
         for f in fields(self):                      # every field, default when absent
-            setattr(self, f.name, config.pop(f.name, f.default))
+            default = f.default_factory() if f.default is MISSING else f.default
+            setattr(self, f.name, config.pop(f.name, default))
         if config:
             raise TypeError(f"RoadmapConfig: unknown keys {sorted(config)}")
         if self.min_edge_length < 0 or self.max_edge_length < self.min_edge_length:
@@ -46,6 +52,9 @@ class RoadmapConfig:
         self.max_edge_length = float(self.max_edge_length)
         self.num_neighbors = int(self.num_neighbors)
         self.sample_num = int(self.sample_num)
+        self.direction_zones = [dict(z) for z in (self.direction_zones or [])]
+        self.edge_zones = [dict(z) for z in (self.edge_zones or [])]
+        parse_zones(self.direction_zones, self.edge_zones)      # validate now, raise on a bad zone
 
     def as_dict(self) -> dict:
         return asdict(self)

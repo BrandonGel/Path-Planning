@@ -13,6 +13,7 @@ from numba import njit, prange
 from scipy.sparse import csr_array
 from scipy.sparse.csgraph import shortest_path as _csgraph_shortest_path
 from path_planning.common.environment.roadmap.roadmap_config import RoadmapConfig
+from path_planning.common.environment.roadmap.edge_zones import constrain_adjacency
 from python_motion_planning.common.env.map.grid import TYPES, _grid_path_world_to_map_int, _grid_path_map_to_world
 from path_planning.common.environment.roadmap.roadmap_util import _filter_edges_kernel, _khop_ball, _unique_undirected, _symmetric_csr, shortest_paths
 from path_planning.common.environment.node import Node
@@ -220,6 +221,26 @@ class RoadmapBase:
             path.append(v)
         return path[::-1], float(dist[target])
 
+    # ----------------------------------------------------------------- constraints
+    def constrain_edges(self, direction_zones=None, edge_zones=None) -> csr_array:
+        """Remove the edges the zones forbid from the adjacency (``roadmap/edge_zones.py``).
+
+        ``direction_zones``: one-way regions. A directed edge ``(s, t)`` in the zone is kept only if
+        its heading ``atan2(t - s)`` (in ``[0, 2*pi)``) is in one of the zone's ranges; ``(t, s)``
+        is tested with its own heading. ``edge_zones``: regions where only some line angles (in
+        ``[0, pi)``, both directions alike) may be edges.
+
+        Each zone is ``{"points": [[x, y], ...], "directions": [[lo, hi], ...]}`` with optional
+        ``"degrees": True`` and ``"rule"`` (``"intersects"``, the default, ``"within"`` or
+        ``"midpoint"``). An edge in several zones must pass each one. Defaults to the config's
+        ``direction_zones`` / ``edge_zones``; ``generate_roadmap`` calls this after the builder.
+        A direction zone makes the adjacency directed."""
+        dz = self.config.direction_zones if direction_zones is None else direction_zones
+        ez = self.config.edge_zones if edge_zones is None else edge_zones
+        if (dz or ez) and self.num_nodes:
+            self._adj = constrain_adjacency(self.nodes, self.adj, dz, ez)
+        return self.adj
+
     # ----------------------------------------------------------------- nodes
     def set_nodes(self, samples: List[Node]) -> None:
         n = len(samples)
@@ -359,11 +380,13 @@ class RoadmapBase:
         raise NotImplementedError(f"{type(self).__name__} must implement generate")
 
     def generate_roadmap(self, samples: List[Node], **kwargs) -> csr_array:
-        """Install ``samples`` as the nodes, then ``generate(**kwargs)``."""
+        """Install ``samples`` as the nodes, then ``generate(**kwargs)``, then
+        ``constrain_edges()`` with the config's zones."""
         self.set_nodes(samples)
         if self.num_nodes == 0:
             raise ValueError("No nodes to generate roadmap")
-        return self.generate(**kwargs)
+        self.generate(**kwargs)
+        return self.constrain_edges()
 
     def reset(self) -> None:
         self._num_nodes = 0
