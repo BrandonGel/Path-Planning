@@ -14,9 +14,9 @@ configs.
 Agents of any 2D shape (an ``agent_shape.Shape``, a radius, an outline or a
 polygon) are swept along whole paths, many agents at once, with
 ``overlapping_interval_paths``: when each agent's body covers each roadmap vertex
-and directed edge. The per-move disc queries of ``ShapelyCollision``
-(``overlapping_interval_cgal`` / ``overlapping_graph_elements_cgal``, the
-interface the map's ``get_constraint_sweep`` uses) are inherited unchanged.
+and directed edge; ``agent_conflicts`` gives the exact collision windows between
+agents. Both override the disc-only versions of ``ShapelyCollision`` (which the
+map's ``get_constraint_sweep`` uses) and also accept discs.
 
 Shapely/GEOS is planar, so this backend is 2D only (``set_graph`` raises for 3D).
 """
@@ -87,13 +87,13 @@ class ShapelyCollisionHetero(ShapelyCollision):
 
     # ------------------------------------------------------------ timed overlapping interval sweeps
     def overlapping_interval_paths(self, paths, shapes, velocity=None, t0=0.0, turning_speed=None, goal_hold=0.0,
-                                   method: str = "front_face", exact=False, as_arrays: bool = False,
+                                   method: str = "front_face", exact=False, as_arrays: bool = True,
                                    heading=None) -> list:
         """When each agent's body, moving along its path, covers each roadmap element:
-        ``[({vertex: [(t1, t2), ...]}, {(src, tgt): [(t1, t2), ...]}), ...]``, one entry per path, absolute
-        times from ``t0``, each element's windows sorted and merged; edge keys are the directed edges the
-        roadmap allows. With ``as_arrays=True``: ``((vertex, t1, t2), (src, tgt, t1, t2))`` NumPy arrays per
-        path, one row per window, sorted by element then time. All paths go into one piece set, the
+        ``[((vertex, t1, t2), (src, tgt, t1, t2)), ...]``, one entry per path: NumPy arrays, one row per
+        window, sorted by element then time, absolute times from ``t0``, each element's windows merged; edge
+        rows are the directed edges the roadmap allows. ``as_arrays=False`` gives dicts instead,
+        ``[({vertex: [(t1, t2), ...]}, {(src, tgt): [(t1, t2), ...]}), ...]``. All paths go into one piece set, the
         roadmap trees are queried once and the hits are timed in one numba pass, then split per agent.
         Touching is not contact.
 

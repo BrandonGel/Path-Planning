@@ -2,6 +2,8 @@ import numpy as np
 from numba import njit, prange
 from shapely import Polygon, Point
 from path_planning.common.world.collision_checking.agent_shape import Shape, Circle
+from path_planning.common.world.collision_checking.disc_sweep import (   # noqa: F401  (re-exported)
+    _merge_sorted_intervals, merge_intervals, intervals_to_dict)
 import shapely
 from shapely import affinity as _affinity
 
@@ -382,57 +384,6 @@ def clip_segment_windows(path, velocity, depart, segment, s_lo, s_hi, x_min, x_m
     hi = np.clip(s_hi - x_min, 0.0, length)
     hi = np.maximum(hi, lo)
     return depart + lo / velocity, depart + hi / velocity
-
-
-@njit(cache=True)
-def _merge_sorted_intervals(ids, t1, t2, eps):
-    """Merge intervals already sorted by (id, t1): overlapping or touching windows of one id join."""
-    n = len(ids)
-    out_i = np.empty(n, dtype=np.int64)
-    out_a = np.empty(n)
-    out_b = np.empty(n)
-    m = -1
-    for k in range(n):
-        if m >= 0 and ids[k] == out_i[m] and t1[k] <= out_b[m] + eps:
-            if t2[k] > out_b[m]:
-                out_b[m] = t2[k]
-        else:
-            m += 1
-            out_i[m] = ids[k]
-            out_a[m] = t1[k]
-            out_b[m] = t2[k]
-    return out_i[:m + 1], out_a[:m + 1], out_b[:m + 1]
-
-
-def merge_intervals(ids, t1, t2):
-    """``(ids, t1, t2)`` arrays -> the same, sorted by ``(id, t1)`` with each id's overlapping or touching
-    closed windows merged (one NumPy sort plus a numba pass)."""
-    ids = np.asarray(ids, dtype=np.int64)
-    t1 = np.asarray(t1, dtype=float)
-    t2 = np.asarray(t2, dtype=float)
-    if len(ids) == 0:
-        return ids, t1, t2
-    order = np.lexsort((t1, ids))
-    return _merge_sorted_intervals(ids[order], t1[order], t2[order], 1e-12)
-
-
-def intervals_to_dict(ids, t1, t2, keys=None) -> dict:
-    """``{key: [(t1, t2), ...]}`` from the output of ``merge_intervals`` (``ids`` sorted, so each id's
-    windows are one contiguous run); ``keys`` (optional) maps each row to its dict key, e.g. a directed
-    edge tuple."""
-    ids = np.asarray(ids)
-    if len(ids) == 0:
-        return {}
-    ks = ids.tolist() if keys is None else keys
-    pairs = list(zip(t1.tolist(), t2.tolist()))
-    first = np.empty(len(ids), dtype=bool)
-    first[0] = True
-    first[1:] = ids[1:] != ids[:-1]
-    if first.all():                                  # common case: one window per element
-        return {k: [w] for k, w in zip(ks, pairs)}
-    starts = np.flatnonzero(first).tolist()
-    ends = starts[1:] + [len(ids)]
-    return {ks[i]: pairs[i:j] for i, j in zip(starts, ends)}
 
 
 def group_intervals(items) -> dict:
