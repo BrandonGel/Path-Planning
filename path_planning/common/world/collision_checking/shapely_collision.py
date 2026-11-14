@@ -16,7 +16,7 @@ Agents are discs, each with its own radius and speed:
 The spatial layer (which vertices / edges lie within ``r`` of a segment or a point) is one bulk Shapely
 ``STRtree`` box query per element type for the candidates, then the exact strict distance test (numba,
 parallel) in ``disc_sweep``; the timing, assembly and conflicts are the
-backend-neutral, N-D code in ``disc_sweep`` shared with ``CGAL_Sweep`` (2D / 3D). Shapely/GEOS is
+backend-neutral, N-D code in ``disc_sweep`` shared with ``CGALCollision`` (2D / 3D). Shapely/GEOS is
 planar, so this backend is 2D only (``set_graph`` raises for 3D).
 """
 

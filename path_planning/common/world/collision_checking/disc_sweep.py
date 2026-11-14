@@ -1,6 +1,6 @@
 """Disc (N-D ball) agents swept along whole paths: backend-neutral timing, assembly and conflicts.
 
-Shared by the disc collision backends (``ShapelyCollision`` in 2D, ``CGAL_Sweep`` in 2D / 3D). A backend
+Shared by the disc collision backends (``ShapelyCollision`` in 2D, ``CGALCollision`` in 2D / 3D). A backend
 only supplies its spatial index: which roadmap vertices and edges lie strictly within ``r`` of a segment or
 a point, as a cheap superset (``_vertex_candidates`` / ``_edge_candidates``: boxes or balls). Everything else,
 including the exact distance test, is here, in NumPy / numba and in
@@ -289,7 +289,8 @@ def _schedule_times(seg_start, seg_count, move, turn, t0):
 
 
 def _path_pieces(paths, radius, velocity, t0, turning_speed, goal_hold):
-    """Moving segments and stationary pieces of every agent: ``(seg, still)`` dicts of flat arrays.
+    """Moving segments and stationary pieces of every agent: ``(seg, still)`` dicts of flat arrays
+    (``still["kind"]``: 0 for an in-place turn, 1 for the goal hold).
 
     Vectorised over all agents: the same timing as calling ``disc_schedule`` on each path (duplicate
     waypoints dropped, ``velocity=None`` = 1 time unit per segment, ``angle / turning_speed`` turn time at
@@ -352,7 +353,8 @@ def _path_pieces(paths, radius, velocity, t0, turning_speed, goal_hold):
     still = {"agent": st_agent[order],
              "p": np.concatenate([B[q], X[last_pt[h_ag]]]).reshape(-1, D)[order],
              "w0": np.concatenate([arrive[q], h_arrive]).astype(float)[order],
-             "w1": np.concatenate([turn_end[q], h_arrive + hold[h_ag]]).astype(float)[order]}
+             "w1": np.concatenate([turn_end[q], h_arrive + hold[h_ag]]).astype(float)[order],
+             "kind": np.concatenate([np.zeros(len(q), np.int64), np.ones(len(h_ag), np.int64)])[order]}
     still["r"] = rad[still["agent"]]
     seg = {"agent": s_agent.astype(np.int64), "a": A, "b": B, "depart": depart, "tdur": arrive - depart,
            "r": rad[s_agent]}
@@ -469,7 +471,7 @@ def point_candidates(backend, p, r):
 
 def sweep_paths(backend, paths, radius, velocity=None, t0=0.0, turning_speed=None, goal_hold=0.0,
                 as_arrays: bool = True) -> list:
-    """``overlapping_interval_paths`` for a disc backend (see ``ShapelyCollision`` / ``CGAL_Sweep``).
+    """``overlapping_interval_paths`` for a disc backend (see ``ShapelyCollision`` / ``CGALCollision``).
 
     ``backend`` provides ``vertex_positions``, ``edge_src_array`` / ``edge_tgt_array`` (canonical edge
     endpoints), ``edge_src_positions`` / ``edge_tgt_positions``, ``edge_dir`` (one ``EdgeDir`` byte per

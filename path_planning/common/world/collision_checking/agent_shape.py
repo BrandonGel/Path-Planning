@@ -14,6 +14,19 @@ Reference direction at ``orientation = 0``:
                     centroid -> the middle of a side for an even number
     CustomPolygon   the given points' own +x axis, shifted so the area centroid is the origin
     Circle          rotation-invariant (orientation is always 0)
+
+3D: every 2D shape takes an optional ``z_height``, its vertical thickness: in 3D it is the prism of its
+outline from ``-z_height / 2`` to ``+z_height / 2`` about the centroid (a ``Circle`` becomes a cylinder,
+approximated by the circumscribed 32-gon prism, never smaller than the cylinder). ``Rectangle.height`` is
+the rectangle's second side, hence the different name. Native 3D shapes (``dim = 3``):
+
+    Sphere            rotation-invariant
+    Box               length along body +x, width along +y, height along +z
+    ConvexPolyhedron  the convex hull of the given points, shifted so the volume centroid is the origin
+
+Their ``orientation`` is ``(yaw, pitch, roll)`` in radians (or just a yaw), the fixed rotation of the body
+relative to the travel frame (``rotation_matrix()``: ``Rz(yaw) @ Ry(pitch) @ Rx(roll)``). In 3D the travel
+frame has +x along the direction of travel and no roll (+y horizontal, +z as close to up as possible).
 """
 import math
 
@@ -23,13 +36,35 @@ from shapely.geometry import Polygon as ShapelyPolygon
 from shapely.geometry.polygon import orient
 
 
+def _check_z_height(z_height):
+    if z_height is None:
+        return None
+    z = float(z_height)
+    if not (math.isfinite(z) and z > 0):
+        raise ValueError(f"z_height must be positive and finite, or None, got {z_height}")
+    return z
+
+
 class Shape:
-    def __init__(self, radius: float = 1, orientation: float = 0.0):
+    dim = 2                                     # native dimension: 2 for outlines, 3 for the 3D shapes
+
+    def __init__(self, radius: float = 1, orientation: float = 0.0, z_height=None):
         self._radius = radius
         self._orientation = float(orientation)
+        self._z_height = _check_z_height(z_height)
+
+    def z_height(self):
+        """Vertical thickness of the body in 3D (a prism of the outline), or None (2D only)."""
+        return self._z_height
+
+    def _with_z(self, d: dict) -> dict:
+        """``d`` plus ``z_height`` when it is set (dicts saved before it existed load as None)."""
+        if self._z_height is not None:
+            d["z_height"] = self._z_height
+        return d
 
     def to_dict(self):
-        return {"radius": self._radius, "orientation": self._orientation}
+        return self._with_z({"radius": self._radius, "orientation": self._orientation})
 
     @staticmethod
     def _orientation_from(data: dict) -> float:
@@ -38,7 +73,7 @@ class Shape:
 
     @staticmethod
     def from_dict(data: dict):
-        return Shape(radius=data["radius"], orientation=Shape._orientation_from(data))
+        return Shape(radius=data["radius"], orientation=Shape._orientation_from(data), z_height=data.get("z_height"))
 
     def radius(self):
         """Bounding radius about the centroid."""
@@ -78,15 +113,15 @@ class Shape:
 
 
 class Circle(Shape):
-    def __init__(self, radius: float):
-        super().__init__(radius, 0.0)
+    def __init__(self, radius: float, z_height=None):
+        super().__init__(radius, 0.0, z_height)
 
     def to_dict(self):
-        return {"radius": self._radius}
+        return self._with_z({"radius": self._radius})
 
     @staticmethod
     def from_dict(data: dict):
-        return Circle(radius=data["radius"])
+        return Circle(radius=data["radius"], z_height=data.get("z_height"))
 
     def extent(self) -> tuple:
         r = float(self._radius)
@@ -100,7 +135,7 @@ class Circle(Shape):
 
 class Triangle(Shape):
     # orientation = 0: the direction from the centroid to the vertex joined by side 1 and side 2
-    def __init__(self, side1: float, side2: float, side3: float, orientation: float = 0.0):
+    def __init__(self, side1: float, side2: float, side3: float, orientation: float = 0.0, z_height=None):
         if min(side1, side2, side3) <= 0 or side1 + side2 <= side3 or side1 + side3 <= side2 or side2 + side3 <= side1:
             raise ValueError(f"Triangle: sides {side1}, {side2}, {side3} do not form a triangle")
         self._side1 = side1
@@ -116,65 +151,66 @@ class Triangle(Shape):
         theta = -math.atan2(pts[0, 1], pts[0, 0])                # rotate A onto +x
         rot = np.array([[math.cos(theta), -math.sin(theta)], [math.sin(theta), math.cos(theta)]])
         self._outline = pts @ rot.T
-        super().__init__(float(np.linalg.norm(self._outline, axis=1).max()), orientation)
+        super().__init__(float(np.linalg.norm(self._outline, axis=1).max()), orientation, z_height)
 
     def outline(self) -> np.ndarray:
         return self._outline.copy()
 
     def to_dict(self):
-        return {"side1": self._side1, "side2": self._side2, "side3": self._side3,
-                "radius": self._radius, "orientation": self._orientation}
+        return self._with_z({"side1": self._side1, "side2": self._side2, "side3": self._side3,
+                             "radius": self._radius, "orientation": self._orientation})
 
     @staticmethod
     def from_dict(data: dict):
         return Triangle(side1=data["side1"], side2=data["side2"], side3=data["side3"],
-                        orientation=Shape._orientation_from(data))
+                        orientation=Shape._orientation_from(data), z_height=data.get("z_height"))
 
 
 class Rectangle(Shape):
     # orientation = 0: the direction from the centroid along the width (perpendicular to the height sides)
-    def __init__(self, width: float, height: float, orientation: float = 0.0):
+    def __init__(self, width: float, height: float, orientation: float = 0.0, z_height=None):
         if width <= 0 or height <= 0:
             raise ValueError(f"Rectangle: width and height must be positive, got {width}, {height}")
         self.width = width
         self.height = height
-        super().__init__(0.5 * math.hypot(width, height), orientation)     # half the diagonal
+        super().__init__(0.5 * math.hypot(width, height), orientation, z_height)     # half the diagonal
 
     def outline(self) -> np.ndarray:
         w, h = 0.5 * self.width, 0.5 * self.height
         return np.array([[w, -h], [w, h], [-w, h], [-w, -h]])
 
     def to_dict(self):
-        return {"width": self.width, "height": self.height,
-                "radius": self._radius, "orientation": self._orientation}
+        return self._with_z({"width": self.width, "height": self.height,
+                             "radius": self._radius, "orientation": self._orientation})
 
     @staticmethod
     def from_dict(data: dict):
-        return Rectangle(width=data["width"], height=data["height"], orientation=Shape._orientation_from(data))
+        return Rectangle(width=data["width"], height=data["height"], orientation=Shape._orientation_from(data),
+                         z_height=data.get("z_height"))
 
 
 class Square(Rectangle):
-    def __init__(self, side: float, orientation: float = 0.0):
-        super().__init__(side, side, orientation)
+    def __init__(self, side: float, orientation: float = 0.0, z_height=None):
+        super().__init__(side, side, orientation, z_height)
         self.side = side
 
     def to_dict(self):
-        return {"side": self.side, "radius": self._radius, "orientation": self._orientation}
+        return self._with_z({"side": self.side, "radius": self._radius, "orientation": self._orientation})
 
     @staticmethod
     def from_dict(data: dict):
-        return Square(side=data["side"], orientation=Shape._orientation_from(data))
+        return Square(side=data["side"], orientation=Shape._orientation_from(data), z_height=data.get("z_height"))
 
 
 class RegularPolygon(Shape):
     # orientation = 0: centroid -> vertex for an odd number of sides,
     #                  centroid -> the middle of a side for an even number of sides
-    def __init__(self, side: float, num_sides: int, orientation: float = 0.0):
+    def __init__(self, side: float, num_sides: int, orientation: float = 0.0, z_height=None):
         if num_sides < 3 or side <= 0:
             raise ValueError(f"RegularPolygon: need side > 0 and num_sides >= 3, got {side}, {num_sides}")
         self.side = side
         self.num_sides = num_sides
-        super().__init__(side / (2.0 * math.sin(math.pi / num_sides)), orientation)   # circumradius
+        super().__init__(side / (2.0 * math.sin(math.pi / num_sides)), orientation, z_height)   # circumradius
 
     def outline(self) -> np.ndarray:
         n = self.num_sides
@@ -183,18 +219,19 @@ class RegularPolygon(Shape):
         return self._radius * np.column_stack([np.cos(a), np.sin(a)])
 
     def to_dict(self):
-        return {"side": self.side, "num_sides": self.num_sides,
-                "radius": self._radius, "orientation": self._orientation}
+        return self._with_z({"side": self.side, "num_sides": self.num_sides,
+                             "radius": self._radius, "orientation": self._orientation})
 
     @staticmethod
     def from_dict(data: dict):
-        return RegularPolygon(side=data["side"], num_sides=data["num_sides"], orientation=Shape._orientation_from(data))
+        return RegularPolygon(side=data["side"], num_sides=data["num_sides"], orientation=Shape._orientation_from(data),
+                              z_height=data.get("z_height"))
 
 
 class CustomPolygon(Shape):
     # orientation = 0: the given points keep their axes, translated so the area centroid is the origin;
     #                  body +x points along the direction of travel
-    def __init__(self, points, edges=None, orientation: float = 0.0):
+    def __init__(self, points, edges=None, orientation: float = 0.0, z_height=None):
         """Polygon from ``points`` (``(N, 2)``) joined by ``edges`` (``(N, 2)`` index pairs).
 
         Without ``edges`` the points are joined in sequence and the last connects to the first.
@@ -252,19 +289,133 @@ class CustomPolygon(Shape):
         self._points = pts.copy()
         self._edges = edge_arr.copy()
         self._outline = np.asarray(poly.exterior.coords)[:-1] - centroid
-        super().__init__(float(np.linalg.norm(self._outline, axis=1).max()), orientation)
+        super().__init__(float(np.linalg.norm(self._outline, axis=1).max()), orientation, z_height)
 
     def outline(self) -> np.ndarray:
         return self._outline.copy()
 
     def to_dict(self):
-        return {"points": self._points.tolist(), "edges": self._edges.tolist(),
-                "radius": self._radius, "orientation": self._orientation}
+        return self._with_z({"points": self._points.tolist(), "edges": self._edges.tolist(),
+                             "radius": self._radius, "orientation": self._orientation})
 
     @staticmethod
     def from_dict(data: dict):
         return CustomPolygon(points=data["points"], edges=data.get("edges"),
-                             orientation=Shape._orientation_from(data))
+                             orientation=Shape._orientation_from(data), z_height=data.get("z_height"))
 
 
 Polygon = RegularPolygon        # the earlier name; it clashes with ``shapely.Polygon``, prefer RegularPolygon
+
+
+# ---------------------------------------------------------------------------
+# Native 3D shapes
+# ---------------------------------------------------------------------------
+
+def euler_rotation(yaw: float = 0.0, pitch: float = 0.0, roll: float = 0.0) -> np.ndarray:
+    """``Rz(yaw) @ Ry(pitch) @ Rx(roll)`` (radians): the 3x3 rotation of a body by yaw about +z, then pitch
+    about the new +y, then roll about the new +x."""
+    cy, sy, cp, sp, cr, sr = (math.cos(yaw), math.sin(yaw), math.cos(pitch), math.sin(pitch),
+                              math.cos(roll), math.sin(roll))
+    return np.array([[cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
+                     [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
+                     [-sp, cp * sr, cp * cr]])
+
+
+def _orientation3(orientation) -> tuple:
+    """``orientation`` as ``(yaw, pitch, roll)``: a number is a yaw."""
+    if np.ndim(orientation) == 0:
+        return (float(orientation), 0.0, 0.0)
+    o = tuple(float(x) for x in orientation)
+    if len(o) != 3:
+        raise ValueError(f"3D orientation: expected a yaw or (yaw, pitch, roll), got {orientation}")
+    return o
+
+
+class Shape3D(Shape):
+    """A body in 3D: ``orientation()`` is ``(yaw, pitch, roll)``."""
+    dim = 3
+
+    def __init__(self, radius: float, orientation=0.0):
+        self._radius = float(radius)
+        self._orientation = _orientation3(orientation)
+        self._z_height = None
+
+    def rotation_matrix(self) -> np.ndarray:
+        """The fixed body rotation relative to the travel frame (see ``euler_rotation``)."""
+        return euler_rotation(*self._orientation)
+
+    def vertices(self) -> np.ndarray:
+        """``(K, 3)`` body-frame vertices (centroid at the origin) before ``orientation``."""
+        raise NotImplementedError(f"{type(self).__name__} has no vertices")
+
+    def outline(self) -> np.ndarray:
+        raise NotImplementedError(f"{type(self).__name__} is a 3D shape; see vertices()")
+
+    def extent(self) -> tuple:
+        raise NotImplementedError(f"{type(self).__name__} is a 3D shape")
+
+
+class Sphere(Shape3D):
+    def __init__(self, radius: float):
+        if not (np.isfinite(radius) and radius > 0):
+            raise ValueError(f"Sphere: radius must be positive, got {radius}")
+        super().__init__(radius, 0.0)
+
+    def to_dict(self):
+        return {"radius": self._radius}
+
+    @staticmethod
+    def from_dict(data: dict):
+        return Sphere(radius=data["radius"])
+
+
+class ConvexPolyhedron(Shape3D):
+    # orientation = 0: the given points keep their axes, translated so the volume centroid is the origin;
+    #                  body +x points along the direction of travel
+    def __init__(self, points, orientation=0.0):
+        """The convex hull of ``points`` (``(N, 3)``, at least 4 not coplanar); points inside the hull are
+        dropped."""
+        from scipy.spatial import ConvexHull
+        pts = np.asarray(points, dtype=float)
+        if pts.ndim != 2 or pts.shape[1] != 3 or len(pts) < 4 or not np.isfinite(pts).all():
+            raise ValueError(f"ConvexPolyhedron: points must be a finite (N >= 4, 3) array, got shape {pts.shape}")
+        hull = ConvexHull(pts)
+        if hull.volume < 1e-12:
+            raise ValueError("ConvexPolyhedron: the points are coplanar (zero volume)")
+        # Volume centroid: the tetrahedra (interior point, facet triangle).
+        inner = pts[hull.vertices].mean(axis=0)
+        tri = pts[hull.simplices]
+        vol = np.abs(np.einsum("ij,ij->i", tri[:, 0] - inner, np.cross(tri[:, 1] - inner, tri[:, 2] - inner))) / 6.0
+        centroid = (vol[:, None] * (inner + tri.sum(axis=1)) / 4.0).sum(axis=0) / vol.sum()
+        self._points = pts.copy()
+        self._vertices = pts[hull.vertices] - centroid
+        super().__init__(float(np.linalg.norm(self._vertices, axis=1).max()), orientation)
+
+    def vertices(self) -> np.ndarray:
+        return self._vertices.copy()
+
+    def to_dict(self):
+        return {"points": self._points.tolist(), "radius": self._radius, "orientation": list(self._orientation)}
+
+    @staticmethod
+    def from_dict(data: dict):
+        return ConvexPolyhedron(points=data["points"], orientation=data.get("orientation", 0.0))
+
+
+class Box(ConvexPolyhedron):
+    # orientation = 0: length along body +x (the direction of travel), width along +y, height along +z
+    def __init__(self, length: float, width: float, height: float, orientation=0.0):
+        if min(length, width, height) <= 0:
+            raise ValueError(f"Box: length, width and height must be positive, got {length}, {width}, {height}")
+        self.length, self.width, self.height = float(length), float(width), float(height)
+        corners = np.array([[x, y, z] for x in (-.5, .5) for y in (-.5, .5) for z in (-.5, .5)])
+        super().__init__(corners * [self.length, self.width, self.height], orientation)
+
+    def to_dict(self):
+        return {"length": self.length, "width": self.width, "height": self.height,
+                "radius": self._radius, "orientation": list(self._orientation)}
+
+    @staticmethod
+    def from_dict(data: dict):
+        return Box(length=data["length"], width=data["width"], height=data["height"],
+                   orientation=data.get("orientation", 0.0))
