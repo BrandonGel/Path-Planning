@@ -532,34 +532,43 @@ class GraphSampler(GraphSamplerBase):
         return bool(self.agent_conflicts(agents, paths, goal_hold=holds, first_only=True,
                                          heading=None if all(h is None for h in heads) else heads))
 
+    # ------------------------------------------------------------ class function
     def clear_data(self):
+        """Drop the start / goal, obstacles, samples and roadmap (and the start / goal edge caches)."""
+        super().clear_data()
         self.start_to_all_edges_dict = {}
         self.goal_to_all_edges_dict = {}
         self._start_edges_khop = None
         self._goal_edges_khop = None
         self.node_sampler.reset()
         self.roadmap.reset()
-        self.start = []
-        self.goal = []
-        self.obstacles = []
-        self.inflation_radius = 0.0
 
     def __str__(self) -> str:
         return "Graph Sampler"
 
     PICKLE_VERSION = 2
 
+    def _settings(self) -> dict:
+        """The map's settings, as saved and as passed to a copy's constructor."""
+        return {
+            "use_discrete_space": self.use_discrete_space,
+            "use_collision_sweep": self.use_collision_sweep,
+            "record_sweep": self.record_sweep,
+            "use_exact_collision_check": self.use_exact_collision_check,
+            "sweep_backend": getattr(self, "sweep_backend", "auto"),
+            "sweep_spatial_index": getattr(self, "sweep_spatial_index", "grid"),
+        }
+
     def save_graph_sampler(self, path: str):
-        """Pickle the map as plain data (version 2): the settings, the
-        obstacles, ``node_sampler.state_dict()`` (nodes, kinds,
-        ``sampling_dist_dict``) and ``roadmap.state_dict()`` (nodes, adjacency,
-        ``roadmap_config``). Neither object is pickled itself: both reference
-        the map (and the CGAL sweep, which cannot be pickled)."""
+        """Pickle the map as plain data (version 2): the settings, the start / goal, the obstacles,
+        ``node_sampler.state_dict()`` (nodes, kinds, ``sampling_dist_dict``) and ``roadmap.state_dict()``
+        (nodes, adjacency, ``roadmap_config``). Neither object is pickled itself (both reference the map),
+        nor is ``collision_sweep``: it is rebuilt from the settings on load."""
         data = {
             "version": self.PICKLE_VERSION,
+            **self._settings(),
             "start": self.start,
             "goal": self.goal,
-            "use_discrete_space": self.use_discrete_space,
             "node_sampler": self.node_sampler.state_dict(),
             "roadmap": self.roadmap.state_dict(),
             # ndarray, not list-of-tuples: pickling 4.5M tuples costs ~10s / ~200MB, the array
@@ -567,16 +576,13 @@ class GraphSampler(GraphSamplerBase):
             "obstacles": np.asarray(self.obstacles, dtype=np.int64) if len(self.obstacles) else [],
             "obs_size": self.obs_size,
             "inflation_radius": self.inflation_radius,
-            "use_collision_sweep": self.use_collision_sweep,
-            "record_sweep": self.record_sweep,
-            "use_exact_collision_check": self.use_exact_collision_check,
-            "sweep_backend": getattr(self, "sweep_backend", "auto"),
-            "sweep_spatial_index": getattr(self, "sweep_spatial_index", "grid"),
         }
         with open(path, 'wb') as f:
             pickle.dump(data, f)
 
     def load_graph_sampler(self, path: str, args: dict = {}):
+        """Restore a map saved by ``save_graph_sampler``. ``args`` overrides the saved ``use_collision_sweep``,
+        ``sweep_backend`` and ``sweep_spatial_index``."""
         with open(path, 'rb') as f:
             data = pickle.load(f)
         self._load_from_dict(data, args)
@@ -620,11 +626,10 @@ class GraphSampler(GraphSamplerBase):
         # nodes / pos_index_dict / edges / edge_weights / road_map are views over the sampler and roadmap.
         # The start/goal edge lists are built lazily by get_start/goal_nodes_with_all_edges.
 
-        # Set up constraint sweep
-        # Maps saved before the rename store ``use_constraint_sweep``.
+        # Collision sweep: rebuilt from the settings (maps saved before the rename store ``use_constraint_sweep``).
         self.use_collision_sweep = args.get("use_collision_sweep", data.get("use_collision_sweep", data.get("use_constraint_sweep", True)))
-        self.record_sweep = data["record_sweep"]
-        self.use_exact_collision_check = data["use_exact_collision_check"]
+        self.record_sweep = data.get("record_sweep", True)
+        self.use_exact_collision_check = data.get("use_exact_collision_check", True)
         self.sweep_backend = args.get("sweep_backend", data.get("sweep_backend", "auto"))
         self.sweep_spatial_index = args.get("sweep_spatial_index", data.get("sweep_spatial_index", "grid"))
         self.collision_sweep = self._make_collision_sweep()
@@ -635,225 +640,93 @@ class GraphSampler(GraphSamplerBase):
         self.sample_kd_tree = KDTree(points)
 
     def rotate(self, k: int, axes: Tuple[int, int] = (0, 1)):
-        """
-        Rotate the grid type map and all node / start / goal / obstacle positions
-        in-place by k * 90 degrees counterclockwise in the plane of ``axes``.
+        """Rotate the map in place by ``k`` quarter turns counterclockwise in the plane of ``axes`` (two distinct
+        dimensions, as ``numpy.rot90``): the type map, ESDF, obstacles, nodes, start / goal and obstacle nodes.
 
-        ``axes`` is a pair of distinct dimension indices (same convention as ``numpy.rot90``).
-        When k is 1 or 3, the world extents along those two axes are swapped.
-        Road map topology and edge weights are unchanged (rotation preserves
-        distances); the roadmap's node array and every sampler kind index follow
-        their nodes to the new positions.
-
-        - **Discrete space** (``use_discrete_space`` is True): grid cell indices are
-          rotated with the same mapping as ``numpy.rot90`` on ``type_map``.
-        - **Continuous space** (``use_discrete_space`` is False): world coordinates in
-          the ``(axes[0], axes[1])`` plane are rotated about the **center of the grid
-          bounds** on those axes, using the same corner mapping as the discrete case
-          (normalized coordinates in ``[0, 1]`` per axis).
-
-        Example: for a 2D map, ``rotate(1, (0, 1))`` is a 90° CCW rotation in the
-        plane of dimensions 0 and 1.
-        """
+        Positions turn about the centre of the bounds; for odd ``k`` the two axes' extents swap. This maps
+        cell centres to cell centres exactly as ``rot90`` maps cells, so discrete nodes stay on their cells.
+        Roadmap topology and edge weights are kept, every sampler kind follows its node, and the collision
+        sweep is rebound. Example: ``rotate(1)`` turns a 2D map 90 degrees CCW."""
         a, b = int(axes[0]), int(axes[1])
-        if a == b or not (0 <= a < self.dim) or not (0 <= b < self.dim):
-            raise ValueError(
-                f"axes must be two distinct valid dimension indices, got {axes}"
-            )
-
-        k %= 4  # 0, 1, 2, 3
+        if a == b or not (0 <= a < self.dim and 0 <= b < self.dim):
+            raise ValueError(f"axes must be two distinct valid dimension indices, got {axes}")
+        k %= 4
         if k == 0:
             return
+        lo = np.asarray(self.bounds, dtype=float)[:, 0].copy()
+        ext = np.asarray(self.bounds, dtype=float)[:, 1] - lo
+        shape = np.asarray(self.shape, dtype=float)
 
-        old_bounds = np.asarray(self.bounds, dtype=float).copy()
-        old_shape = tuple(int(s) for s in self.shape)
+        def quarter(u, n):
+            """Turn coordinates ``u`` (``(N, D)``, from the lower corner) in a box of extents ``n``."""
+            u = np.array(u, dtype=float).reshape(-1, self.dim)
+            ua, ub = u[:, a].copy(), u[:, b].copy()
+            u[:, a], u[:, b] = {1: (n[b] - ub, ua), 2: (n[a] - ua, n[b] - ub), 3: (ub, n[a] - ua)}[k]
+            return u
 
-        new_bounds = old_bounds.copy()
-        if k in (1, 3):
-            range_a = old_bounds[a, 1] - old_bounds[a, 0]
-            range_b = old_bounds[b, 1] - old_bounds[b, 0]
-            new_bounds[a, 1] = old_bounds[a, 0] + range_b
-            new_bounds[b, 1] = old_bounds[b, 0] + range_a
+        def move(points):
+            return lo + quarter(np.asarray(points, dtype=float).reshape(-1, self.dim) - lo, ext)
 
-        def rotate_grid_nd(coords: tuple) -> tuple:
-            ca, cb = coords[a], coords[b]
-            if k == 1:
-                new_ca, new_cb = old_shape[b] - 1 - cb, ca
-            elif k == 2:
-                new_ca, new_cb = old_shape[a] - 1 - ca, old_shape[b] - 1 - cb
-            else:
-                new_ca, new_cb = cb, old_shape[a] - 1 - ca
-            lst = list(coords)
-            lst[a], lst[b] = new_ca, new_cb
-            return tuple(lst)
-
-        def transform_pos_continuous(p: Tuple[float, ...]) -> Tuple[float, ...]:
-            """Rotate world coords in the (a,b) plane about the center of bounds."""
-            lst = [float(v) for v in p]
-            range_a = old_bounds[a, 1] - old_bounds[a, 0]
-            range_b = old_bounds[b, 1] - old_bounds[b, 0]
-            if range_a <= 0.0 or range_b <= 0.0:
-                return tuple(lst)
-            ua = (lst[a] - old_bounds[a, 0]) / range_a
-            ub = (lst[b] - old_bounds[b, 0]) / range_b
-            if k == 1:
-                ua, ub = 1.0 - ub, ua
-            elif k == 2:
-                ua, ub = 1.0 - ua, 1.0 - ub
-            else:
-                ua, ub = ub, 1.0 - ua
-            lst[a] = new_bounds[a, 0] + ua * (new_bounds[a, 1] - new_bounds[a, 0])
-            lst[b] = new_bounds[b, 0] + ub * (new_bounds[b, 1] - new_bounds[b, 0])
-            return tuple(lst)
-
-        def transform_pos(p: Tuple[float, ...]) -> Tuple[float, ...]:
-            if self.use_discrete_space:
-                p_grid = tuple(self.world_to_map(p,discrete=True))
-                new_coords = rotate_grid_nd(p_grid)
-                return tuple(float(v) for v in new_coords)
-            return transform_pos_continuous(p)
-
-        # python-motion-planning >= 2.1: ``type_map`` is a read-only property and
-        # the numba kernels read ``_shape_array``; a fresh GridTypeMap marks the
-        # ESDF / connectivity maps dirty, so they are recomputed lazily on access.
-        self._type_map = GridTypeMap(
-            np.rot90(self.type_map.data.copy(), k=k, axes=(a, b))
-        )
+        # python-motion-planning >= 2.1: ``type_map`` is read-only and the numba kernels read ``_shape_array``;
+        # a fresh GridTypeMap marks the ESDF / connectivity maps dirty, so they are recomputed lazily.
+        self._type_map = GridTypeMap(np.rot90(self.type_map.data.copy(), k=k, axes=(a, b)))
         self._esdf = np.ascontiguousarray(np.rot90(self._esdf, k=k, axes=(a, b)))
-        self._connectivity_map = np.ascontiguousarray(
-            np.rot90(self._connectivity_map, k=k, axes=(a, b))
-        )
+        self._connectivity_map = np.ascontiguousarray(np.rot90(self._connectivity_map, k=k, axes=(a, b)))
         self._shape_array = np.asarray(self.shape, dtype=np.int64)
+        if k % 2:
+            self._bounds[[a, b], 1] = lo[[a, b]] + ext[[b, a]]
 
-        self._bounds[:, :] = new_bounds
+        points = move([node.current for node in self.nodes])
+        self.node_sampler.set_positions([tuple(p) for p in points.tolist()])
+        if self.roadmap is not None and self.roadmap.num_nodes == len(points):
+            self.roadmap._set_points(points)             # same topology; clearance re-read from the new ESDF
+        self.start = move(self.start).tolist()
+        self.goal = move(self.goal).tolist()
+        if len(self.obstacles) > 0:                      # grid cells: turn their centres
+            cells = quarter(np.asarray(self.obstacles, dtype=float) + 0.5, shape) - 0.5
+            self.obstacles = [tuple(c) for c in np.rint(cells).astype(int).tolist()]
+        self.obstacle_nodes = [Node(tuple(p), None, 0, 0)
+                               for p in move([n.current for n in self.obstacle_nodes]).tolist()]
 
-        # Same nodes, moved: every kind index (start/goal/sample/...) follows its node.
-        self.node_sampler.set_positions([transform_pos(node.current) for node in self.nodes])
-        if self.roadmap is not None and self.roadmap.num_nodes == len(self.nodes):
-            # Same topology, moved coordinates (clearance re-read from the rotated ESDF).
-            self.roadmap._set_points(np.array([node.current for node in self.nodes], dtype=np.float64))
-        self.start = [list(transform_pos(tuple(s))) for s in self.start]
-        self.goal = [list(transform_pos(tuple(g))) for g in self.goal]
-
-        if len(self.obstacles) > 0:
-            obs = np.asarray(self.obstacles, dtype=int)
-            new_obs = np.empty_like(obs)
-            for idx in range(len(obs)):
-                rotated = rotate_grid_nd(
-                    tuple(int(obs[idx, d]) for d in range(obs.shape[1]))
-                )
-                new_obs[idx] = rotated
-            self.obstacles = [tuple(obs) for obs in new_obs]
-
-        self.obstacle_nodes = [
-            Node(
-                transform_pos(tuple(float(v) for v in n.current)),
-                None,
-                0,
-                0,
-            )
-            for n in self.obstacle_nodes
-        ]
-
-        # 6. Index dicts: every kind (start/goal/sample/boundary) followed its
-        # node in set_positions above; nothing to rebuild.
-
-        # 7. Clear caches and rebuild derived structures
         self.start_to_all_edges_dict = {}
         self.goal_to_all_edges_dict = {}
-
-        if self.nodes:
-            points = np.array([samp.current for samp in self.nodes])
-            self.sample_kd_tree = KDTree(points)
-        else:
-            self.sample_kd_tree = None
-
+        self._start_edges_khop = self._goal_edges_khop = None
+        self.sample_kd_tree = KDTree(points) if len(points) else None
         if self.use_collision_sweep and len(self.edges) > 0:
             self.set_collision_sweep()
 
     def create_pruned_copy(self, kept_node_indices: np.ndarray):
-        """
-        Create a pruned copy of the current GraphSampler that only contains
-        the nodes whose indices are in kept_node_indices and edges between them.
-        """
+        """A new ``GraphSampler`` with the same map and settings holding only the nodes ``kept_node_indices``
+        (renumbered in increasing index order) and the roadmap edges between them."""
         if kept_node_indices is None or len(kept_node_indices) == 0:
             raise ValueError("kept_node_indices must be a non-empty array of node indices.")
-
-        kept_node_indices = np.asarray(kept_node_indices, dtype=int)
-        kept_set = set(int(i) for i in kept_node_indices.tolist())
-        sorted_kept = sorted(kept_set)
-
-        # Mapping from old node index -> new node index
-        old_to_new = {old_idx: new_idx for new_idx, old_idx in enumerate(sorted_kept)}
-
-        # Pruned nodes (preserve order according to sorted_kept)
-        pruned_nodes = [self.nodes[old_idx] for old_idx in sorted_kept]
-
-        # Boundary points: only keep boundary nodes whose indices remain
-        pruned_boundary_points = []
-        for boundary_node, idx in self.boundary_nodes_index.items():
-            if idx in kept_set:
-                pruned_boundary_points.append(boundary_node.current)
-
-        # Edges and edge weights restricted to kept nodes
-        pruned_road_map = []
-        pruned_road_map_edge_weights = []
-        has_edge_weights = self.road_map_edge_weights is not None and len(self.road_map_edge_weights) > 0
-
-        for old_i in sorted_kept:
-            neighbors = []
-            weights = []
-            if old_i < len(self.road_map):
-                for nbr_idx, old_j in enumerate(self.road_map[old_i]):
-                    if old_j in kept_set:
-                        neighbors.append(old_to_new[old_j])
-                        if has_edge_weights:
-                            weights.append(self.road_map_edge_weights[old_i][nbr_idx])
-            pruned_road_map.append(neighbors)
-            if has_edge_weights:
-                pruned_road_map_edge_weights.append(weights)
-
-        if not has_edge_weights:
-            pruned_road_map_edge_weights = [[] for _ in pruned_road_map]
-
-        # sample_num of the copy: the kept nodes that are not a start/goal.
+        kept = sorted(set(np.asarray(kept_node_indices, dtype=int).tolist()))
+        new_index = {old: new for new, old in enumerate(kept)}
+        weights = self.road_map_edge_weights if self.road_map_edge_weights is not None and \
+            len(self.road_map_edge_weights) > 0 else None
+        road_map, road_map_weights = [], []
+        for i in kept:
+            nbrs = self.road_map[i] if i < len(self.road_map) else []
+            slots = [n for n, j in enumerate(nbrs) if j in new_index]
+            road_map.append([new_index[nbrs[n]] for n in slots])
+            road_map_weights.append([weights[i][n] for n in slots] if weights is not None else [])
         start_goal = set(self.start_nodes_index.values()) | set(self.goal_nodes_index.values())
-        pruned_sample_num = sum(1 for i in sorted_kept if i not in start_goal)
-
-        pruned_data = {
+        settings = self._settings()
+        roadmap_config = self.roadmap_config.as_dict()
+        copy = GraphSampler(bounds=self.bounds, resolution=getattr(self, "resolution", 1.0), start=[], goal=[],
+                            roadmap_config={**roadmap_config, "sample_num": 0}, **settings,
+                            sampling_dist_dict=self.node_sampler.sampling_dist_dict)
+        copy._load_from_dict({                           # the legacy (node list + nested adjacency) layout
+            **settings,
             "start": self.start,
             "goal": self.goal,
-            "roadmap_config": {**self.roadmap_config.as_dict(), "sample_num": pruned_sample_num},
-            "use_discrete_space": self.use_discrete_space,
-            "boundary_points": pruned_boundary_points,
-            "nodes": pruned_nodes,
+            "roadmap_config": {**roadmap_config, "sample_num": sum(i not in start_goal for i in kept)},
+            "boundary_points": [n.current for n, i in self.boundary_nodes_index.items() if i in new_index],
+            "nodes": [self.nodes[i] for i in kept],
             "obstacles": self.obstacles,
             "inflation_radius": self.inflation_radius,
-            "road_map": pruned_road_map,
-            "road_map_edge_weights": pruned_road_map_edge_weights,
-            "use_collision_sweep": self.use_collision_sweep,
-            "record_sweep": self.record_sweep,
-            "use_exact_collision_check": self.use_exact_collision_check,
-            "sweep_backend": getattr(self, "sweep_backend", "auto"),
-            "sweep_spatial_index": getattr(self, "sweep_spatial_index", "grid"),
+            "road_map": road_map,
+            "road_map_edge_weights": road_map_weights,
             "sampling_dist_dict": self.node_sampler.sampling_dist_dict,
-        }
-
-        # Create a new GraphSampler instance with the same geometric configuration
-        resolution = getattr(self, "resolution", 1.0)
-        pruned_sampler = GraphSampler(
-            bounds=self.bounds,
-            resolution=resolution,
-            start=[],
-            goal=[],
-            roadmap_config={**self.roadmap_config.as_dict(), "sample_num": 0},
-            use_discrete_space=self.use_discrete_space,
-            use_collision_sweep=self.use_collision_sweep,
-            record_sweep=self.record_sweep,
-            use_exact_collision_check=self.use_exact_collision_check,
-            sweep_backend=getattr(self, "sweep_backend", "auto"),
-            sweep_spatial_index=getattr(self, "sweep_spatial_index", "grid"),
-            sampling_dist_dict=self.node_sampler.sampling_dist_dict,
-        )
-        pruned_sampler._load_from_dict(pruned_data)
-        return pruned_sampler
+        })
+        return copy
