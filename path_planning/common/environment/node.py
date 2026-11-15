@@ -15,6 +15,3 @@ class Node(base_node):
             raise ValueError(
                 "The dimension of current " + str(current) + " and parent " + str(parent) + " must be the same."
             )
-
-    def link(self, node):
-        return Node(self._current, node._current, node._g, self._h, self.max_clearance)
