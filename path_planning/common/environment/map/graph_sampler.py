@@ -1,7 +1,6 @@
 from typing import List, Tuple
 import os
 import numpy as np
-from scipy.spatial import KDTree
 from path_planning.common.environment.node import Node
 from python_motion_planning.common.env.map.grid import GridTypeMap
 from python_motion_planning.common import TYPES
@@ -21,46 +20,45 @@ from path_planning.common.environment.roadmap.roadmap import Roadmap
 import pickle
 
 
+def _agent_fields(agents):
+    """``(shapes, max_speeds, max_rotations)`` lists of ``agents``."""
+    return [a.shape for a in agents], [a.max_speed for a in agents], [a.max_rotation for a in agents]
+
+
 class GraphSampler(GraphSamplerBase):
-    def __init__(self,*args,start,goal,roadmap_config: "dict | RoadmapConfig | str | None" = None,use_discrete_space=True,use_collision_sweep=True,record_sweep=True,use_exact_collision_check=True,sampling_dist_dict = {},sweep_backend="auto",sweep_spatial_index="grid",**kwargs):
+    def __init__(self, *args, start, goal, roadmap_config: "dict | RoadmapConfig | str | None" = None,
+                 use_discrete_space=True, use_collision_sweep=True, sampling_dist_dict: "dict | None" = None,
+                 sweep_backend="auto", sweep_spatial_index="grid", **kwargs):
         super().__init__(*args, **kwargs)
 
-        # Check if start and goal are lists, non-empty, and not None
         assert isinstance(start, list), "Start must be a list"
         assert isinstance(goal, list), "Goal must be a list"
-        self.obstacles = []
-        self.obs_size = 0.5
+        self.set_start(start)
+        self.set_goal(goal)
         # Roadmap parameters (sample_num, num_neighbors, edge band, RRG rates,
         # ...) live in one RoadmapConfig: a dict, a RoadmapConfig or the path of
         # a YAML file such as config/roadmap.yaml; see set_roadmap_config.
         self.node_sampler = NodeSampler(self, sampling_dist_dict=sampling_dist_dict)      # reads the map live; see NodeSampler
         self.roadmap = Roadmap(self, config=roadmap_config)
-        
         self.obstacle_nodes = []
 
         self.use_discrete_space = use_discrete_space
 
-        self.start_to_all_edges_dict = {}
-        self.goal_to_all_edges_dict = {}
-        self._start_edges_khop = None
-        self._goal_edges_khop = None
+        self._reset_edge_caches()
 
         self.use_collision_sweep = use_collision_sweep
-        self.record_sweep = record_sweep    # legacy flag kept for saved maps; sweeps are cached by planners
-        self.use_exact_collision_check = use_exact_collision_check
         self.sweep_backend = sweep_backend
         self.sweep_spatial_index = sweep_spatial_index
         self.collision_sweep = self._make_collision_sweep()
-        self._inflated_esdf = None          # inflated esdf cache
-        self._inflated_esdf_source = None   # inflated esdf source to update inflated esdf
-
+        self._collision_sweep_signature = None    # roadmap fingerprint the sweep is bound to
+        self._node_current_tuples = []            # node positions, for keying get_collision_sweep results
+        self.sweep_version = 0                    # bumped on every bind; planner sweep caches key on it
 
         self.pickups = []
         self.deliveries = []
         self.parking = []
 
-    def __str__(self) -> str:
-        return "Graph Sampler"
+    # ------------------------------------------------------------ Class Properties
 
     @property
     def roadmap_config(self) -> RoadmapConfig:
@@ -70,11 +68,11 @@ class GraphSampler(GraphSamplerBase):
 
     @property
     def road_map_edge_weights(self) -> List[List[float]]:
-        return self.roadmap.roadmap_weights if self.roadmap is not None else []
+        return self.roadmap.roadmap_weights
 
     @property
     def roadmap_edges(self) -> List[List[int]]:
-        return self.roadmap.roadmap_edges if self.roadmap is not None else []
+        return self.roadmap.roadmap_edges
 
     @property
     def road_map(self) -> List[List[int]]:
@@ -84,82 +82,33 @@ class GraphSampler(GraphSamplerBase):
 
     @property
     def edges(self) -> List[Tuple[int, int]]:
-        return self.roadmap.edges if self.roadmap is not None else []
+        return self.roadmap.edges
 
     @property
     def edge_weights(self) -> List[float]:
-        return self.roadmap.edge_weights if self.roadmap is not None else []
+        return self.roadmap.edge_weights
 
     @property
     def nodes(self) -> List[Node]:
-        return self.node_sampler.nodes if self.node_sampler is not None else []
+        return self.node_sampler.nodes
 
     @property
     def position(self) -> np.ndarray:
-        return self.node_sampler.position if self.node_sampler is not None else np.array([])
+        return self.node_sampler.position
 
     @property
     def pos_index_dict(self) -> dict:
         """Position tuple -> node index (the sampler's registry)."""
-        return self.node_sampler.pos_index_dict if self.node_sampler is not None else {}
+        return self.node_sampler.pos_index_dict
 
     @property
     def points_index_dict(self) -> dict:
         """Kind name -> ``Node -> index`` dict (the sampler's registry)."""
-        return self.node_sampler.points_index_dict if self.node_sampler is not None else {}
+        return self.node_sampler.points_index_dict
 
     @property
     def num_total_nodes(self) -> int:
-        return self.node_sampler.num_total_nodes if self.node_sampler is not None else 0
-
-    def get_nodes(self, points: List[tuple] | np.ndarray | None = None, index_dict: dict | None = None, index_type: str = '') -> List[Node]:
-        return self.node_sampler.get_nodes(points, index_dict, index_type)
-
-    def set_roadmap_config(self, config: "dict | RoadmapConfig | str | None" = None, **fields) -> RoadmapConfig:
-        """Replace or update the roadmap parameters.
-
-        A ``RoadmapConfig`` or a YAML path replaces the current config. A dict
-        and/or keyword fields (``sample_num``, ``num_neighbors``,
-        ``min_edge_length``, ``max_edge_length``, ``goal_sample_rate``, ...)
-        are applied on top of the current values. This is the one mutator:
-        ``roadmap_config`` is a read-only view of ``self.roadmap.config``.
-        (``num_total_nodes`` is the live node count, not ``sample_num``.)
-        """
-        if isinstance(config, (str, os.PathLike)):
-            config = RoadmapConfig.from_yaml(config)
-        if isinstance(config, RoadmapConfig):
-            if fields:
-                raise TypeError("set_roadmap_config: pass either a RoadmapConfig / YAML path or fields, not both")
-            self.roadmap.config = config
-        else:
-            merged = self.roadmap_config.as_dict()
-            merged.update(config or {})
-            merged.update(fields)
-            self.roadmap.config = RoadmapConfig(merged)
-        return self.roadmap_config
-
-    def set_start(self, start):
-        self.start = start
-        start_pixel = [self.world_to_map(s,discrete=True) for s in start]
-        for s in start_pixel:
-            self.type_map[tuple(s)] = TYPES.START
-        
-    def set_goal(self, goal):
-        self.goal = goal
-        goal_pixel =  [self.world_to_map(g,discrete=True) for g in goal]
-        for g in goal_pixel:
-            self.type_map[tuple(g)] = TYPES.GOAL
-    
-    def set_endpoints(self, pickups=None, deliveries=None, parking=None):
-        """Store task endpoints (world coords) for visualization only.
-
-        Unlike set_start/set_goal, these do NOT inject nodes into the roadmap
-        or touch type_map; they are purely cosmetic metadata that Visualizer2D
-        draws on top of the roadmap (pickups, deliveries, parking spots).
-        """
-        self.pickups = list(pickups) if pickups is not None else []
-        self.deliveries = list(deliveries) if deliveries is not None else []
-        self.parking = list(parking) if parking is not None else []
+        return self.node_sampler.num_total_nodes
 
     @property
     def start_nodes_index(self) -> dict:
@@ -179,11 +128,11 @@ class GraphSampler(GraphSamplerBase):
     @property
     def start_nodes(self) -> List[Node]:
         return self.node_sampler.get_nodes(index_type='start_points')
-    
+
     @property
     def goal_nodes(self) -> List[Node]:
         return self.node_sampler.get_nodes(index_type='goal_points')
-    
+
     @property
     def boundary_nodes(self) -> List[Node]:
         """The boundary nodes (the sampler's ``'boundary_points'`` kind) as
@@ -191,78 +140,8 @@ class GraphSampler(GraphSamplerBase):
         the sampled nodes whose cell touches a wall or the map edge."""
         return self.node_sampler.get_nodes(index_type='boundary_points')
 
-    def _all_edges_from(self, u_indices, khop: int = -1) -> dict:
-        """``{u: [(v, distance), ...]}`` along the roadmap for each node index in
-        ``u_indices``: ``RoadmapBase.khop_distances`` (``khop=-1`` every node,
-        ``inf`` when unreachable; ``khop=k`` the nodes within ``k`` hops)."""
-        n = len(self.nodes)
-        if n == 0 or self.roadmap is None or self.roadmap.num_nodes != n:
-            raise ValueError("Edges have not been generated yet. Please generate the roadmap first.")
-        return self.roadmap.khop_distances(list(u_indices), khop)
-
-    def get_start_nodes_with_all_edges(self, khop: int = -1):
-        """``{start index: [(v, distance), ...]}`` along the roadmap (see
-        ``_all_edges_from`` for ``khop``), cached per ``khop`` until the
-        roadmap is rebuilt (``Roadmap.apply`` resets the cache)."""
-        if not getattr(self, "start_to_all_edges_dict", None) or getattr(self, "_start_edges_khop", None) != khop:
-            self.start_to_all_edges_dict = self._all_edges_from(list(self.start_nodes_index.values()), khop)
-            self._start_edges_khop = khop
-        return self.start_to_all_edges_dict
-
-    def get_goal_nodes_with_all_edges(self, khop: int = -1):
-        """Goal twin of ``get_start_nodes_with_all_edges``."""
-        if not getattr(self, "goal_to_all_edges_dict", None) or getattr(self, "_goal_edges_khop", None) != khop:
-            self.goal_to_all_edges_dict = self._all_edges_from(list(self.goal_nodes_index.values()), khop)
-            self._goal_edges_khop = khop
-        return self.goal_to_all_edges_dict
-
-    def _index_of(self, p) -> int:
-        """Node index of a world point (exact match in ``pos_index_dict``). An
-        integer passes through. Raises ``KeyError`` when the point is not a
-        roadmap node."""
-        if isinstance(p, (int, np.integer)):
-            return int(p)
-        idx = self.pos_index_dict[p]
-        if idx is not None:
-            return int(idx)
-        raise KeyError(f"point {tuple(float(x) for x in np.asarray(p).reshape(-1))} is not a roadmap node")
-
-    def get_distance(self, p1, p2=None, type: str = 'Euclidean') -> float | List[Tuple[tuple, float]]:
-        """Distance between world points.
-
-        ``type`` ``'Euclidean'`` / ``'Manhattan'``: straight-line distance between
-        ``p1`` and ``p2`` (both required). ``type='dijkstra'``: shortest-path length
-        over the roadmap; ``p1`` / ``p2`` must be roadmap nodes (world coordinates,
-        resolved with ``_index_of``). With ``p2`` the result is a float, ``inf``
-        when unreachable; without ``p2`` it is ``[(point, distance), ...]`` for
-        every node reachable from ``p1`` (itself at 0), in node order.
-        """
-        if type == 'dijkstra':
-            u = self._index_of(p1)
-            if p2 is not None:
-                v = self._index_of(p2)
-                return float(self.roadmap.dijkstra(u, v))
-            return [(tuple(self.nodes[v].current), d) for v, d in self.roadmap.dijkstra(u)]
-        if type not in ('Euclidean', 'Manhattan'):
-            raise ValueError(f"get_distance: unknown type {type!r}; expected 'Euclidean', 'Manhattan' or 'dijkstra'")
-        if p2 is None:
-            raise ValueError("get_distance: p2 is required for a straight-line distance")
-        return Geometry.dist(p1, p2, type)
-
-    def get_neighbors(self, node: Node | int, **kwargs) -> List[Node]:
-        """
-        Get the neighbors of a node.
-        """
-        try:
-            idx = self._index_of(node.current)
-        except KeyError:
-            return []
-        if self.roadmap is None or idx >=  self.roadmap.num_nodes:
-            return []
-        neighbors = [ self.nodes[i] for i in  self.roadmap.neighbors(idx).tolist()]
-        return neighbors
-
-    def generateRandomNodes(self,sample_num: int = None, generate_grid_nodes = False, generate_boundary_nodes = False, prob_map = None, samp_from_prob_map_ratio = 0.5, roadmap_type: str = None, boundary_node_spacing: float | None = None):
+    # ------------------------------------------------------------ Nodes Methods
+    def generateRandomNodes(self,sample_num: int = None, generate_grid_nodes = False, generate_boundary_nodes = False, prob_map = None, samp_from_prob_map_ratio = 0.5, roadmap_type: str = None):
         """Reset ``node_sampler`` and sample this map's node set (see
         ``NodeSampler.sample_nodes`` for the options); ``nodes``,
         ``pos_index_dict`` and the index dicts are views over the sampler, so
@@ -275,8 +154,7 @@ class GraphSampler(GraphSamplerBase):
         start and goal positions, and when no outline was generated the
         existing nodes next to a wall are marked as boundary nodes instead.
         ``rrg`` roadmaps sample their own nodes, so nothing is generated for
-        them. ``boundary_node_spacing`` is accepted for backward
-        compatibility; the boundary spacing is the map resolution.
+        them.
 
         Returns:
             nodes: the map's node list (``self.nodes``).
@@ -301,6 +179,70 @@ class GraphSampler(GraphSamplerBase):
             sampling_type=sampling_type,            # halton / distributed parameters: node_sampler.sampling_dist_dict
         )
         return self.nodes
+
+    def get_nodes(self, points: List[tuple] | np.ndarray | None = None, index_dict: dict | None = None, index_type: str = '') -> List[Node]:
+        return self.node_sampler.get_nodes(points, index_dict, index_type)
+
+    def set_start(self, start):
+        """Set the start positions (world coordinates) and mark their cells ``TYPES.START``."""
+        self.start = start
+        self._mark_cells(start, TYPES.START)
+
+    def set_goal(self, goal):
+        """Set the goal positions (world coordinates) and mark their cells ``TYPES.GOAL``."""
+        self.goal = goal
+        self._mark_cells(goal, TYPES.GOAL)
+
+    def _mark_cells(self, points, cell_type):
+        """Set the type-map cell under each world point to ``cell_type``."""
+        for p in points:
+            self.type_map[tuple(self.world_to_map(p, discrete=True))] = cell_type
+
+    def set_endpoints(self, pickups=None, deliveries=None, parking=None):
+        """Store task endpoints (world coords) for visualization only.
+
+        Unlike set_start/set_goal, these do NOT inject nodes into the roadmap
+        or touch type_map; they are purely cosmetic metadata that Visualizer2D
+        draws on top of the roadmap (pickups, deliveries, parking spots).
+        """
+        self.pickups = list(pickups) if pickups is not None else []
+        self.deliveries = list(deliveries) if deliveries is not None else []
+        self.parking = list(parking) if parking is not None else []
+
+    def _index_of(self, p) -> int:
+        """Node index of a world point (exact match in ``pos_index_dict``). An
+        integer passes through. Raises ``KeyError`` when the point is not a
+        roadmap node."""
+        if isinstance(p, (int, np.integer)):
+            return int(p)
+        idx = self.pos_index_dict.get(tuple(p) if isinstance(p, (list, np.ndarray)) else p)
+        if idx is not None:
+            return int(idx)
+        raise KeyError(f"point {tuple(float(x) for x in np.asarray(p).reshape(-1))} is not a roadmap node")
+
+    # ------------------------------------------------------------ Roadmap  Methods
+    def set_roadmap_config(self, config: "dict | RoadmapConfig | str | None" = None, **fields) -> RoadmapConfig:
+        """Replace or update the roadmap parameters.
+
+        A ``RoadmapConfig`` or a YAML path replaces the current config. A dict
+        and/or keyword fields (``sample_num``, ``num_neighbors``,
+        ``min_edge_length``, ``max_edge_length``, ``goal_sample_rate``, ...)
+        are applied on top of the current values. This is the one mutator:
+        ``roadmap_config`` is a read-only view of ``self.roadmap.config``.
+        (``num_total_nodes`` is the live node count, not ``sample_num``.)
+        """
+        if isinstance(config, (str, os.PathLike)):
+            config = RoadmapConfig.from_yaml(config)
+        if isinstance(config, RoadmapConfig):
+            if fields:
+                raise TypeError("set_roadmap_config: pass either a RoadmapConfig / YAML path or fields, not both")
+            self.roadmap.config = config
+        else:
+            merged = self.roadmap_config.as_dict()
+            merged.update(config or {})
+            merged.update(fields)
+            self.roadmap.config = RoadmapConfig(merged)
+        return self.roadmap_config
 
     def generate_roadmap(self, roadmap_type="prm", config=None, **options):
         """Build a roadmap with ``path_planning.common.environment.roadmap`` and
@@ -338,11 +280,74 @@ class GraphSampler(GraphSamplerBase):
         self.roadmap.apply()
         return self.roadmap
 
+    def get_neighbors(self, node: Node | int) -> List[Node]:
+        """The roadmap neighbours of ``node`` (a ``Node`` or a node index); ``[]`` when it is not a node."""
+        try:
+            idx = self._index_of(node if isinstance(node, (int, np.integer)) else node.current)
+        except KeyError:
+            return []
+        if not 0 <= idx < self.roadmap.num_nodes:
+            return []
+        return [self.nodes[i] for i in self.roadmap.neighbors(idx).tolist()]
+
+    def get_distance(self, p1, p2=None, type: str = 'Euclidean') -> float | List[Tuple[tuple, float]]:
+        """Distance between world points.
+
+        ``type`` ``'Euclidean'`` / ``'Manhattan'``: straight-line distance between
+        ``p1`` and ``p2`` (both required). ``type='dijkstra'``: shortest-path length
+        over the roadmap; ``p1`` / ``p2`` must be roadmap nodes (world coordinates,
+        resolved with ``_index_of``). With ``p2`` the result is a float, ``inf``
+        when unreachable; without ``p2`` it is ``[(point, distance), ...]`` for
+        every node reachable from ``p1`` (itself at 0), in node order.
+        """
+        if type == 'dijkstra':
+            u = self._index_of(p1)
+            if p2 is not None:
+                v = self._index_of(p2)
+                return float(self.roadmap.dijkstra(u, v))
+            return [(tuple(self.nodes[v].current), d) for v, d in self.roadmap.dijkstra(u)]
+        if type not in ('Euclidean', 'Manhattan'):
+            raise ValueError(f"get_distance: unknown type {type!r}; expected 'Euclidean', 'Manhattan' or 'dijkstra'")
+        if p2 is None:
+            raise ValueError("get_distance: p2 is required for a straight-line distance")
+        return Geometry.dist(p1, p2, type)
+
+    def _all_edges_from(self, u_indices, khop: int = -1) -> dict:
+        """``{u: [(v, distance), ...]}`` along the roadmap for each node index in
+        ``u_indices``: ``RoadmapBase.khop_distances`` (``khop=-1`` every node,
+        ``inf`` when unreachable; ``khop=k`` the nodes within ``k`` hops)."""
+        n = len(self.nodes)
+        if n == 0 or self.roadmap.num_nodes != n:
+            raise ValueError("Edges have not been generated yet. Please generate the roadmap first.")
+        return self.roadmap.khop_distances(list(u_indices), khop)
+
+    def _reset_edge_caches(self):
+        """Drop the cached start / goal edge lists (``get_start/goal_nodes_with_all_edges``)."""
+        self.start_to_all_edges_dict = {}
+        self.goal_to_all_edges_dict = {}
+        self._start_edges_khop = None
+        self._goal_edges_khop = None
+
+    def get_start_nodes_with_all_edges(self, khop: int = -1):
+        """``{start index: [(v, distance), ...]}`` along the roadmap (see
+        ``_all_edges_from`` for ``khop``), cached per ``khop`` until the
+        roadmap is rebuilt (``Roadmap.apply`` resets the cache)."""
+        if not self.start_to_all_edges_dict or self._start_edges_khop != khop:
+            self.start_to_all_edges_dict = self._all_edges_from(list(self.start_nodes_index.values()), khop)
+            self._start_edges_khop = khop
+        return self.start_to_all_edges_dict
+
+    def get_goal_nodes_with_all_edges(self, khop: int = -1):
+        """Goal twin of ``get_start_nodes_with_all_edges``."""
+        if not self.goal_to_all_edges_dict or self._goal_edges_khop != khop:
+            self.goal_to_all_edges_dict = self._all_edges_from(list(self.goal_nodes_index.values()), khop)
+            self._goal_edges_khop = khop
+        return self.goal_to_all_edges_dict
+
     # ------------------------------------------------------------ collision sweep
     def _make_collision_sweep(self):
         """A ``CollisionSweep`` from ``sweep_backend`` and ``sweep_spatial_index`` (see there)."""
-        dim = getattr(self, "dim", None) or (len(self.bounds) if getattr(self, "bounds", None) is not None else 2)
-        return CollisionSweep(getattr(self, "sweep_backend", "auto"), getattr(self, "sweep_spatial_index", "grid"), dim)
+        return CollisionSweep(self.sweep_backend, self.sweep_spatial_index, self.dim)
 
     def _roadmap_signature(self):
         """Cheap content fingerprint of the roadmap the sweep is built for."""
@@ -362,7 +367,7 @@ class GraphSampler(GraphSamplerBase):
           ``force`` rebinds regardless.
 
         Each bind bumps ``sweep_version``, which planner-side sweep caches key on."""
-        current = (getattr(self, "sweep_backend", "auto"), getattr(self, "sweep_spatial_index", "grid"))
+        current = (self.sweep_backend, self.sweep_spatial_index)
         wanted = (backend or current[0], spatial_index or current[1])
         if wanted != current:
             self.sweep_backend, self.sweep_spatial_index = wanted
@@ -371,13 +376,12 @@ class GraphSampler(GraphSamplerBase):
             if not self.nodes:
                 return
         sig = self._roadmap_signature()
-        if not force and getattr(self, "_collision_sweep_signature", None) == sig:
+        if not force and self._collision_sweep_signature == sig:
             return
         self.collision_sweep.set_graph([node.current for node in self.nodes], self.edges)
         self._collision_sweep_signature = sig
         self._node_current_tuples = [tuple(n.current) for n in self.nodes]
-        self.sweep_version = getattr(self, "sweep_version", 0) + 1
-
+        self.sweep_version += 1
 
     def get_collision_sweep(self, p1: tuple[float,float], p2: tuple[float,float],v=None, r: float = 0.5, use_interval: bool = False,get_time_interval: bool = False):
         """The planners' per-move disc query: the roadmap elements a disc of radius ``r`` moving ``p1 -> p2``
@@ -462,7 +466,7 @@ class GraphSampler(GraphSamplerBase):
         """``sweep_paths`` without ``prev``: one result per path, absolute times."""
         n = len(paths)
         backend, eps = self.collision_sweep, self.collision_sweep.STRICT_EPS
-        shapes, speeds, turns = ([getattr(a, f) for a in agents] for f in ("shape", "max_speed", "max_rotation"))
+        shapes, speeds, turns = _agent_fields(agents)
         grow = 0.0
         if isinstance(other, Agent):
             body = make_body(other.shape, self.dim)
@@ -498,7 +502,7 @@ class GraphSampler(GraphSamplerBase):
         as in ``sweep_paths``. Exact; no roadmap is needed."""
         paths = as_path_list(paths)
         agents = [agents] * len(paths) if isinstance(agents, Agent) else list(agents)
-        shapes, speeds, turns = ([getattr(a, f) for a in agents] for f in ("shape", "max_speed", "max_rotation"))
+        shapes, speeds, turns = _agent_fields(agents)
         return self.collision_sweep.agent_conflicts(paths, shapes, speeds, t0, turns, goal_hold, heading, pairs,
                                                     first_only, as_arrays)
 
@@ -532,19 +536,13 @@ class GraphSampler(GraphSamplerBase):
         return bool(self.agent_conflicts(agents, paths, goal_hold=holds, first_only=True,
                                          heading=None if all(h is None for h in heads) else heads))
 
-    # ------------------------------------------------------------ class function
+    # ------------------------------------------------------------ persistence and transforms
     def clear_data(self):
         """Drop the start / goal, obstacles, samples and roadmap (and the start / goal edge caches)."""
         super().clear_data()
-        self.start_to_all_edges_dict = {}
-        self.goal_to_all_edges_dict = {}
-        self._start_edges_khop = None
-        self._goal_edges_khop = None
+        self._reset_edge_caches()
         self.node_sampler.reset()
         self.roadmap.reset()
-
-    def __str__(self) -> str:
-        return "Graph Sampler"
 
     PICKLE_VERSION = 2
 
@@ -553,10 +551,8 @@ class GraphSampler(GraphSamplerBase):
         return {
             "use_discrete_space": self.use_discrete_space,
             "use_collision_sweep": self.use_collision_sweep,
-            "record_sweep": self.record_sweep,
-            "use_exact_collision_check": self.use_exact_collision_check,
-            "sweep_backend": getattr(self, "sweep_backend", "auto"),
-            "sweep_spatial_index": getattr(self, "sweep_spatial_index", "grid"),
+            "sweep_backend": self.sweep_backend,
+            "sweep_spatial_index": self.sweep_spatial_index,
         }
 
     def save_graph_sampler(self, path: str):
@@ -599,10 +595,9 @@ class GraphSampler(GraphSamplerBase):
         self.set_start(data["start"])
         self.set_goal(data["goal"])
 
-        self.obstacles = data["obstacles"]
-        self.obs_size = data["obs_size"] if "obs_size" in data else 0.5
+        self.obs_size = data.get("obs_size", 0.5)
         self.inflation_radius = data["inflation_radius"]
-        self.set_obstacles(self.obstacles)
+        self.set_obstacles(data["obstacles"])
         self.inflate_obstacles(self.inflation_radius)
 
         if "node_sampler" in data:              # version 2: plain-array state dicts carry the config and sampling parameters
@@ -628,16 +623,12 @@ class GraphSampler(GraphSamplerBase):
 
         # Collision sweep: rebuilt from the settings (maps saved before the rename store ``use_constraint_sweep``).
         self.use_collision_sweep = args.get("use_collision_sweep", data.get("use_collision_sweep", data.get("use_constraint_sweep", True)))
-        self.record_sweep = data.get("record_sweep", True)
-        self.use_exact_collision_check = data.get("use_exact_collision_check", True)
         self.sweep_backend = args.get("sweep_backend", data.get("sweep_backend", "auto"))
         self.sweep_spatial_index = args.get("sweep_spatial_index", data.get("sweep_spatial_index", "grid"))
         self.collision_sweep = self._make_collision_sweep()
+        self._collision_sweep_signature = None          # the new sweep is unbound, even if the roadmap is not new
         if self.use_collision_sweep:
             self.set_collision_sweep()
-
-        points = np.array([samp.current for samp in self.nodes])
-        self.sample_kd_tree = KDTree(points)
 
     def rotate(self, k: int, axes: Tuple[int, int] = (0, 1)):
         """Rotate the map in place by ``k`` quarter turns counterclockwise in the plane of ``axes`` (two distinct
@@ -678,7 +669,7 @@ class GraphSampler(GraphSamplerBase):
 
         points = move([node.current for node in self.nodes])
         self.node_sampler.set_positions([tuple(p) for p in points.tolist()])
-        if self.roadmap is not None and self.roadmap.num_nodes == len(points):
+        if self.roadmap.num_nodes == len(points):
             self.roadmap._set_points(points)             # same topology; clearance re-read from the new ESDF
         self.start = move(self.start).tolist()
         self.goal = move(self.goal).tolist()
@@ -688,32 +679,29 @@ class GraphSampler(GraphSamplerBase):
         self.obstacle_nodes = [Node(tuple(p), None, 0, 0)
                                for p in move([n.current for n in self.obstacle_nodes]).tolist()]
 
-        self.start_to_all_edges_dict = {}
-        self.goal_to_all_edges_dict = {}
-        self._start_edges_khop = self._goal_edges_khop = None
-        self.sample_kd_tree = KDTree(points) if len(points) else None
+        self._reset_edge_caches()
         if self.use_collision_sweep and len(self.edges) > 0:
             self.set_collision_sweep()
 
     def create_pruned_copy(self, kept_node_indices: np.ndarray):
         """A new ``GraphSampler`` with the same map and settings holding only the nodes ``kept_node_indices``
-        (renumbered in increasing index order) and the roadmap edges between them."""
+        plus the start and goal nodes (always kept), renumbered in increasing index order, and the roadmap
+        edges between them."""
         if kept_node_indices is None or len(kept_node_indices) == 0:
             raise ValueError("kept_node_indices must be a non-empty array of node indices.")
-        kept = sorted(set(np.asarray(kept_node_indices, dtype=int).tolist()))
+        start_goal = set(self.start_nodes_index.values()) | set(self.goal_nodes_index.values())
+        kept = sorted(set(np.asarray(kept_node_indices, dtype=int).tolist()) | start_goal)
         new_index = {old: new for new, old in enumerate(kept)}
-        weights = self.road_map_edge_weights if self.road_map_edge_weights is not None and \
-            len(self.road_map_edge_weights) > 0 else None
+        weights = self.road_map_edge_weights if len(self.road_map_edge_weights) else None
         road_map, road_map_weights = [], []
         for i in kept:
             nbrs = self.road_map[i] if i < len(self.road_map) else []
             slots = [n for n, j in enumerate(nbrs) if j in new_index]
             road_map.append([new_index[nbrs[n]] for n in slots])
             road_map_weights.append([weights[i][n] for n in slots] if weights is not None else [])
-        start_goal = set(self.start_nodes_index.values()) | set(self.goal_nodes_index.values())
         settings = self._settings()
         roadmap_config = self.roadmap_config.as_dict()
-        copy = GraphSampler(bounds=self.bounds, resolution=getattr(self, "resolution", 1.0), start=[], goal=[],
+        copy = GraphSampler(bounds=self.bounds, resolution=self.resolution, start=[], goal=[],
                             roadmap_config={**roadmap_config, "sample_num": 0}, **settings,
                             sampling_dist_dict=self.node_sampler.sampling_dist_dict)
         copy._load_from_dict({                           # the legacy (node list + nested adjacency) layout
