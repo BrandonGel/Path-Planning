@@ -1,20 +1,14 @@
-"""Disc (N-D ball) agents swept along whole paths: backend-neutral timing, assembly and conflicts.
+"""Ball agents (discs in 2D, spheres in 3D) swept along whole paths, in any dimension.
 
-Shared by the disc collision backends (``ShapelyCollision`` in 2D, ``CGALCollision`` in 2D / 3D). A backend
-only supplies its spatial index: which roadmap vertices and edges lie strictly within ``r`` of a segment or
-a point, as a cheap superset (``_vertex_candidates`` / ``_edge_candidates``: boxes or balls). Everything else,
-including the exact distance test, is here, in NumPy / numba and in
-any dimension:
+The geometry behind ``collision_sweep.CollisionSweep`` (the base of ``ShapelyCollision`` and
+``CGALCollision``). A backend only supplies candidate queries (a superset of the elements near each
+segment); the exact distance test, timing, assembly and agent conflicts are here:
 
-- ``disc_schedule``: timing of one path (constant speed per segment, optional turn time at waypoints).
-- ``sweep_paths``: when each agent (a ball of its own radius and speed) covers each roadmap vertex and
-  directed edge, for many agents at once.
-- ``disc_agent_conflicts``: when the balls of two agents overlap, for every pair of agents.
+- ``sweep_paths``: when each agent covers each roadmap vertex and directed edge.
+- ``disc_agent_conflicts``: when two agents overlap.
 
-The roadmap timing uses the same formulas and tolerances as the former per-move
-``overlapping_interval_cgal`` (vertex: the quadratic ``|r0 + t v|^2 = r^2`` with ``+1e-10`` / ``+1e-9``
-slack; edge: endpoint balls and the finite cylinder), so a one-move query returns what it used to.
-No module here imports Shapely.
+The window formulas and tolerances match the former per-move queries, so a one-move query returns what
+it used to.
 """
 from __future__ import annotations
 
@@ -40,7 +34,7 @@ _LOW, _HIGH = 1, 2          # direction bits used while folding
 
 def fold_directed_edges(edges: np.ndarray):
     """Directed ``(src, tgt)`` pairs -> one entry per undirected edge: ``(lo, hi, dirs)`` with ``lo < hi``
-    and ``dirs`` the ``EdgeDir`` of the directions present. Self-loops are dropped."""
+    and ``dirs`` its ``EdgeDir``. Self-loops are dropped."""
     edges = np.asarray(edges, dtype=np.int64).reshape(-1, 2)
     edges = edges[edges[:, 0] != edges[:, 1]]
     if len(edges) == 0:
@@ -61,7 +55,7 @@ def fold_directed_edges(edges: np.ndarray):
 
 @njit(cache=True)
 def _merge_sorted_intervals(ids, t1, t2, eps):
-    """Merge intervals already sorted by (id, t1): overlapping or touching windows of one id join."""
+    """Merge overlapping or touching windows of each id; input sorted by ``(id, t1)``."""
     n = len(ids)
     out_i = np.empty(n, dtype=np.int64)
     out_a = np.empty(n)
@@ -80,8 +74,7 @@ def _merge_sorted_intervals(ids, t1, t2, eps):
 
 
 def merge_intervals(ids, t1, t2):
-    """``(ids, t1, t2)`` arrays -> the same, sorted by ``(id, t1)`` with each id's overlapping or touching
-    closed windows merged (one NumPy sort plus a numba pass)."""
+    """``(ids, t1, t2)`` sorted by ``(id, t1)``, with each id's overlapping or touching windows merged."""
     ids = np.asarray(ids, dtype=np.int64)
     t1 = np.asarray(t1, dtype=float)
     t2 = np.asarray(t2, dtype=float)
@@ -92,9 +85,8 @@ def merge_intervals(ids, t1, t2):
 
 
 def intervals_to_dict(ids, t1, t2, keys=None) -> dict:
-    """``{key: [(t1, t2), ...]}`` from the output of ``merge_intervals`` (``ids`` sorted, so each id's
-    windows are one contiguous run); ``keys`` (optional) maps each row to its dict key, e.g. a directed
-    edge tuple."""
+    """``{key: [(t1, t2), ...]}`` from ``merge_intervals`` output. ``keys`` (optional) gives each row's
+    dict key, e.g. a directed edge tuple."""
     ids = np.asarray(ids)
     if len(ids) == 0:
         return {}
@@ -111,12 +103,11 @@ def intervals_to_dict(ids, t1, t2, keys=None) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Timing of one path
+# Inputs
 # ---------------------------------------------------------------------------
 
 def check_velocity(velocity):
-    """``velocity`` as a float, or None (every segment takes 1 time unit); raises unless it is None or
-    positive and finite."""
+    """``velocity`` as a float, or None (1 time unit per segment). Raises unless None or positive."""
     if velocity is None:
         return None
     if not (np.isfinite(velocity) and velocity > 0):
@@ -125,13 +116,12 @@ def check_velocity(velocity):
 
 
 def per_agent(x, n: int) -> list:
-    """``x`` as one value per agent: a list / tuple / array of length ``n`` as is, anything else repeated."""
+    """``x`` as one value per agent: a length-``n`` list / tuple / array as is, anything else repeated."""
     return list(x) if isinstance(x, (list, tuple, np.ndarray)) and len(x) == n else [x] * n
 
 
 def as_path_list(paths) -> list:
-    """``paths`` as a list of ``(P, D)`` arrays: one path ``(P, D)``, same-length paths ``(A, P, D)``, or a
-    list / tuple of paths of any lengths."""
+    """``paths`` as a list of ``(P, D)`` arrays, from one path, ``(A, P, D)`` paths or a list of paths."""
     try:
         arr = np.asarray(paths, dtype=float)
     except ValueError:                                   # ragged: several paths
@@ -145,46 +135,13 @@ def as_path_list(paths) -> list:
     raise ValueError(f"paths: expected (P, D), (A, P, D) or a list of (P, D) paths, got shape {arr.shape}")
 
 
-def disc_schedule(path, velocity=None, t0: float = 0.0, turning_speed=None):
-    """Timing of a disc agent along the polyline ``path`` (``(P, D)``, any dimension).
-
-    ``velocity``: speed on every segment, or None for 1 time unit per segment. ``turning_speed`` (rad/s):
-    None, ``inf`` or 0 for no turn time, otherwise the agent waits ``angle / turning_speed`` at each
-    interior waypoint (the angle between the two segments). Returns ``(path, seg_windows, turn_windows)``:
-    the path with consecutive duplicate waypoints dropped, ``(m, 2)`` ``(depart, arrive)`` per segment and
-    ``(P - 2, 2)`` ``(start, end)`` per interior waypoint."""
-    velocity = check_velocity(velocity)
-    if turning_speed is not None and not turning_speed >= 0:
-        raise ValueError(f"turning_speed must be >= 0, inf or None, got {turning_speed}")
-    path = np.asarray(path, dtype=float)
-    if path.ndim == 1:
-        path = path.reshape(1, -1)
-    if len(path) > 1:
-        path = path[np.r_[True, np.any(np.diff(path, axis=0) != 0.0, axis=1)]]
-    seg = path[1:] - path[:-1]
-    length = np.linalg.norm(seg, axis=1)
-    move = np.ones(len(seg)) if velocity is None else length / velocity
-    if len(seg) > 1 and turning_speed is not None and np.isfinite(turning_speed) and turning_speed > 0:
-        u = seg / length[:, None]
-        angle = np.arccos(np.clip(np.sum(u[1:] * u[:-1], axis=1), -1.0, 1.0))
-        turn = angle / turning_speed
-    else:
-        turn = np.zeros(max(len(seg) - 1, 0))
-    durations = np.empty(max(2 * len(move) - 1, 0))
-    durations[0::2], durations[1::2] = move, turn
-    ends = t0 + np.cumsum(durations)
-    starts = np.r_[t0, ends[:-1]] if len(ends) else ends
-    return path, np.column_stack([starts[0::2], ends[0::2]]), np.column_stack([starts[1::2], ends[1::2]])
-
-
 # ---------------------------------------------------------------------------
-# Roadmap contact windows (same math as the former per-move overlapping_interval_cgal)
+# Roadmap contact windows
 # ---------------------------------------------------------------------------
 
 def vertex_windows(r0, vel, r, tdur):
-    """Per row: when ``|r0 + t * vel| < r`` for ``t`` in ``[0, tdur]``: ``(t1, t2, valid)``. ``r0`` is the
-    agent's start minus the vertex, ``vel`` its velocity; rows that never come strictly inside are not
-    ``valid``. Same slack as before: ``+1e-10`` on ``c``, ``+1e-9`` on the exit time."""
+    """Per row, when ``|r0 + t * vel| < r`` for ``t`` in ``[0, tdur]``: ``(t1, t2, valid)``. ``r0`` is the
+    agent's start minus the vertex. Slack: ``+1e-10`` on the distance, ``+1e-9`` on the exit time."""
     a = np.einsum("ij,ij->i", vel, vel)
     b = 2.0 * np.einsum("ij,ij->i", vel, r0)
     c = np.einsum("ij,ij->i", r0, r0) - r * r + 1e-10
@@ -203,9 +160,9 @@ def vertex_windows(r0, vel, r, tdur):
 
 
 def edge_windows(start, vel, r, tdur, a_pos, b_pos, end_lo, end_hi):
-    """Per row: when the agent (``start + t * vel``, ``t`` in ``[0, tdur]``) is within ``r`` of the edge
-    ``a_pos -> b_pos``: the endpoint-ball windows ``[end_lo, end_hi]`` (``inf`` / ``-inf`` when neither
-    endpoint is hit) joined with the finite-cylinder window. Returns ``(tau_start, tau_end, hit)``."""
+    """Per row, when the agent (``start + t * vel``, ``t`` in ``[0, tdur]``) is within ``r`` of the edge
+    ``a_pos -> b_pos``: ``(t_start, t_end, hit)``. Joins the endpoint-ball windows ``[end_lo, end_hi]``
+    (``inf`` / ``-inf`` when no endpoint is hit) with the finite-cylinder window."""
     a_to_b = b_pos - a_pos
     seg_len_sq = np.einsum("ij,ij->i", a_to_b, a_to_b) + 1e-12
     vdot = np.einsum("ij,ij->i", a_to_b, vel) / seg_len_sq
@@ -246,8 +203,7 @@ def edge_windows(start, vel, r, tdur, a_pos, b_pos, end_lo, end_hi):
 
 
 def _agent_values(x, n: int, check, none_value: float) -> np.ndarray:
-    """``x`` (one value or one per agent) as a float array, each value validated by ``check`` (None ->
-    ``none_value``); a single value is checked once."""
+    """``x`` (one value or one per agent) as a float array, validated by ``check``; None -> ``none_value``."""
     conv = lambda v: none_value if v is None else float(check(v))
     if isinstance(x, (list, tuple, np.ndarray)) and len(x) == n:
         return np.array([conv(v) for v in x], dtype=float)
@@ -269,8 +225,7 @@ def _check_radius(r):
 
 @njit(cache=True)
 def _schedule_times(seg_start, seg_count, move, turn, t0):
-    """Segment ``(depart, arrive)`` and the turn window after each segment, agent by agent, accumulated in
-    the same order as ``disc_schedule`` (``t0 + cumsum(durations)``) so the times are bit-identical."""
+    """Per segment ``(depart, arrive, turn_end)``, accumulated agent by agent (``t0 + cumsum``)."""
     m = len(move)
     depart = np.empty(m)
     arrive = np.empty(m)
@@ -289,12 +244,9 @@ def _schedule_times(seg_start, seg_count, move, turn, t0):
 
 
 def _path_pieces(paths, radius, velocity, t0, turning_speed, goal_hold):
-    """Moving segments and stationary pieces of every agent: ``(seg, still)`` dicts of flat arrays
-    (``still["kind"]``: 0 for an in-place turn, 1 for the goal hold).
-
-    Vectorised over all agents: the same timing as calling ``disc_schedule`` on each path (duplicate
-    waypoints dropped, ``velocity=None`` = 1 time unit per segment, ``angle / turning_speed`` turn time at
-    interior waypoints, then ``goal_hold`` at the last waypoint)."""
+    """Moving segments and stationary pieces of every agent, as ``(seg, still)`` dicts of flat arrays
+    (``still["kind"]``: 0 for an in-place turn, 1 for the goal hold). Consecutive duplicate waypoints are
+    dropped; ``velocity`` and ``turning_speed`` as in ``CollisionSweep.overlapping_interval_paths``."""
     n = len(paths)
     rad = _agent_values(radius, n, _check_radius, np.nan)
     if np.isnan(rad).any():
@@ -362,7 +314,7 @@ def _path_pieces(paths, radius, velocity, t0, turning_speed, goal_hold):
 
 
 # ---------------------------------------------------------------------------
-# Exact distance filters for the spatial layer (any dimension)
+# Exact distance filters
 # ---------------------------------------------------------------------------
 
 @njit(cache=True, inline="always")
@@ -396,9 +348,9 @@ def _point_segment_mask(pi, si, ri, P, SA, SB, r2):
 
 @njit(cache=True, parallel=True)
 def _segment_segment_mask(qi, ei, QA, QB, EA, EB, r2):
-    """Pair ``k``: segment ``QA[qi[k]] -> QB[qi[k]]`` strictly within ``sqrt(r2[qi[k]])`` of segment
-    ``EA[ei[k]] -> EB[ei[k]]``. The minimum distance is at an endpoint of one segment (four point-segment
-    distances) or at the interior closest points of the two lines when both parameters fall in [0, 1]."""
+    """Pair ``k``: segment ``qi[k]`` strictly within ``sqrt(r2[qi[k]])`` of segment ``ei[k]``. The
+    minimum distance is at an endpoint (four point-segment distances) or at the interior closest points of
+    the two lines."""
     out = np.empty(len(qi), dtype=np.bool_)
     D = QA.shape[1]
     for k in prange(len(qi)):
@@ -435,8 +387,7 @@ def _segment_segment_mask(qi, ei, QA, QB, EA, EB, r2):
 
 def segment_candidates(backend, a, b, r):
     """Vertices and edges strictly within ``r[k]`` of each segment ``a[k] -> b[k]``:
-    ``((seg, vertex), (seg, edge))``. ``backend._vertex_candidates`` / ``_edge_candidates`` give a
-    superset (a box or ball around each segment); the exact strict distance test is here."""
+    ``((seg, vertex), (seg, edge))``. Backend candidates, then the exact distance test."""
     a = np.ascontiguousarray(a, dtype=float)
     b = np.ascontiguousarray(b, dtype=float)
     r = np.broadcast_to(np.asarray(r, dtype=float), (len(a),))
@@ -471,14 +422,7 @@ def point_candidates(backend, p, r):
 
 def sweep_paths(backend, paths, radius, velocity=None, t0=0.0, turning_speed=None, goal_hold=0.0,
                 as_arrays: bool = True) -> list:
-    """``overlapping_interval_paths`` for a disc backend (see ``ShapelyCollision`` / ``CGALCollision``).
-
-    ``backend`` provides ``vertex_positions``, ``edge_src_array`` / ``edge_tgt_array`` (canonical edge
-    endpoints), ``edge_src_positions`` / ``edge_tgt_positions``, ``edge_dir`` (one ``EdgeDir`` byte per
-    canonical edge) and the candidate queries ``_vertex_candidates(a, b, r)`` / ``_edge_candidates(a, b, r)``:
-    ``(row, element)`` index arrays, a superset of the elements within ``r[row]`` of segment
-    ``a[row] -> b[row]`` (``a == b`` for a point). ``segment_candidates`` / ``point_candidates`` apply the
-    exact strict distance test."""
+    """``CollisionSweep.overlapping_interval_paths`` for ``backend`` (a ``CollisionSweep``)."""
     paths = as_path_list(paths)
     n = len(paths)
     if n == 0:
@@ -524,9 +468,9 @@ def sweep_paths(backend, paths, radius, velocity=None, t0=0.0, turning_speed=Non
 
 
 def assemble(backend, n_agents, v_parts, e_parts, as_arrays=False) -> list:
-    """Expand canonical edge hits to their allowed directions (``EdgeDir``), merge each (agent, element)'s
-    windows and split per agent, as dicts or arrays (see ``sweep_paths``)."""
-    nv = max(len(backend.vertex_positions), 1)
+    """Expand canonical edge hits to their allowed directions, merge each (agent, element)'s windows and
+    split per agent. ``v_parts`` / ``e_parts``: lists of ``(agent, element, t1, t2)`` arrays."""
+    nv = max(len(backend.vertex_positions) if backend.vertex_positions is not None else 0, 1)
     cat = lambda parts, i, dt: (np.concatenate([np.asarray(q[i]) for q in parts]).astype(dt)
                                 if parts else np.empty(0, dt))
     va, vid, vt1, vt2 = (cat(v_parts, i, dt) for i, dt in enumerate((np.int64, np.int64, float, float)))
@@ -558,14 +502,13 @@ def assemble(backend, n_agents, v_parts, e_parts, as_arrays=False) -> list:
 
 
 # ---------------------------------------------------------------------------
-# Agent-agent conflicts between balls (any dimension)
+# Agent-agent conflicts
 # ---------------------------------------------------------------------------
 
 @njit(cache=True, parallel=True)
 def _ball_sweep_prune(bmin, bmax, w0, w1, agent):
-    """Broad phase: index pairs of pieces of different agents whose boxes (``(n, D)`` min / max) overlap
-    on every axis and whose windows overlap for a positive time. Sort-and-sweep on axis 0, parallel in
-    two passes (count, then fill)."""
+    """Broad phase: pairs of pieces of different agents whose boxes (``(n, D)`` min / max) and time
+    windows overlap. Sort-and-sweep on axis 0, in two parallel passes (count, then fill)."""
     n, D = bmin.shape
     order = np.argsort(bmin[:, 0])
     counts = np.zeros(n, dtype=np.int64)
@@ -613,9 +556,8 @@ def _ball_sweep_prune(bmin, bmax, w0, w1, agent):
 
 @njit(cache=True, parallel=True)
 def _ball_pair_windows(pa, pb, w0, w1, x0, v, rad):
-    """For each candidate piece pair: whether the two balls overlap for a positive time, and when.
-    Piece ``k`` is at ``x0[k] + v[k] * (t - w0[k])`` during ``[w0[k], w1[k]]``; the balls overlap while
-    ``|d + w * tau| < rad[a] + rad[b]``. Parallel over candidates."""
+    """Per candidate pair: whether the two balls overlap for a positive time, and when. Piece ``k`` is at
+    ``x0[k] + v[k] * (t - w0[k])`` during ``[w0[k], w1[k]]``."""
     n = len(pa)
     D = x0.shape[1]
     hit = np.zeros(n, dtype=np.bool_)
@@ -657,16 +599,26 @@ def _ball_pair_windows(pa, pb, w0, w1, x0, v, rad):
     return hit, t1, t2
 
 
+def pair_windows_output(n, i_ag, j_ag, t1, t2, first_only=False, as_arrays=False):
+    """Agent-pair windows as ``{(i, j): [(t1, t2), ...]}`` (``i < j``, merged), ``{(i, j): first time}``
+    with ``first_only``, or ``(i, j, t1, t2)`` arrays with ``as_arrays``."""
+    lo_ag, hi_ag = np.minimum(i_ag, j_ag), np.maximum(i_ag, j_ag)
+    key, a1, a2 = merge_intervals(lo_ag * n + hi_ag, t1, t2)
+    if first_only:
+        first = np.r_[True, key[1:] != key[:-1]] if len(key) else np.zeros(0, dtype=bool)
+        key, a1 = key[first], a1[first]
+        if as_arrays:
+            return key // n, key % n, a1, a1.copy()
+        return {(int(k // n), int(k % n)): float(t) for k, t in zip(key.tolist(), a1.tolist())}
+    if as_arrays:
+        return key // n, key % n, a1, a2
+    return intervals_to_dict(key, a1, a2, keys=[(int(k // n), int(k % n)) for k in key.tolist()])
+
+
 def disc_agent_conflicts(paths, radius, velocity=None, t0=0.0, turning_speed=None, goal_hold=0.0, pairs=None,
                          first_only: bool = False, as_arrays: bool = False, eps: float = 1e-9):
-    """When the balls of every two agents overlap (any dimension; touching is not contact).
-
-    ``radius``, ``velocity``, ``t0``, ``turning_speed`` and ``goal_hold`` are one value or one per agent;
-    timing as in ``disc_schedule`` (an agent exists from ``t0`` until it arrives, then for ``goal_hold``,
-    ``inf`` = it stays). Returns ``{(i, j): [(t1, t2), ...]}`` (``i < j``, merged windows) for the pairs
-    that collide; ``first_only=True`` gives ``{(i, j): first contact time}``; ``as_arrays=True`` gives
-    ``(i, j, t1, t2)`` arrays. ``pairs``: only check these ``(i, j)`` agent pairs. Agents i and j collide
-    while their centres are closer than ``r_i + r_j`` (each radius reduced by ``eps / 2``)."""
+    """``CollisionSweep.agent_conflicts``, in any dimension.
+    Each radius is reduced by ``eps / 2``, so touching is not contact."""
     paths = as_path_list(paths)
     n = len(paths)
     empty = (np.empty(0, np.int64), np.empty(0, np.int64), np.empty(0), np.empty(0))
@@ -695,15 +647,4 @@ def disc_agent_conflicts(paths, radius, velocity=None, t0=0.0, turning_speed=Non
     if len(qa) == 0:
         return empty if as_arrays else {}
     hit, t1, t2 = _ball_pair_windows(qa, qb, w0, w1, x0, v, rad)
-    i_ag, j_ag = agent[qa[hit]], agent[qb[hit]]
-    lo_ag, hi_ag = np.minimum(i_ag, j_ag), np.maximum(i_ag, j_ag)
-    key, a1, a2 = merge_intervals(lo_ag * n + hi_ag, t1[hit], t2[hit])
-    if first_only:
-        first = np.r_[True, key[1:] != key[:-1]] if len(key) else np.zeros(0, dtype=bool)
-        key, a1 = key[first], a1[first]
-        if as_arrays:
-            return key // n, key % n, a1, a1.copy()
-        return {(int(k // n), int(k % n)): float(t) for k, t in zip(key.tolist(), a1.tolist())}
-    if as_arrays:
-        return key // n, key % n, a1, a2
-    return intervals_to_dict(key, a1, a2, keys=[(int(k // n), int(k % n)) for k in key.tolist()])
+    return pair_windows_output(n, agent[qa[hit]], agent[qb[hit]], t1[hit], t2[hit], first_only, as_arrays)

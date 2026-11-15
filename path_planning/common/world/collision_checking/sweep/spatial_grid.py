@@ -1,13 +1,9 @@
 """Uniform grid over axis-aligned boxes (2D or 3D), built and queried in numba.
 
-``BoxGrid(lo, hi)`` bins each item's box (a point when ``lo == hi``) into the cells it covers; ``query(qlo,
-qhi)`` returns every ``(query, item)`` pair whose boxes overlap (closed boxes), for many query boxes at once,
-in parallel. Each pair is reported once: an item spanning several cells is only reported from the cell that
-holds the lower corner of the two boxes' intersection. The result is a superset filter for the exact tests
-in ``disc_sweep`` / ``polytope_sweep`` (the same role as an R-tree's box query).
-
-Memory: the item boxes (``2 * m * 3`` floats), one int64 per (item, cell) entry and one per cell (+1).
-The cell size is chosen from the items (``cell_size``), and the number of cells is capped at a few per item.
+``BoxGrid(lo, hi)`` bins each item's box (a point when ``lo == hi``) into the cells it covers.
+``query(qlo, qhi)`` returns every ``(query, item)`` pair whose boxes overlap, for many query boxes in
+parallel. Each pair is reported once, from the cell holding the lower corner of the two boxes'
+intersection. It is a candidate filter for the exact tests in ``disc_sweep`` / ``polytope_sweep``.
 """
 from __future__ import annotations
 
@@ -55,7 +51,7 @@ def _build(lo, hi, origin, inv_h, dims):
 
 @njit(cache=True, inline="always")
 def _visit(q, qlo, qhi, lo, hi, origin, inv_h, dims, cell_start, entries, out, pos):
-    """Items overlapping query box ``q``, each once; written to ``out[pos:]`` when ``out`` is long enough
+    """Items overlapping query box ``q``, each once: written to ``out[pos:]`` when ``out`` is non-empty
     (fill pass), only counted otherwise. Returns the count."""
     nx, ny, nz = dims[0], dims[1], dims[2]
     x0, x1 = _cell(qlo[q, 0], origin[0], inv_h, nx), _cell(qhi[q, 0], origin[0], inv_h, nx)
@@ -111,9 +107,9 @@ def _pad3(x):
 
 
 class BoxGrid:
-    """Uniform grid over the boxes ``[lo[j], hi[j]]`` (``(m, D)``, D = 2 or 3). ``cell_size``: the cell edge
-    (default: the median of the boxes' largest side, or for points the spacing of about two points per
-    cell), enlarged when needed so there are at most ``max_cells_per_item`` cells per item."""
+    """Uniform grid over the boxes ``[lo[j], hi[j]]`` (``(m, D)``, D = 2 or 3). ``cell_size`` defaults to
+    the median of the boxes' largest side (points: about two per cell), and is enlarged so there are at most
+    ``max_cells_per_item`` cells per item."""
 
     def __init__(self, lo, hi=None, cell_size=None, max_cells_per_item: float = 4.0):
         lo = np.asarray(lo, dtype=float)
@@ -147,8 +143,8 @@ class BoxGrid:
         return int(self.lo.nbytes + self.hi.nbytes + self.cell_start.nbytes + self.entries.nbytes)
 
     def query(self, qlo, qhi):
-        """``(rows, ids)``: every query box ``rows[k]`` (``[qlo, qhi]``, ``(n, D)``) overlapping item box
-        ``ids[k]``, grouped by query; each pair once."""
+        """``(rows, ids)``: every query box ``rows[k]`` of ``[qlo, qhi]`` (``(n, D)``) overlapping item
+        ``ids[k]``, grouped by query, each pair once."""
         if len(qlo) == 0:
             z = np.empty(0, dtype=np.int64)
             return z, z

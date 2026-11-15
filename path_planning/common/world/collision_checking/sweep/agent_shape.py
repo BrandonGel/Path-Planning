@@ -1,32 +1,25 @@
-"""Agent footprints: a disc or a polygon in the agent's body frame.
+"""Agent bodies: a disc or polygon (2D) and a sphere, box or convex polyhedron (3D), in the body frame.
 
-Every shape has its reference point (the centroid) at the origin and an
-``orientation`` in radians: the rotation of the body relative to the direction
-of travel. While an agent moves, the shape keeps following the direction of
-travel; ``orientation`` is a fixed extra rotation on top of it, so
-``orientation = 0`` means the shape's reference direction (below) points along
-the move. ``radius()`` is the bounding radius about the centroid.
+Every shape has its centroid at the origin. ``orientation`` is the body's fixed rotation relative to the
+direction of travel: at ``orientation = 0`` the reference direction below points along the move.
+``radius()`` is the bounding radius about the centroid.
 
 Reference direction at ``orientation = 0``:
     Triangle        centroid -> the vertex joined by side 1 and side 2
-    Rectangle       along the width (perpendicular to the height sides)
-    RegularPolygon  centroid -> a vertex for an odd number of sides,
-                    centroid -> the middle of a side for an even number
-    CustomPolygon   the given points' own +x axis, shifted so the area centroid is the origin
-    Circle          rotation-invariant (orientation is always 0)
+    Rectangle       along the width
+    RegularPolygon  centroid -> a vertex (odd number of sides) or the middle of a side (even)
+    CustomPolygon   the given points' own +x axis
+    Circle          rotation-invariant
 
-3D: every 2D shape takes an optional ``z_height``, its vertical thickness: in 3D it is the prism of its
-outline from ``-z_height / 2`` to ``+z_height / 2`` about the centroid (a ``Circle`` becomes a cylinder,
-approximated by the circumscribed 32-gon prism, never smaller than the cylinder). ``Rectangle.height`` is
-the rectangle's second side, hence the different name. Native 3D shapes (``dim = 3``):
+3D: a 2D shape with a ``z_height`` is the prism of its outline, from ``-z_height / 2`` to
+``+z_height / 2`` (a ``Circle`` becomes a 32-gon prism, never smaller than the cylinder). Native 3D shapes:
 
     Sphere            rotation-invariant
     Box               length along body +x, width along +y, height along +z
-    ConvexPolyhedron  the convex hull of the given points, shifted so the volume centroid is the origin
+    ConvexPolyhedron  the convex hull of the given points
 
-Their ``orientation`` is ``(yaw, pitch, roll)`` in radians (or just a yaw), the fixed rotation of the body
-relative to the travel frame (``rotation_matrix()``: ``Rz(yaw) @ Ry(pitch) @ Rx(roll)``). In 3D the travel
-frame has +x along the direction of travel and no roll (+y horizontal, +z as close to up as possible).
+Their ``orientation`` is ``(yaw, pitch, roll)`` in radians, or just a yaw. The 3D travel frame has +x
+along the direction of travel and no roll.
 """
 import math
 
@@ -54,11 +47,11 @@ class Shape:
         self._z_height = _check_z_height(z_height)
 
     def z_height(self):
-        """Vertical thickness of the body in 3D (a prism of the outline), or None (2D only)."""
+        """Vertical thickness of the body in 3D (the prism of its outline), or None (2D only)."""
         return self._z_height
 
     def _with_z(self, d: dict) -> dict:
-        """``d`` plus ``z_height`` when it is set (dicts saved before it existed load as None)."""
+        """``d`` plus ``z_height`` when it is set."""
         if self._z_height is not None:
             d["z_height"] = self._z_height
         return d
@@ -68,7 +61,7 @@ class Shape:
 
     @staticmethod
     def _orientation_from(data: dict) -> float:
-        """``orientation`` of a saved dict; dicts saved before the rename call it ``heading``."""
+        """``orientation`` of a saved dict (older dicts call it ``heading``)."""
         return data.get("orientation", data.get("heading", 0.0))
 
     @staticmethod
@@ -84,14 +77,12 @@ class Shape:
         return self._orientation
 
     def outline(self) -> np.ndarray:
-        """``(K, 2)`` body-frame vertices (centroid at the origin) at ``orientation = 0``,
-        counter-clockwise. The orientation is applied by the caller."""
+        """``(K, 2)`` body-frame vertices at ``orientation = 0``, counter-clockwise."""
         raise NotImplementedError(f"{type(self).__name__} has no outline")
 
     def extent(self) -> tuple:
-        """``(x_min, x_max, y_min, y_max)`` of the body in the travel frame (centroid at the origin,
-        +x along the direction of travel, ``orientation`` applied): ``x_min`` is how far the body
-        reaches behind the centroid, ``x_max`` ahead of it, and ``y`` is the lateral reach."""
+        """``(x_min, x_max, y_min, y_max)`` of the body in the travel frame (+x along travel, ``orientation``
+        applied): its reach behind and ahead of the centroid, and its lateral reach."""
         if getattr(self, "_extent", None) is None:
             try:
                 pts = self.outline()
@@ -106,8 +97,7 @@ class Shape:
         return self._extent
 
     def front_face(self) -> float:
-        """Length of the face the body presents to the direction of travel: its lateral extent
-        (perpendicular to the travel direction) with ``orientation`` applied."""
+        """The body's lateral extent (perpendicular to travel), with ``orientation`` applied."""
         _, _, y_min, y_max = self.extent()
         return y_max - y_min
 
@@ -189,19 +179,6 @@ class Rectangle(Shape):
                          z_height=data.get("z_height"))
 
 
-class Square(Rectangle):
-    def __init__(self, side: float, orientation: float = 0.0, z_height=None):
-        super().__init__(side, side, orientation, z_height)
-        self.side = side
-
-    def to_dict(self):
-        return self._with_z({"side": self.side, "radius": self._radius, "orientation": self._orientation})
-
-    @staticmethod
-    def from_dict(data: dict):
-        return Square(side=data["side"], orientation=Shape._orientation_from(data), z_height=data.get("z_height"))
-
-
 class RegularPolygon(Shape):
     # orientation = 0: centroid -> vertex for an odd number of sides,
     #                  centroid -> the middle of a side for an even number of sides
@@ -232,11 +209,8 @@ class CustomPolygon(Shape):
     # orientation = 0: the given points keep their axes, translated so the area centroid is the origin;
     #                  body +x points along the direction of travel
     def __init__(self, points, edges=None, orientation: float = 0.0, z_height=None):
-        """Polygon from ``points`` (``(N, 2)``) joined by ``edges`` (``(N, 2)`` index pairs).
-
-        Without ``edges`` the points are joined in sequence and the last connects to the first.
-        Every point must have exactly two edges and the edges must form one simple closed loop.
-        """
+        """Polygon from ``points`` (``(N, 2)``) joined by ``edges`` (``(N, 2)`` index pairs; default: in
+        sequence, closing the loop). The edges must form one simple closed loop."""
         pts = np.asarray(points, dtype=float)
         if pts.ndim != 2 or pts.shape[1] != 2 or not np.isfinite(pts).all():
             raise ValueError(f"CustomPolygon: points must be a finite (N, 2) array, got shape {pts.shape}")
@@ -304,7 +278,6 @@ class CustomPolygon(Shape):
                              orientation=Shape._orientation_from(data), z_height=data.get("z_height"))
 
 
-Polygon = RegularPolygon        # the earlier name; it clashes with ``shapely.Polygon``, prefer RegularPolygon
 
 
 # ---------------------------------------------------------------------------
@@ -312,8 +285,7 @@ Polygon = RegularPolygon        # the earlier name; it clashes with ``shapely.Po
 # ---------------------------------------------------------------------------
 
 def euler_rotation(yaw: float = 0.0, pitch: float = 0.0, roll: float = 0.0) -> np.ndarray:
-    """``Rz(yaw) @ Ry(pitch) @ Rx(roll)`` (radians): the 3x3 rotation of a body by yaw about +z, then pitch
-    about the new +y, then roll about the new +x."""
+    """The 3x3 rotation ``Rz(yaw) @ Ry(pitch) @ Rx(roll)`` (radians)."""
     cy, sy, cp, sp, cr, sr = (math.cos(yaw), math.sin(yaw), math.cos(pitch), math.sin(pitch),
                               math.cos(roll), math.sin(roll))
     return np.array([[cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
@@ -341,11 +313,11 @@ class Shape3D(Shape):
         self._z_height = None
 
     def rotation_matrix(self) -> np.ndarray:
-        """The fixed body rotation relative to the travel frame (see ``euler_rotation``)."""
+        """The fixed body rotation relative to the travel frame."""
         return euler_rotation(*self._orientation)
 
     def vertices(self) -> np.ndarray:
-        """``(K, 3)`` body-frame vertices (centroid at the origin) before ``orientation``."""
+        """``(K, 3)`` body-frame vertices before ``orientation``."""
         raise NotImplementedError(f"{type(self).__name__} has no vertices")
 
     def outline(self) -> np.ndarray:
@@ -373,8 +345,7 @@ class ConvexPolyhedron(Shape3D):
     # orientation = 0: the given points keep their axes, translated so the volume centroid is the origin;
     #                  body +x points along the direction of travel
     def __init__(self, points, orientation=0.0):
-        """The convex hull of ``points`` (``(N, 3)``, at least 4 not coplanar); points inside the hull are
-        dropped."""
+        """The convex hull of ``points`` (``(N, 3)``, at least 4, not coplanar)."""
         from scipy.spatial import ConvexHull
         pts = np.asarray(points, dtype=float)
         if pts.ndim != 2 or pts.shape[1] != 3 or len(pts) < 4 or not np.isfinite(pts).all():

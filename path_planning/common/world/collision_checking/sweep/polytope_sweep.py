@@ -1,29 +1,24 @@
-"""Convex-polytope bodies (2D polygons, 3D polyhedra) swept along whole paths, in any dimension.
+"""Convex-polytope bodies (2D polygons, 3D polyhedra) swept along whole paths.
 
-Backend-neutral geometry for ``CGALCollisionHetero``. A body is a ball (a disc in 2D, a sphere in 3D) or a
-union of convex pieces, each stored as its vertices and its faces as half-spaces ``n . x <= h`` in the body
-frame (the shape's fixed ``orientation`` already applied). Over every segment of its path a body is rigid:
-it is rotated into the travel frame and moves at constant velocity, so
+Geometry for ``CGALCollisionHetero``. A body is a ball or a union of convex pieces, each stored as vertices
+and half-space faces ``n . x <= h`` in the body frame (orientation applied). Over each path segment the
+body is rigid and moves at constant velocity, so every test is exact:
 
-- a roadmap vertex ``p`` is inside a moving piece while ``n_k . (p - x0 - v t) < h_k`` for every face:
-  one clip of the time window (Cyrus-Beck);
-- a roadmap edge ``A + s (B - A)`` meets a moving piece while some ``s`` satisfies the same, which is
-  linear in ``(s, t)``: one small polygon clip in the ``(s, t)`` plane, whose time range is the window;
-- two bodies overlap while the position of one relative to the other, ``d(t)``, which moves on a line,
-  lies in their configuration obstacle ``A (+) (-B)``: for two convex pieces its half-spaces are the face
-  normals of both and, in 3D, the cross products of their edge directions (each with its support value);
-  for a ball of radius ``r`` and a piece it is the piece grown by ``r`` (the piece, a slab over each face
-  and a capsule along each ridge: the edges in 3D, the vertices in 2D).
+- Vertex ``p`` is inside a piece while ``n_k . (p - x0 - v t) < h_k`` for every face: one clip of the
+  time window.
+- Edge ``A + s (B - A)`` meets a piece while some ``s`` satisfies the same: a polygon clip in the
+  ``(s, t)`` plane, whose time range is the window.
+- Two bodies overlap while their relative position, which moves on a line, lies in ``A (+) (-B)``. For
+  two convex pieces its half-spaces are the face normals of both and, in 3D, the cross products of their
+  edge directions. For a ball and a piece it is the piece grown by the radius.
 
-Each test is exact. Concave bodies are unions of convex pieces; an element that is left and re-entered
-gets separate windows. During an in-place turn the body is its bounding ball (conservative). Touching is
-not contact: faces on the body's boundary are moved inward by ``eps`` for the roadmap tests (internal seams
-between pieces stay put, so an element on a seam is still inside), and the agent tests need a penetration
-of ``eps``.
+Concave bodies are unions of convex pieces; an element left and re-entered gets separate windows. During
+an in-place turn the body is its bounding ball (conservative). Touching is not contact: boundary faces move
+inward by ``eps`` for the roadmap tests (seams between pieces stay put), and agents must penetrate by
+``eps``.
 
-3D attitude: the travel frame has +x along the direction of travel, +y horizontal and +z as close to up
-as possible (no roll; for vertical travel +y is world +y). The body is the shape rotated by its
-orientation, then by the travel frame.
+3D attitude: the travel frame has +x along the direction of travel, +y horizontal and no roll (+y is
+world +y for vertical travel). The body is the shape rotated by its orientation, then by the travel frame.
 """
 from __future__ import annotations
 
@@ -31,12 +26,14 @@ import json
 import math
 
 import numpy as np
+import shapely
 from numba import njit, prange
 from scipy.spatial import ConvexHull
+from shapely import Polygon as ShapelyPolygon
 
-from path_planning.common.world.collision_checking.agent_shape import Shape, Shape3D, Circle, Sphere, euler_rotation
-from path_planning.common.world.collision_checking.disc_sweep import (
-    per_agent, as_path_list, _path_pieces, _ball_sweep_prune, merge_intervals, intervals_to_dict)
+from path_planning.common.world.collision_checking.sweep.agent_shape import Shape, Shape3D, Circle, Sphere, euler_rotation
+from path_planning.common.world.collision_checking.sweep.disc_sweep import (
+    per_agent, as_path_list, pair_windows_output, _path_pieces, _ball_sweep_prune)
 
 
 # ---------------------------------------------------------------------------
@@ -49,14 +46,13 @@ def _rot2(theta: float) -> np.ndarray:
 
 
 def _footprint_convex_pieces(outline: np.ndarray) -> list:
-    """Convex pieces of the 2D outline ``(K, 2)``: ``[(ring (k, 2) counter-clockwise, on_boundary (k,))]``,
-    ``on_boundary[i]`` telling whether side ``ring[i] -> ring[i + 1]`` lies on the outline's boundary (not
-    an internal seam). The pieces are those of ``shapely_util.convex_pieces``."""
-    import shapely
-    from shapely.geometry import Polygon
+    """Convex pieces of the 2D outline ``(K, 2)``: ``[(ring, on_boundary), ...]`` with ``ring`` ``(k, 2)``
+    counter-clockwise and ``on_boundary[i]`` whether side ``i`` lies on the outline (not an internal seam)."""
     from shapely.geometry.polygon import orient
-    from path_planning.common.world.collision_checking.shapely_util import convex_pieces
-    foot = Polygon(outline)
+    from path_planning.common.world.collision_checking.shapely.shapely_util import convex_pieces
+    foot = ShapelyPolygon(outline)
+    if not foot.is_valid or foot.area <= 0.0:
+        raise ValueError(f"the outline is not a valid polygon ({shapely.is_valid_reason(foot)})")
     boundary = foot.boundary
     scale = max(1.0, float(np.sqrt(foot.area)))
     out = []
@@ -71,11 +67,10 @@ def _footprint_convex_pieces(outline: np.ndarray) -> list:
 
 
 def _convex_piece(V: np.ndarray, boundary_fn) -> dict:
-    """Half-space description of the convex hull of ``V`` (``(k, D)``, D = 2 or 3): vertices, faces
-    (unit outward normal, offset, boundary flag from ``boundary_fn(normal, offset, face_centroid)``),
-    for each face the "column" planes through its ridges (perpendicular to the face, pointing away from
-    it), the ridges as segments (3D: the edges; 2D: the vertices, as zero-length segments) and, in 3D, the
-    distinct edge directions."""
+    """Half-space description of the convex hull of ``V`` (``(k, D)``): vertices ``V``, faces (unit normal
+    ``N``, offset ``H``, boundary flag ``B`` from ``boundary_fn(normal, offset, centroid)``), per face the
+    "column" planes through its ridges (``cols``), the ridges as segments ``RA -> RB`` (3D: edges; 2D:
+    vertices) and, in 3D, the distinct edge directions ``E``."""
     D = V.shape[1]
     hull = ConvexHull(V)
     V = V[hull.vertices]
@@ -137,9 +132,8 @@ def _convex_piece(V: np.ndarray, boundary_fn) -> dict:
 
 
 class Body:
-    """One agent body in dimension ``dim``: a ball (``ball_r > 0``) or convex ``pieces``
-    (``_convex_piece`` dicts in the body frame, orientation applied); ``radius``: the bounding radius
-    about the reference point."""
+    """One agent body: a ball (``ball_r > 0``) or convex ``pieces`` (``_convex_piece`` dicts, orientation
+    applied). ``radius``: the bounding radius about the reference point."""
     def __init__(self, dim, radius, ball_r=0.0, pieces=()):
         self.dim, self.radius, self.ball_r, self.pieces = dim, float(radius), float(ball_r), list(pieces)
 
@@ -152,14 +146,16 @@ def _body_key(shape, dim):
         return (type(shape).__name__, json.dumps(shape.to_dict(), sort_keys=True, default=str), dim)
     if isinstance(shape, (int, float, np.integer, np.floating)):
         return ("radius", float(shape), dim)
+    if isinstance(shape, ShapelyPolygon):
+        return ("polygon", shape.wkb, dim)
     return ("points", np.asarray(shape, dtype=float).tobytes(), np.shape(shape), dim)
 
 
 def make_body(shape, dim: int) -> Body:
-    """The ``Body`` of ``shape`` in ``dim`` dimensions (cached). 2D: a ``Circle`` or a number is a disc;
-    any other 2D ``Shape`` or ``(K, 2)`` outline a polygon. 3D: a ``Sphere`` or a number is a sphere; a
-    ``Shape3D`` (``Box``, ``ConvexPolyhedron``) or ``(K, 3)`` points (their convex hull) a polyhedron; a 2D
-    ``Shape`` with ``z_height`` the prism of its outline (a ``Circle``: the circumscribed 32-gon prism)."""
+    """The ``Body`` of ``shape`` in ``dim`` dimensions (cached). A number, ``Circle`` (2D) or ``Sphere`` is a
+    ball; a 2D ``Shape`` a polygon (2D) or, with ``z_height``, a prism (3D); a ``Shape3D`` a convex polyhedron.
+    Raw points are used as given, about their own origin: a ``(K, 2)`` outline or shapely ``Polygon`` (2D), or
+    ``(K, 3)`` points (their convex hull)."""
     key = _body_key(shape, dim)
     body = _BODY_CACHE.get(key)
     if body is None:
@@ -174,7 +170,6 @@ def _all_boundary(n, h, c):
 
 
 def _make_body(shape, dim):
-    from path_planning.common.world.collision_checking.agent_shape import ConvexPolyhedron
     if isinstance(shape, (int, float, np.integer, np.floating)):
         r = float(shape)
         if not (np.isfinite(r) and r > 0):
@@ -184,30 +179,30 @@ def _make_body(shape, dim):
         raise ValueError(f"bodies are 2D or 3D, got dim={dim}")
     if isinstance(shape, Sphere) or (isinstance(shape, Circle) and dim == 2) or type(shape) is Shape:
         return Body(dim, shape.radius(), ball_r=shape.radius())
-    if not isinstance(shape, Shape):
+    if not isinstance(shape, Shape):                         # raw points: used as given, about their own origin
+        if isinstance(shape, ShapelyPolygon):
+            shape = np.asarray(shape.exterior.coords)[:-1]
         pts = np.asarray(shape, dtype=float)
-        if pts.ndim != 2 or pts.shape[1] != dim:
-            raise ValueError(f"a {dim}D body: expected a Shape, a radius or ({'K, 2' if dim == 2 else 'K, 3'}) "
-                             f"points, got shape {pts.shape}")
-        if dim == 2:
-            from path_planning.common.world.collision_checking.agent_shape import CustomPolygon
-            shape = CustomPolygon(pts)
-        else:
-            shape = ConvexPolyhedron(pts)
-    if isinstance(shape, Shape3D):
+        if pts.ndim != 2 or pts.shape[1] != dim or len(pts) < dim + 1:
+            raise ValueError(f"a {dim}D body: expected a Shape, a radius or (K, {dim}) points, got shape {pts.shape}")
+        if dim == 3:
+            return Body(3, np.linalg.norm(pts, axis=1).max(), pieces=[_convex_piece(pts, _all_boundary)])
+        outline, zh = pts, None
+    elif isinstance(shape, Shape3D):
         if dim != 3:
             raise ValueError(f"{type(shape).__name__} is a 3D shape; the roadmap / paths are {dim}D")
         V = shape.vertices() @ shape.rotation_matrix().T
         piece = _convex_piece(V, _all_boundary)
         return Body(3, np.linalg.norm(V, axis=1).max(), pieces=[piece])
-    # A 2D outline: a polygon in 2D, a prism in 3D.
-    if isinstance(shape, Circle):
-        k = 32
-        outline = (shape.radius() / math.cos(math.pi / k)) * np.column_stack(
-            [np.cos(2 * math.pi * np.arange(k) / k), np.sin(2 * math.pi * np.arange(k) / k)])
-    else:
-        outline = shape.outline()
-    outline = outline @ _rot2(shape.orientation()).T
+    else:                                                    # a 2D Shape: a polygon in 2D, a prism in 3D
+        if isinstance(shape, Circle):
+            k = 32
+            outline = (shape.radius() / math.cos(math.pi / k)) * np.column_stack(
+                [np.cos(2 * math.pi * np.arange(k) / k), np.sin(2 * math.pi * np.arange(k) / k)])
+        else:
+            outline = shape.outline()
+        outline = outline @ _rot2(shape.orientation()).T
+        zh = shape.z_height()
     parts = _footprint_convex_pieces(outline)
     if dim == 2:
         pieces = []
@@ -216,7 +211,6 @@ def _make_body(shape, dim):
             pieces.append(_convex_piece(ring, lambda n, h, c, mids=mids, on_b=on_b:
                                         bool(on_b[np.argmin(np.linalg.norm(mids - c, axis=1))])))
         return Body(2, np.linalg.norm(outline, axis=1).max(), pieces=pieces)
-    zh = shape.z_height()
     if zh is None:
         raise ValueError(f"{type(shape).__name__} is a 2D outline: give it a z_height to use it in 3D "
                          f"(or use Sphere / Box / ConvexPolyhedron)")
@@ -232,9 +226,9 @@ def _make_body(shape, dim):
 
 
 def _flatten_bodies(bodies: list, dim: int) -> tuple:
-    """The convex pieces of ``bodies`` as flat arrays for the kernels. Returns ``(body_lo, body_cnt, geo)``:
-    body ``b``'s pieces are ``body_lo[b] ... + body_cnt[b]`` (none for a ball); ``geo`` holds per piece the
-    ranges into the vertex / face / ridge / edge-direction arrays, per face its column-plane range."""
+    """The convex pieces of ``bodies`` as flat arrays for the kernels: ``(body_lo, body_cnt, geo)``. Body
+    ``b`` owns pieces ``body_lo[b] : body_lo[b] + body_cnt[b]`` (none for a ball); ``geo`` holds the vertex,
+    face, column-plane, ridge and edge-direction arrays and each piece's ranges into them."""
     V, FN, FH, FB, FCL, FCH, CN, CH, RA, RB, E = ([] for _ in range(11))
     p_rng = []
     body_lo = np.full(len(bodies), -1, dtype=np.int64)
@@ -267,8 +261,7 @@ def _flatten_bodies(bodies: list, dim: int) -> tuple:
 # ---------------------------------------------------------------------------
 
 def _travel_frames(u: np.ndarray) -> np.ndarray:
-    """``(m, D, D)`` rotations whose first column is each unit direction ``u``; 3D: no roll (+y
-    horizontal; world +y for vertical travel)."""
+    """``(m, D, D)`` rotations whose first column is each unit direction ``u`` (3D: no roll)."""
     m, D = u.shape
     if D == 2:
         c, s = u[:, 0], u[:, 1]
@@ -308,13 +301,10 @@ def per_agent_heading(heading, n: int, D: int) -> list:
 
 
 def body_motion_pieces(paths, bodies, velocity, t0, turning_speed, goal_hold, heading, dim) -> dict:
-    """Motion pieces of every agent (``bodies``: one ``Body`` per agent): each segment (the body at the
-    segment's attitude, moving), each in-place turn of positive duration (the bounding ball, still) and the
-    goal hold when ``goal_hold > 0`` (the body at its last attitude, still). Timing as
-    ``disc_sweep._path_pieces``; with a ``heading`` the body never turns (fixed attitude, no turn time),
-    with ``turning_speed = 0`` it keeps its first segment's attitude. Flat arrays per piece: ``agent``,
-    ``w0``, ``w1``, ``x0`` (position at ``w0``), ``v``, ``rot`` (``(D, D)``), ``body`` (agent's body index,
-    -1 for a turn ball), ``ball_r`` (ball radius, 0 for a polytope), ``radius`` (bounding radius)."""
+    """Motion pieces of every agent: each segment (the body at the segment's attitude), each in-place turn
+    (the bounding ball) and the goal hold (the body at its last attitude). Timing as
+    ``disc_sweep._path_pieces``. Flat arrays per piece: ``agent``, ``w0``, ``w1``, ``x0`` (position at
+    ``w0``), ``v``, ``rot``, ``body`` (-1 for a turn ball), ``ball_r`` (0 for a polytope), ``radius``."""
     n = len(paths)
     heads = per_agent_heading(heading, n, dim)
     has_head = np.array([h is not None for h in heads])
@@ -368,7 +358,7 @@ def body_motion_pieces(paths, bodies, velocity, t0, turning_speed, goal_hold, he
 
 @njit(cache=True, inline="always")
 def _rotv(Rm, q, x, j):
-    """``(Rm[q] @ x[j])[k]`` for every ``k``, as a new array."""
+    """``Rm[q] @ x[j]`` as a new array."""
     D = x.shape[1]
     out = np.empty(D)
     for k in range(D):
@@ -403,7 +393,7 @@ def _clip(lo, hi, a, c):
 
 @njit(cache=True)
 def _quad_range(A, B, C, T):
-    """``t`` in ``[0, T]`` with ``A t^2 + B t + C < 0`` (``A >= 0``); an empty range has ``lo >= hi``."""
+    """``t`` in ``[0, T]`` with ``A t^2 + B t + C < 0`` (``A >= 0``). Empty when ``lo >= hi``."""
     if A < 1e-300:
         if abs(B) < 1e-300:
             return (0.0, T) if C < 0.0 else (1.0, 0.0)
@@ -418,8 +408,7 @@ def _quad_range(A, B, C, T):
 @njit(cache=True)
 def _capsule_range(d0, w, T, a, b, r):
     """``t`` in ``[0, T]`` with ``d0 + w t`` strictly within ``r`` of segment ``a -> b`` (a ball when
-    ``a == b``): the union of the two end balls and the finite cylinder (one interval: a capsule is
-    convex)."""
+    ``a == b``): the union of the end balls and the finite cylinder."""
     D = d0.shape[0]
     lo, hi = 1.0, 0.0
     ww = _dot(w, w)
@@ -446,8 +435,8 @@ def _capsule_range(d0, w, T, a, b, r):
 
 @njit(cache=True)
 def _piece_range(d0, w, T, Rm, q, c, V, FN, FH, FB, eps, pr):
-    """``t`` in ``[0, T]`` with ``d0 + w t`` strictly inside convex piece ``c`` rotated by ``Rm[q]`` (boundary
-    faces moved in by ``eps``): ``n . (d0 + w t) < h``."""
+    """``t`` in ``[0, T]`` with ``d0 + w t`` strictly inside convex piece ``c`` rotated by ``Rm[q]``
+    (boundary faces moved in by ``eps``)."""
     lo, hi = 0.0, T
     for f in range(pr[c, 2], pr[c, 3]):
         n = _rotv(Rm, q, FN, f)
@@ -460,7 +449,7 @@ def _piece_range(d0, w, T, Rm, q, c, V, FN, FH, FB, eps, pr):
 @njit(cache=True, parallel=True)
 def _vertex_windows(pq, pc, vid, P, x0, v, T, Rm, ball_r, V, FN, FH, FB, FCL, FCH, CN, CH, RA, RB, E, pr, eps):
     """Row ``k``: when roadmap vertex ``vid[k]`` is strictly inside motion piece ``pq[k]`` (convex piece
-    ``pc[k]``, or the ball ``ball_r[pq[k]]`` when ``pc[k] < 0``). Times relative to the piece start."""
+    ``pc[k]``, or its ball when ``pc[k] < 0``). Times relative to the piece start."""
     m = len(pq)
     t1 = np.empty(m)
     t2 = np.empty(m)
@@ -481,8 +470,7 @@ def _vertex_windows(pq, pc, vid, P, x0, v, T, Rm, ball_r, V, FN, FH, FB, FCL, FC
 
 @njit(cache=True)
 def _clip_polygon(px, py, n, a, b, c, qx, qy):
-    """Sutherland-Hodgman: polygon ``(px, py)[:n]`` cut to ``a x + b y <= c`` into ``(qx, qy)``; returns
-    the new vertex count."""
+    """Polygon ``(px, py)[:n]`` cut to ``a x + b y <= c`` into ``(qx, qy)``; returns the vertex count."""
     m = 0
     for i in range(n):
         j = i + 1 if i + 1 < n else 0
@@ -500,8 +488,8 @@ def _clip_polygon(px, py, n, a, b, c, qx, qy):
 
 @njit(cache=True, parallel=True)
 def _edge_windows(pq, pc, eid, EA, EB, x0, v, T, Rm, ball_r, V, FN, FH, FB, FCL, FCH, CN, CH, RA, RB, E, pr, eps):
-    """Row ``k``: when roadmap edge ``eid[k]`` runs through the interior of motion piece ``pq[k]`` (convex
-    piece ``pc[k]``, or the ball when ``pc[k] < 0``), with a positive length of overlap. Relative times."""
+    """Row ``k``: when a positive length of roadmap edge ``eid[k]`` is inside motion piece ``pq[k]`` (convex
+    piece ``pc[k]``, or its ball when ``pc[k] < 0``). Times relative to the piece start."""
     m = len(pq)
     t1 = np.empty(m)
     t2 = np.empty(m)
@@ -555,9 +543,9 @@ def _edge_windows(pq, pc, eid, EA, EB, x0, v, T, Rm, ball_r, V, FN, FH, FB, FCL,
 
 @njit(cache=True)
 def _offset_piece_range(d0, w, T, Rm, q, c, r, V, FN, FH, FCL, FCH, CN, CH, RA, RB, pr):
-    """``t`` in ``[0, T]`` with ``d0 + w t`` strictly within ``r`` of convex piece ``c`` rotated by ``Rm[q]``:
-    the piece itself, a slab ``h < n . x < h + r`` over each face (bounded by the face's column planes) and
-    a capsule of radius ``r`` along each ridge (together exactly the grown piece, which is convex)."""
+    """``t`` in ``[0, T]`` with ``d0 + w t`` strictly within ``r`` of convex piece ``c`` rotated by
+    ``Rm[q]``: the piece, a slab over each face (bounded by its column planes) and a capsule along each
+    ridge, which together are the grown piece."""
     lo, hi = _piece_range(d0, w, T, Rm, q, c, V, FN, FH, FH, 0.0, pr)
     for f in range(pr[c, 2], pr[c, 3]):
         n = _rotv(Rm, q, FN, f)
@@ -582,9 +570,9 @@ def _offset_piece_range(d0, w, T, Rm, q, c, r, V, FN, FH, FCL, FCH, CN, CH, RA, 
 
 @njit(cache=True)
 def _minkowski_range(d0, w, T, Rm, qa, ca, qb, cb, V, FN, E, pr, eps):
-    """``t`` in ``[0, T]`` with ``d0 + w t`` in ``A (+) (-B)`` shrunk by ``eps`` (convex pieces ``ca`` of
-    motion piece ``qa`` and ``cb`` of ``qb``, rotated): one half-space per face normal of either and, in 3D,
-    per cross product of their edge directions, with the support ``max_A n . a - min_B n . b``."""
+    """``t`` in ``[0, T]`` with ``d0 + w t`` in ``A (+) (-B)`` shrunk by ``eps``, for convex pieces ``ca``
+    of motion piece ``qa`` and ``cb`` of ``qb``: one half-space per face normal of either and, in 3D, per
+    cross product of their edge directions."""
     D = d0.shape[0]
     va0, va1, vb0, vb1 = pr[ca, 0], pr[ca, 1], pr[cb, 0], pr[cb, 1]
     VA = np.empty((va1 - va0, D))
@@ -632,7 +620,7 @@ def _minkowski_range(d0, w, T, Rm, qa, ca, qb, cb, V, FN, E, pr, eps):
 def _body_pair_windows(qa, qb, ca, cb, w0, w1, x0, v, Rm, ball_r,
                        V, FN, FH, FB, FCL, FCH, CN, CH, RA, RB, E, pr, eps):
     """Row ``k``: when motion pieces ``qa[k]`` and ``qb[k]`` (convex pieces ``ca[k]`` / ``cb[k]``, a ball
-    when negative) overlap, with a penetration of more than ``eps``. Absolute times."""
+    when negative) overlap by more than ``eps``. Absolute times."""
     m = len(qa)
     t1 = np.empty(m)
     t2 = np.empty(m)
@@ -666,8 +654,8 @@ def _body_pair_windows(qa, qb, ca, cb, w0, w1, x0, v, Rm, ball_r,
 
 
 def _expand_pieces(rows, sub_lo, sub_cnt):
-    """Each ``rows[k]`` (a motion piece) once per convex piece of its body: ``(index into rows, piece)``,
-    piece -1 for a ball."""
+    """Each motion piece ``rows[k]`` once per convex piece of its body: ``(index into rows, piece)``,
+    with piece -1 for a ball."""
     cnt = np.maximum(sub_cnt[rows], 1)
     idx = np.repeat(np.arange(len(rows)), cnt)
     start = np.cumsum(cnt) - cnt
@@ -704,10 +692,9 @@ def _prepare(paths, shapes, velocity, t0, turning_speed, goal_hold, heading, dim
 
 def body_roadmap_hits(backend, paths, shapes, velocity=None, t0=0.0, turning_speed=None, goal_hold=0.0,
                       heading=None, eps: float = 1e-9):
-    """Raw hits of every agent's body against ``backend``'s roadmap: ``(v_parts, e_parts)`` lists of
-    ``(agent, element, t1, t2)`` (canonical edge indices), for ``disc_sweep.assemble``. ``backend`` gives
-    ``vertex_positions``, ``edge_src_positions`` / ``edge_tgt_positions`` and the candidate queries
-    ``_vertex_candidates(a, b, r)`` / ``_edge_candidates(a, b, r)``."""
+    """Hits of every agent's body against ``backend``'s roadmap, as ``(v_parts, e_parts)`` lists of
+    ``(agent, element, t1, t2)`` arrays for ``disc_sweep.assemble``. ``backend`` as in
+    ``disc_sweep.sweep_paths``."""
     dim = backend.vertex_positions.shape[1]
     paths = [np.asarray(p, dtype=float).reshape(-1, dim) for p in as_path_list(paths)]
     mp, sub_lo, sub_cnt, geo = _prepare(paths, shapes, velocity, t0, turning_speed, goal_hold, heading, dim)
@@ -737,26 +724,9 @@ def body_roadmap_hits(backend, paths, shapes, velocity=None, t0=0.0, turning_spe
     return v_parts, e_parts
 
 
-def pair_windows_output(n, i_ag, j_ag, t1, t2, first_only=False, as_arrays=False):
-    """Agent-pair windows as ``{(i, j): [(t1, t2), ...]}`` (``i < j``, merged), ``{(i, j): first time}``
-    with ``first_only``, or ``(i, j, t1, t2)`` arrays with ``as_arrays``."""
-    lo_ag, hi_ag = np.minimum(i_ag, j_ag), np.maximum(i_ag, j_ag)
-    key, a1, a2 = merge_intervals(lo_ag * n + hi_ag, t1, t2)
-    if first_only:
-        first = np.r_[True, key[1:] != key[:-1]] if len(key) else np.zeros(0, dtype=bool)
-        key, a1 = key[first], a1[first]
-        if as_arrays:
-            return key // n, key % n, a1, a1.copy()
-        return {(int(k // n), int(k % n)): float(t) for k, t in zip(key.tolist(), a1.tolist())}
-    if as_arrays:
-        return key // n, key % n, a1, a2
-    return intervals_to_dict(key, a1, a2, keys=[(int(k // n), int(k % n)) for k in key.tolist()])
-
-
 def body_agent_conflicts(paths, shapes, velocity=None, t0=0.0, turning_speed=None, goal_hold=0.0, heading=None,
                          pairs=None, first_only: bool = False, as_arrays: bool = False, eps: float = 1e-9):
-    """When the bodies of every two agents overlap (2D or 3D, from the paths); see
-    ``CGALCollisionHetero.agent_conflicts``."""
+    """``CGALCollisionHetero.agent_conflicts``: when two agents' bodies overlap (2D or 3D)."""
     paths = as_path_list(paths)
     n = len(paths)
     empty = (np.empty(0, np.int64), np.empty(0, np.int64), np.empty(0), np.empty(0))
