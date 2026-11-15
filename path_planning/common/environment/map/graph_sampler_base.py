@@ -3,8 +3,8 @@ import numpy as np
 from path_planning.common.environment.node import Node
 from python_motion_planning.common.env.map.grid import Grid
 from python_motion_planning.common import TYPES
-from python_motion_planning.common.env.map.grid import _grid_is_expandable, _grid_path_map_to_world, _grid_path_world_to_map_int, _grid_path_world_to_map_float
-from path_planning.common.environment.map.numbaUtil import _world_line_of_sight, _world_in_collision, _grid_vector_is_expandable, convert_np_to_tuple
+from python_motion_planning.common.env.map.grid import _grid_is_expandable, _grid_path_map_to_world, _grid_path_world_to_map_float
+from path_planning.common.environment.map.numbaUtil import _world_line_of_sight, _world_in_collision, _grid_vector_is_expandable, convert_np_to_tuple, world_to_cell, world_to_cells
 from path_planning.common.utils.geometry import GeometryNumpy as Geometry
 
 ROADMAP_TYPES = set(["grid", "prm", "cdt", "rrg", "midpoints", "centroids", "voronoi", "halton"])
@@ -162,6 +162,16 @@ class GraphSamplerBase(Grid):
             return path_world
         return convert_np_to_tuple(path_world)
 
+    def world_to_map(self, point: Tuple[float, ...], discrete: bool = True) -> tuple:
+        """World point -> map coordinates. ``discrete``: the containing cell's index (``world_to_cell``: a
+        point on a cell boundary goes to the upper cell); otherwise continuous map coordinates."""
+        if not discrete:
+            return super().world_to_map(point, discrete=False)
+        if len(point) != self.dim:
+            raise ValueError("Point dimension does not match map dimension.")
+        cell = world_to_cell(np.asarray(point, dtype=np.float64), self.bounds, self.resolution, self._shape_array)
+        return tuple(int(x) for x in cell)
+
     def path_world_to_map(self, path: List[Tuple[float, ...]], discrete: bool = True) -> List[tuple]:
         """
         Convert path from world coordinates to map coordinates
@@ -183,7 +193,7 @@ class GraphSamplerBase(Grid):
             raise ValueError("Point dimension does not match map dimension.")
 
         if discrete:
-            path_map = _grid_path_world_to_map_int(points, self.bounds, self.resolution, self._shape_array)
+            path_map = world_to_cells(points, self.bounds, self.resolution, self._shape_array)
             if is_array:
                 return path_map
             return convert_np_to_tuple(path_map)

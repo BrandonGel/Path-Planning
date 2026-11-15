@@ -11,7 +11,34 @@ try:
 except Exception:  # pragma: no cover - keeps import compatibility without numba.
     _numba_njit = None
 
-from python_motion_planning.common.env.map.grid import _njit, _grid_world_to_map_int, _grid_is_expandable
+from python_motion_planning.common.env.map.grid import _njit, _grid_is_expandable
+
+#: Slack for ``world_to_cell``: a point this close below a cell boundary still counts as on it.
+CELL_EPS = 1e-9
+
+
+@_njit(cache=True)
+def world_to_cell(point: np.ndarray, bounds: np.ndarray, resolution: float, shape: np.ndarray) -> np.ndarray:
+    """Cell index of a world point, clipped to the grid. Cell ``k`` spans ``[k, k + 1)`` in grid units, so a
+    point on a boundary belongs to the upper cell (as ``snap_to_cell_centers`` and
+    ``obstacles_world_to_grid``). Replaces python-motion-planning's ``round(u - 0.5)``, which rounds half to
+    even and so sends boundary points to the lower or the upper cell depending on the cell's parity."""
+    cell = np.empty(shape.size, dtype=np.int64)
+    inv_resolution = 1.0 / resolution
+    for d in range(shape.size):
+        value = int(np.floor((point[d] - bounds[d, 0]) * inv_resolution + CELL_EPS))
+        cell[d] = min(max(value, 0), shape[d] - 1)
+    return cell
+
+
+@_njit(cache=True)
+def world_to_cells(points: np.ndarray, bounds: np.ndarray, resolution: float, shape: np.ndarray) -> np.ndarray:
+    """``world_to_cell`` for each row of ``points`` (``(N, D)``)."""
+    cells = np.empty((points.shape[0], shape.size), dtype=np.int64)
+    for i in range(points.shape[0]):
+        cells[i] = world_to_cell(points[i], bounds, resolution, shape)
+    return cells
+
 
 def convert_np_to_tuple(array: np.ndarray) -> list:
     """(N, dim) array -> list of N tuples of Python scalars.
@@ -48,8 +75,8 @@ def _world_line_of_sight(p1: np.ndarray, p2: np.ndarray, bounds: np.ndarray, res
         p2_f[d] = (p2[d] - bounds[d, 0]) * inv_res
 
     # Start/end cells with the map's own convention (round to nearest centre, clip).
-    p1_grid = _grid_world_to_map_int(p1, bounds, resolution, shape)
-    p2_grid = _grid_world_to_map_int(p2, bounds, resolution, shape)
+    p1_grid = world_to_cell(p1, bounds, resolution, shape)
+    p2_grid = world_to_cell(p2, bounds, resolution, shape)
     current = p1_grid.copy()
 
     step = np.zeros(dim, dtype=np.int64)
@@ -125,10 +152,10 @@ def _world_in_collision(p1: np.ndarray, p2: np.ndarray, bounds: np.ndarray, reso
 
     # Endpoint checks on CELL indices (mirrors upstream _grid_in_collision).
     # Start/end cells with the map's own convention (round to nearest centre, clip).
-    p1_grid = _grid_world_to_map_int(p1, bounds, resolution, shape)
+    p1_grid = world_to_cell(p1, bounds, resolution, shape)
     if not _grid_is_expandable(p1_grid, p1_grid, False, shape, type_map, esdf, obstacle_type, inflation_type, False):
         return True
-    p2_grid = _grid_world_to_map_int(p2, bounds, resolution, shape)
+    p2_grid = world_to_cell(p2, bounds, resolution, shape)
     if not _grid_is_expandable(p2_grid, p1_grid, True, shape, type_map, esdf, obstacle_type, inflation_type, False):
         return True
 

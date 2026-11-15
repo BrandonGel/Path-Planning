@@ -14,7 +14,8 @@ from scipy.sparse import csr_array
 from scipy.sparse.csgraph import shortest_path as _csgraph_shortest_path
 from path_planning.common.environment.roadmap.roadmap_config import RoadmapConfig
 from path_planning.common.environment.roadmap.edge_zones import constrain_adjacency
-from python_motion_planning.common.env.map.grid import TYPES, _grid_path_world_to_map_int, _grid_path_map_to_world
+from python_motion_planning.common.env.map.grid import TYPES, _grid_path_map_to_world
+from path_planning.common.environment.map.numbaUtil import world_to_cells
 from path_planning.common.environment.roadmap.roadmap_util import _filter_edges_kernel, _khop_ball, _unique_undirected, _symmetric_csr, shortest_paths
 from path_planning.common.environment.node import Node
 
@@ -326,12 +327,12 @@ class RoadmapBase:
 
     # ---------------------------------------------------------------- frames
     def cells_of(self, points: np.ndarray) -> np.ndarray:
-        """Cell index (N, dim) int64 of each world point: nearest cell centre,
-        clipped to the grid (``_grid_path_world_to_map_int``)."""
+        """Cell index (N, dim) int64 of each world point, clipped to the grid (``world_to_cells``: a point
+        on a cell boundary goes to the upper cell)."""
         m = self.graph_map
         pts = np.ascontiguousarray(points, dtype=np.float64).reshape(-1, self.dim)
-        return _grid_path_world_to_map_int(pts, np.asarray(m.bounds, dtype=np.float64), float(m.resolution),
-                                           np.asarray(m.shape, dtype=np.int64))
+        return world_to_cells(pts, np.asarray(m.bounds, dtype=np.float64), float(m.resolution),
+                              np.asarray(m.shape, dtype=np.int64))
 
     def centres_of(self, cells: np.ndarray) -> np.ndarray:
         """World centre (N, dim) float64 of each cell (``_grid_path_map_to_world``)."""
