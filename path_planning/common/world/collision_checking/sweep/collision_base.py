@@ -1,4 +1,5 @@
-"""``CollisionSweep``: the base class of the roadmap sweep backends (``ShapelyCollision``, ``CGALCollision``).
+"""``CollisionBase``: the base class of the roadmap sweep backends (``ShapelyCollision``, ``CGALCollision``).
+The class to use is ``collision_sweep.CollisionSweep``, which picks one of them as its parent.
 
 It binds the roadmap (``set_graph``) and provides the two queries, ``overlapping_interval_paths`` and
 ``agent_conflicts``, for ball agents (discs in 2D, spheres in 3D). A backend only builds a spatial index and
@@ -9,10 +10,12 @@ from __future__ import annotations
 import numpy as np
 
 from path_planning.common.world.collision_checking.sweep.disc_sweep import (
-    fold_directed_edges, sweep_paths, disc_agent_conflicts)
+    fold_directed_edges, sweep_paths, disc_agent_conflicts, as_path_list)
+from path_planning.common.world.collision_checking.sweep.polytope_sweep import (
+    body_agent_conflicts, make_body, shape_list)
 
 
-class CollisionSweep:
+class CollisionBase:
     """Ball sweeps against a roadmap. Vertex ids in the results are the map's node indices; edge keys are
     directed ``(src, tgt)`` node-index pairs, in the directions the roadmap allows (``EdgeDir``).
 
@@ -86,12 +89,28 @@ class CollisionSweep:
         An element is covered while strictly within the radius; zero-duration contacts are left out."""
         return sweep_paths(self, paths, radius, velocity, t0, turning_speed, goal_hold, as_arrays)
 
-    @staticmethod
-    def agent_conflicts(paths, radius, velocity=None, t0=0.0, turning_speed=None, goal_hold=0.0, pairs=None,
-                        first_only: bool = False, as_arrays: bool = False):
-        """When two agents' balls overlap (centres closer than ``r_i + r_j``):
-        ``{(i, j): [(t1, t2), ...]}`` with ``i < j``. ``first_only``: ``{(i, j): first contact time}``.
-        ``as_arrays``: ``(i, j, t1, t2)`` arrays. ``pairs``: only check these agent pairs. Inputs as in
-        ``overlapping_interval_paths``, with ``radius`` each agent's own radius. No roadmap is needed."""
-        return disc_agent_conflicts(paths, radius, velocity, t0, turning_speed, goal_hold, pairs, first_only,
-                                    as_arrays)
+    #: Penetration two polytope bodies need to collide, so that tangential contact and float noise are not
+    #: collisions.
+    STRICT_EPS = 1e-9
+
+    @classmethod
+    def agent_conflicts(cls, paths, shapes, velocity=None, t0=0.0, turning_speed=None, goal_hold=0.0,
+                        heading=None, pairs=None, first_only: bool = False, as_arrays: bool = False):
+        """When two agents' bodies overlap: ``{(i, j): [(t1, t2), ...]}`` with ``i < j``. ``first_only``:
+        ``{(i, j): first contact time}``. ``as_arrays``: ``(i, j, t1, t2)`` arrays. ``pairs``: only check
+        these agent pairs. No roadmap is needed; the dimension comes from the paths.
+
+        ``shapes``: one or one per path, each a radius (disc / sphere) or a ``Shape`` (polygon / polyhedron).
+        ``heading``: one fixed attitude, or one per path (None: a move faces along itself). The other inputs
+        as in ``overlapping_interval_paths``; an agent exists from ``t0`` until it arrives, then for
+        ``goal_hold``. All balls without a heading: the closed-form disc test (``disc_sweep``); otherwise
+        the exact convex-piece test (``polytope_sweep``)."""
+        paths = as_path_list(paths)
+        if paths and heading is None:
+            dim = np.asarray(paths[0]).shape[-1]
+            ball_r = [make_body(s, dim).ball_r for s in shape_list(shapes, len(paths), dim)]
+            if all(r > 0 for r in ball_r):
+                return disc_agent_conflicts(paths, ball_r, velocity, t0, turning_speed, goal_hold, pairs,
+                                            first_only, as_arrays)
+        return body_agent_conflicts(paths, shapes, velocity, t0, turning_speed, goal_hold, heading, pairs,
+                                    first_only, as_arrays, cls.STRICT_EPS)

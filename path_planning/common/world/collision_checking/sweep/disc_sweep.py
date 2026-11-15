@@ -1,6 +1,6 @@
 """Ball agents (discs in 2D, spheres in 3D) swept along whole paths, in any dimension.
 
-The geometry behind ``collision_sweep.CollisionSweep`` (the base of ``ShapelyCollision`` and
+The geometry behind ``collision_base.CollisionBase`` (the base of ``ShapelyCollision`` and
 ``CGALCollision``). A backend only supplies candidate queries (a superset of the elements near each
 segment); the exact distance test, timing, assembly and agent conflicts are here:
 
@@ -246,7 +246,7 @@ def _schedule_times(seg_start, seg_count, move, turn, t0):
 def _path_pieces(paths, radius, velocity, t0, turning_speed, goal_hold):
     """Moving segments and stationary pieces of every agent, as ``(seg, still)`` dicts of flat arrays
     (``still["kind"]``: 0 for an in-place turn, 1 for the goal hold). Consecutive duplicate waypoints are
-    dropped; ``velocity`` and ``turning_speed`` as in ``CollisionSweep.overlapping_interval_paths``."""
+    dropped; ``velocity`` and ``turning_speed`` as in ``CollisionBase.overlapping_interval_paths``."""
     n = len(paths)
     rad = _agent_values(radius, n, _check_radius, np.nan)
     if np.isnan(rad).any():
@@ -422,7 +422,7 @@ def point_candidates(backend, p, r):
 
 def sweep_paths(backend, paths, radius, velocity=None, t0=0.0, turning_speed=None, goal_hold=0.0,
                 as_arrays: bool = True) -> list:
-    """``CollisionSweep.overlapping_interval_paths`` for ``backend`` (a ``CollisionSweep``)."""
+    """``CollisionBase.overlapping_interval_paths`` for ``backend`` (a ``CollisionBase``)."""
     paths = as_path_list(paths)
     n = len(paths)
     if n == 0:
@@ -617,7 +617,7 @@ def pair_windows_output(n, i_ag, j_ag, t1, t2, first_only=False, as_arrays=False
 
 def disc_agent_conflicts(paths, radius, velocity=None, t0=0.0, turning_speed=None, goal_hold=0.0, pairs=None,
                          first_only: bool = False, as_arrays: bool = False, eps: float = 1e-9):
-    """``CollisionSweep.agent_conflicts``, in any dimension.
+    """``CollisionBase.agent_conflicts``, in any dimension.
     Each radius is reduced by ``eps / 2``, so touching is not contact."""
     paths = as_path_list(paths)
     n = len(paths)

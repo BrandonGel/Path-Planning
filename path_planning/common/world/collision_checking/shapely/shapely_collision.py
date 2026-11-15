@@ -1,7 +1,7 @@
 """Disc sweep collision checker over a ``GraphSampler`` roadmap (2D, Shapely / GEOS).
 
 Agents are discs, each with its own radius and speed. The queries (``overlapping_interval_paths``,
-``agent_conflicts``) are those of ``collision_sweep.CollisionSweep``; this class supplies the candidate search,
+``agent_conflicts``) are those of ``collision_base.CollisionBase``; this class supplies the candidate search,
 one bulk ``STRtree`` box query per element type. For 3D use ``CGALCollision``.
 """
 
@@ -11,11 +11,11 @@ import numpy as np
 import shapely
 from shapely import STRtree
 
-from path_planning.common.world.collision_checking.sweep.collision_sweep import CollisionSweep
+from path_planning.common.world.collision_checking.sweep.collision_base import CollisionBase
 from path_planning.common.world.collision_checking.sweep.disc_sweep import EdgeDir   # noqa: F401  (re-exported)
 
 
-class ShapelyCollision(CollisionSweep):
+class ShapelyCollision(CollisionBase):
     """Disc sweeps against a roadmap (2D), with Shapely ``STRtree`` candidate queries."""
 
     dims = (2,)

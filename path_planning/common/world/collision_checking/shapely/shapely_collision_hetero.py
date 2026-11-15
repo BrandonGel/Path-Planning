@@ -11,7 +11,7 @@ from __future__ import annotations
 import numpy as np
 import shapely
 from path_planning.common.world.collision_checking.sweep.disc_sweep import assemble, as_path_list, per_agent
-from path_planning.common.world.collision_checking.sweep.polytope_sweep import body_roadmap_hits, body_agent_conflicts
+from path_planning.common.world.collision_checking.sweep.polytope_sweep import body_roadmap_hits
 from path_planning.common.world.collision_checking.shapely.shapely_util import (
     clip_segments_to_pieces, points_in_pieces, sweep_rings_timed, convert_to_shape_list,
     _vertex_hit_times, _edge_hit_times)
@@ -169,17 +169,3 @@ class ShapelyCollisionHetero(ShapelyCollision):
         """Expand edges to their allowed directions, merge each (agent, element)'s windows and split per
         agent (``disc_sweep.assemble``)."""
         return assemble(self, n_agents, [v_hits], [e_hits], as_arrays)
-
-    # ------------------------------------------------------------ check agents overlapping sweeps
-    def agent_conflicts(self, paths, shapes, velocity=None, t0=0.0, turning_speed=None, goal_hold=0.0,
-                        heading=None, pairs=None, first_only: bool = False, as_arrays: bool = False):
-        """When two agents' bodies overlap, exactly: ``{(i, j): [(t1, t2), ...]}`` with ``i < j``.
-        ``first_only``: ``{(i, j): first contact time}``. ``as_arrays``: ``(i, j, t1, t2)`` arrays.
-        ``pairs``: only check these agent pairs. Inputs as in ``overlapping_interval_paths``; no roadmap is
-        needed. An agent exists from ``t0`` until it arrives, then for ``goal_hold``. See
-        ``polytope_sweep`` for the method."""
-        paths = as_path_list(paths)
-        if convert_to_shape_list(shapes):
-            shapes = [shapes] * len(paths)
-        return body_agent_conflicts(paths, shapes, velocity, t0, turning_speed, goal_hold, heading, pairs,
-                                    first_only, as_arrays, self.STRICT_EPS)

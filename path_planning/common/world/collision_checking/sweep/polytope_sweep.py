@@ -33,7 +33,7 @@ from shapely import Polygon as ShapelyPolygon
 
 from path_planning.common.world.collision_checking.sweep.agent_shape import Shape, Shape3D, Circle, Sphere, euler_rotation
 from path_planning.common.world.collision_checking.sweep.disc_sweep import (
-    per_agent, as_path_list, pair_windows_output, _path_pieces, _ball_sweep_prune)
+    EdgeDir, per_agent, as_path_list, merge_intervals, pair_windows_output, _path_pieces, _ball_sweep_prune)
 
 
 # ---------------------------------------------------------------------------
@@ -434,22 +434,24 @@ def _capsule_range(d0, w, T, a, b, r):
 
 
 @njit(cache=True)
-def _piece_range(d0, w, T, Rm, q, c, V, FN, FH, FB, eps, pr):
+def _piece_range(d0, w, T, Rm, q, c, V, FN, FH, FB, eps, pr, g):
     """``t`` in ``[0, T]`` with ``d0 + w t`` strictly inside convex piece ``c`` rotated by ``Rm[q]``
-    (boundary faces moved in by ``eps``)."""
+    (boundary faces moved in by ``eps``, every face moved out by ``g``)."""
     lo, hi = 0.0, T
     for f in range(pr[c, 2], pr[c, 3]):
         n = _rotv(Rm, q, FN, f)
-        lo, hi = _clip(lo, hi, _dot(n, w), FH[f] - eps * FB[f] - _dot(n, d0))
+        lo, hi = _clip(lo, hi, _dot(n, w), FH[f] - eps * FB[f] + g - _dot(n, d0))
         if lo >= hi:
             break
     return lo, hi
 
 
 @njit(cache=True, parallel=True)
-def _vertex_windows(pq, pc, vid, P, x0, v, T, Rm, ball_r, V, FN, FH, FB, FCL, FCH, CN, CH, RA, RB, E, pr, eps):
+def _vertex_windows(pq, pc, vid, P, x0, v, T, Rm, ball_r, V, FN, FH, FB, FCL, FCH, CN, CH, RA, RB, E, pr, eps,
+                    grow, bound):
     """Row ``k``: when roadmap vertex ``vid[k]`` is strictly inside motion piece ``pq[k]`` (convex piece
-    ``pc[k]``, or its ball when ``pc[k] < 0``). Times relative to the piece start."""
+    ``pc[k]``, or its ball when ``pc[k] < 0``). Times relative to the piece start. ``grow[q]`` moves every
+    face of piece ``q`` out (a ball: its radius); the result is then limited to the ball ``bound[q]``."""
     m = len(pq)
     t1 = np.empty(m)
     t2 = np.empty(m)
@@ -458,10 +460,14 @@ def _vertex_windows(pq, pc, vid, P, x0, v, T, Rm, ball_r, V, FN, FH, FB, FCL, FC
         q = pq[k]
         d0 = P[vid[k]] - x0[q]
         w = -v[q]
+        z = np.zeros_like(d0)
         if pc[k] < 0:
-            lo, hi = _capsule_range(-d0, v[q], T[q], np.zeros_like(d0), np.zeros_like(d0), ball_r[q] - eps)
+            lo, hi = _capsule_range(-d0, v[q], T[q], z, z, ball_r[q] - eps + grow[q])
         else:
-            lo, hi = _piece_range(d0, w, T[q], Rm, q, pc[k], V, FN, FH, FB, eps, pr)
+            lo, hi = _piece_range(d0, w, T[q], Rm, q, pc[k], V, FN, FH, FB, eps, pr, grow[q])
+            if grow[q] > 0.0 and lo < hi:
+                bl, bh = _capsule_range(-d0, v[q], T[q], z, z, bound[q])
+                lo, hi = max(lo, bl), min(hi, bh)
         if hi - lo > 1e-12:
             hit[k] = True
             t1[k], t2[k] = lo, hi
@@ -487,7 +493,8 @@ def _clip_polygon(px, py, n, a, b, c, qx, qy):
 
 
 @njit(cache=True, parallel=True)
-def _edge_windows(pq, pc, eid, EA, EB, x0, v, T, Rm, ball_r, V, FN, FH, FB, FCL, FCH, CN, CH, RA, RB, E, pr, eps):
+def _edge_windows(pq, pc, eid, EA, EB, x0, v, T, Rm, ball_r, V, FN, FH, FB, FCL, FCH, CN, CH, RA, RB, E, pr, eps,
+                  grow, bound):
     """Row ``k``: when a positive length of roadmap edge ``eid[k]`` is inside motion piece ``pq[k]`` (convex
     piece ``pc[k]``, or its ball when ``pc[k] < 0``). Times relative to the piece start."""
     m = len(pq)
@@ -498,7 +505,7 @@ def _edge_windows(pq, pc, eid, EA, EB, x0, v, T, Rm, ball_r, V, FN, FH, FB, FCL,
         q, e, c = pq[k], eid[k], pc[k]
         A, B = EA[e], EB[e]
         if c < 0:
-            lo, hi = _capsule_range(x0[q], v[q], T[q], A, B, ball_r[q] - eps)
+            lo, hi = _capsule_range(x0[q], v[q], T[q], A, B, ball_r[q] - eps + grow[q])
             if hi - lo > 1e-12:
                 hit[k] = True
                 t1[k], t2[k] = lo, hi
@@ -511,12 +518,16 @@ def _edge_windows(pq, pc, eid, EA, EB, x0, v, T, Rm, ball_r, V, FN, FH, FB, FCL,
             lo, hi = 0.0, 1.0
             for f in range(pr[c, 2], pr[c, 3]):
                 n = _rotv(Rm, q, FN, f)
-                lo, hi = _clip(lo, hi, _dot(n, ab), FH[f] - eps * FB[f] - _dot(n, rel))
+                lo, hi = _clip(lo, hi, _dot(n, ab), FH[f] - eps * FB[f] + grow[q] - _dot(n, rel))
                 if lo >= hi:
                     break
             if (hi - lo) * seg_len > 1e-12:
-                hit[k] = True
-                t1[k], t2[k] = 0.0, T[q]
+                bl, bh = 0.0, T[q]
+                if grow[q] > 0.0:
+                    bl, bh = _capsule_range(x0[q], v[q], T[q], A, B, bound[q])
+                if bh - bl > 1e-12:
+                    hit[k] = True
+                    t1[k], t2[k] = bl, bh
             continue
         nf = pr[c, 3] - pr[c, 2]
         cap = 4 + nf + 2
@@ -525,7 +536,8 @@ def _edge_windows(pq, pc, eid, EA, EB, x0, v, T, Rm, ball_r, V, FN, FH, FB, FCL,
         cnt = 4
         for f in range(pr[c, 2], pr[c, 3]):    # n . (rel + s ab - t v) <= h
             n = _rotv(Rm, q, FN, f)
-            cnt = _clip_polygon(px, py, cnt, _dot(n, ab), -_dot(n, v[q]), FH[f] - eps * FB[f] - _dot(n, rel), qx, qy)
+            cnt = _clip_polygon(px, py, cnt, _dot(n, ab), -_dot(n, v[q]), FH[f] - eps * FB[f] + grow[q] - _dot(n, rel),
+                                qx, qy)
             px, qx = qx, px
             py, qy = qy, py
             if cnt < 3:
@@ -535,6 +547,9 @@ def _edge_windows(pq, pc, eid, EA, EB, x0, v, T, Rm, ball_r, V, FN, FH, FB, FCL,
             for i in range(1, cnt):
                 smin = min(smin, px[i]); smax = max(smax, px[i])
                 tmin = min(tmin, py[i]); tmax = max(tmax, py[i])
+            if grow[q] > 0.0:
+                bl, bh = _capsule_range(x0[q], v[q], T[q], A, B, bound[q])
+                tmin, tmax = max(tmin, bl), min(tmax, bh)
             if tmax - tmin > 1e-12 and (smax - smin) * seg_len > 1e-12:
                 hit[k] = True
                 t1[k], t2[k] = tmin, tmax
@@ -546,7 +561,7 @@ def _offset_piece_range(d0, w, T, Rm, q, c, r, V, FN, FH, FCL, FCH, CN, CH, RA, 
     """``t`` in ``[0, T]`` with ``d0 + w t`` strictly within ``r`` of convex piece ``c`` rotated by
     ``Rm[q]``: the piece, a slab over each face (bounded by its column planes) and a capsule along each
     ridge, which together are the grown piece."""
-    lo, hi = _piece_range(d0, w, T, Rm, q, c, V, FN, FH, FH, 0.0, pr)
+    lo, hi = _piece_range(d0, w, T, Rm, q, c, V, FN, FH, FH, 0.0, pr, 0.0)
     for f in range(pr[c, 2], pr[c, 3]):
         n = _rotv(Rm, q, FN, f)
         nd, nw = _dot(n, d0), _dot(n, w)
@@ -653,6 +668,89 @@ def _body_pair_windows(qa, qb, ca, cb, w0, w1, x0, v, Rm, ball_r,
     return hit, t1, t2
 
 
+@njit(cache=True, inline="always")
+def _support_clip(lo, hi, n, VA, ra, VB, sweep, d0, w, eps):
+    """``[lo, hi]`` cut to ``n . (d0 + w t) <= h_A(n) - min_B(n) - eps``: ``A`` has vertices ``VA`` (a ball of
+    radius ``ra`` when empty), the obstacle the vertices ``VB`` and ``VB + sweep``."""
+    ha = ra
+    for i in range(VA.shape[0]):
+        ha = max(ha, _dot(n, VA[i])) if i else _dot(n, VA[i])
+    hb = 1e300
+    for i in range(VB.shape[0]):
+        hb = min(hb, _dot(n, VB[i]))
+    hb += min(0.0, _dot(n, sweep))
+    return _clip(lo, hi, _dot(n, w), ha - hb - eps - _dot(n, d0))
+
+
+@njit(cache=True, parallel=True)
+def _obstacle_windows(pq, ca, cb, O, sweep, RB, x0, v, T, Rm, ball_r, V, FN, E, pr, eps):
+    """Row ``k``: when motion piece ``pq[k]`` (convex piece ``ca[k]``, or its ball when negative) overlaps
+    the obstacle: convex piece ``cb[k]`` rotated by ``RB[k]`` with its origin anywhere on the segment
+    ``O[k] -> O[k] + sweep[k]`` (a point when ``sweep`` is zero). The position of the obstacle relative to
+    the piece moves on a line and must lie in ``A (+) (-obstacle)``, clipped by one half-space per
+    candidate normal: the faces of both, the faces the sweep adds and, in 3D, edge cross products. Exact
+    for two polytopes; a ball piece gives a mitred (never smaller) offset. Times relative to the piece start."""
+    m = len(pq)
+    D = x0.shape[1]
+    t1 = np.empty(m)
+    t2 = np.empty(m)
+    hit = np.zeros(m, dtype=np.bool_)
+    for k in prange(m):
+        q, a, b = pq[k], ca[k], cb[k]
+        d0 = O[k] - x0[q]
+        w = -v[q]
+        sw = sweep[k]
+        swept = _dot(sw, sw) > 0.0
+        na = pr[a, 1] - pr[a, 0] if a >= 0 else 0
+        VA = np.empty((na, D))
+        for i in range(na):
+            VA[i] = _rotv(Rm, q, V, pr[a, 0] + i)
+        ra = 0.0 if a >= 0 else ball_r[q]
+        VB = np.empty((pr[b, 1] - pr[b, 0], D))
+        for i in range(VB.shape[0]):
+            VB[i] = _rotv(RB, k, V, pr[b, 0] + i)
+        lo, hi = 0.0, T[q]
+        n = np.empty(D)
+        if a >= 0:                                           # faces of A
+            for f in range(pr[a, 2], pr[a, 3]):
+                n = _rotv(Rm, q, FN, f)
+                lo, hi = _support_clip(lo, hi, n, VA, ra, VB, sw, d0, w, eps)
+        for f in range(pr[b, 2], pr[b, 3]):                  # faces of the obstacle piece
+            n = -_rotv(RB, k, FN, f)
+            lo, hi = _support_clip(lo, hi, n, VA, ra, VB, sw, d0, w, eps)
+        if D == 2:
+            if swept:                                        # the two sides the sweep adds
+                nn = math.sqrt(_dot(sw, sw))
+                for sgn in (1.0, -1.0):
+                    n[0], n[1] = -sgn * sw[1] / nn, sgn * sw[0] / nn
+                    lo, hi = _support_clip(lo, hi, n, VA, ra, VB, sw, d0, w, eps)
+        else:
+            nea = pr[a, 7] - pr[a, 6] if a >= 0 else 0
+            neb = pr[b, 7] - pr[b, 6]
+            # cross products: (obstacle edge, sweep), (A edge, obstacle edge), (A edge, sweep)
+            for i in range(-1, nea):
+                for j in range(-1, neb):
+                    if i < 0 and j < 0:
+                        continue
+                    if (i < 0 or j < 0) and not swept:
+                        continue
+                    e1 = _rotv(Rm, q, E, pr[a, 6] + i) if i >= 0 else sw
+                    e2 = _rotv(RB, k, E, pr[b, 6] + j) if j >= 0 else sw
+                    cx = e1[1] * e2[2] - e1[2] * e2[1]
+                    cy = e1[2] * e2[0] - e1[0] * e2[2]
+                    cz = e1[0] * e2[1] - e1[1] * e2[0]
+                    nn = math.sqrt(cx * cx + cy * cy + cz * cz)
+                    if nn < 1e-9:
+                        continue
+                    for sgn in (1.0, -1.0):
+                        n[0], n[1], n[2] = sgn * cx / nn, sgn * cy / nn, sgn * cz / nn
+                        lo, hi = _support_clip(lo, hi, n, VA, ra, VB, sw, d0, w, eps)
+        if hi - lo > 1e-12:
+            hit[k] = True
+            t1[k], t2[k] = lo, hi
+    return hit, t1, t2
+
+
 def _expand_pieces(rows, sub_lo, sub_cnt):
     """Each motion piece ``rows[k]`` once per convex piece of its body: ``(index into rows, piece)``,
     with piece -1 for a ball."""
@@ -668,9 +766,9 @@ def _expand_pieces(rows, sub_lo, sub_cnt):
 # Drivers
 # ---------------------------------------------------------------------------
 
-def _prepare(paths, shapes, velocity, t0, turning_speed, goal_hold, heading, dim):
-    """Bodies, motion pieces and flat piece geometry of all agents."""
-    n = len(paths)
+def shape_list(shapes, n: int, dim: int) -> list:
+    """``shapes`` as one shape per path: a single shape (a ``Shape``, a radius or one ``(K, dim)`` vertex
+    array) is repeated ``n`` times; a sequence must have ``n`` entries."""
     single = not isinstance(shapes, (list, tuple, np.ndarray))
     if not single:
         try:
@@ -678,10 +776,16 @@ def _prepare(paths, shapes, velocity, t0, turning_speed, goal_hold, heading, dim
             single = a.ndim == 2 and a.shape[1] == dim
         except (TypeError, ValueError):
             single = False
-    if not single and len(shapes) != n:
+    if single:
+        return [shapes] * n
+    if len(shapes) != n:
         raise ValueError(f"shapes: expected one shape or one per path ({n}), got {len(shapes)}")
-    shape_list = [shapes] * n if single else list(shapes)
-    bodies = [make_body(s, dim) for s in shape_list]
+    return list(shapes)
+
+
+def _prepare(paths, shapes, velocity, t0, turning_speed, goal_hold, heading, dim):
+    """Bodies, motion pieces and flat piece geometry of all agents."""
+    bodies = [make_body(s, dim) for s in shape_list(shapes, len(paths), dim)]
     mp = body_motion_pieces(paths, bodies, velocity, t0, turning_speed, goal_hold, heading, dim)
     body_lo, body_cnt, geo = _flatten_bodies(bodies, dim)
     has_body = mp["body"] >= 0
@@ -691,10 +795,14 @@ def _prepare(paths, shapes, velocity, t0, turning_speed, goal_hold, heading, dim
 
 
 def body_roadmap_hits(backend, paths, shapes, velocity=None, t0=0.0, turning_speed=None, goal_hold=0.0,
-                      heading=None, eps: float = 1e-9):
+                      heading=None, eps: float = 1e-9, grow=0.0):
     """Hits of every agent's body against ``backend``'s roadmap, as ``(v_parts, e_parts)`` lists of
     ``(agent, element, t1, t2)`` arrays for ``disc_sweep.assemble``. ``backend`` as in
-    ``disc_sweep.sweep_paths``."""
+    ``disc_sweep.sweep_paths``.
+
+    ``grow`` (one value or one per agent): a clearance. Every face of the body moves out by it (a ball's
+    radius grows by it) and the result is limited to the bounding ball grown by it. Exact for balls; for a
+    polytope a mitred offset, never smaller than the true clearance and larger near sharp corners."""
     dim = backend.vertex_positions.shape[1]
     paths = [np.asarray(p, dtype=float).reshape(-1, dim) for p in as_path_list(paths)]
     mp, sub_lo, sub_cnt, geo = _prepare(paths, shapes, velocity, t0, turning_speed, goal_hold, heading, dim)
@@ -703,30 +811,119 @@ def body_roadmap_hits(backend, paths, shapes, velocity=None, t0=0.0, turning_spe
     T = mp["w1"] - mp["w0"]
     moving = np.any(mp["v"] != 0.0, axis=1)
     end = mp["x0"] + np.where(moving, T, 0.0)[:, None] * mp["v"]
+    g = np.array([float(x) for x in per_agent(grow, len(paths))])[mp["agent"]]
+    bound = mp["radius"] + g
     v_parts, e_parts = [], []
     for kind in ("vertex", "edge"):
         if kind == "vertex":
-            rows, el = backend._vertex_candidates(mp["x0"], end, mp["radius"])
+            rows, el = backend._vertex_candidates(mp["x0"], end, bound)
         else:
-            rows, el = backend._edge_candidates(mp["x0"], end, mp["radius"])
+            rows, el = backend._edge_candidates(mp["x0"], end, bound)
         if len(rows) == 0:
             continue
         idx, sub = _expand_pieces(rows, sub_lo, sub_cnt)
         pq, el = rows[idx], el[idx]
         if kind == "vertex":
             hit, t1, t2 = _vertex_windows(pq, sub, el, backend.vertex_positions, mp["x0"], mp["v"], T, mp["rot"],
-                                          mp["ball_r"], *geo, eps)
+                                          mp["ball_r"], *geo, eps, g, bound)
             v_parts.append((mp["agent"][pq[hit]], el[hit], mp["w0"][pq[hit]] + t1[hit], mp["w0"][pq[hit]] + t2[hit]))
         else:
             hit, t1, t2 = _edge_windows(pq, sub, el, backend.edge_src_positions, backend.edge_tgt_positions,
-                                        mp["x0"], mp["v"], T, mp["rot"], mp["ball_r"], *geo, eps)
+                                        mp["x0"], mp["v"], T, mp["rot"], mp["ball_r"], *geo, eps, g, bound)
             e_parts.append((mp["agent"][pq[hit]], el[hit], mp["w0"][pq[hit]] + t1[hit], mp["w0"][pq[hit]] + t2[hit]))
     return v_parts, e_parts
 
 
+def body_roadmap_hits_minkowski(backend, paths, shapes, other, velocity=None, t0=0.0, turning_speed=None,
+                                goal_hold=0.0, heading=None, eps: float = 1e-9, other_heading=None) -> list:
+    """Where each agent's body would overlap another body ``other`` placed on the roadmap, exactly
+    (``A (+) (-other)``): one ``((vertex, t1, t2), (src, tgt, t1, t2))`` result per path.
+
+    - Directed edge ``src -> tgt``: ``other`` anywhere on the edge, facing along it (its travel
+      attitude). The two directions of an edge are separate rows.
+    - Vertex: ``other`` standing on it with attitude ``other_heading`` (an angle in 2D; a yaw or 3x3
+      rotation in 3D); without it, ``other``'s bounding ball.
+
+    ``other`` must be a polytope shape. A ball piece of an agent (a ball agent, an in-place turn) is tested
+    as a mitred offset of the obstacle, never smaller than the exact one."""
+    dim = backend.vertex_positions.shape[1]
+    paths = [np.asarray(p, dtype=float).reshape(-1, dim) for p in as_path_list(paths)]
+    n = len(paths)
+    ob = make_body(other, dim)
+    if ob.ball_r > 0:
+        raise ValueError("body_roadmap_hits_minkowski: other must be a polygon / polyhedron")
+    single = not isinstance(shapes, (list, tuple, np.ndarray))
+    shape_list = [shapes] * n if single else list(shapes)
+    bodies = [make_body(sh, dim) for sh in shape_list]
+    mp = body_motion_pieces(paths, bodies, velocity, t0, turning_speed, goal_hold, heading, dim)
+    body_lo, body_cnt, geo = _flatten_bodies(bodies + [ob], dim)
+    V, FN, E, pr = geo[0], geo[1], geo[10], geo[11]
+    has_body = mp["body"] >= 0
+    sub_lo = np.where(has_body, body_lo[np.maximum(mp["body"], 0)], -1).astype(np.int64)
+    sub_cnt = np.where(has_body, body_cnt[np.maximum(mp["body"], 0)], 0).astype(np.int64)
+    ob_pieces = body_lo[-1] + np.arange(body_cnt[-1])
+    T = mp["w1"] - mp["w0"]
+    moving = np.any(mp["v"] != 0.0, axis=1)
+    end = mp["x0"] + np.where(moving, T, 0.0)[:, None] * mp["v"]
+    reach = mp["radius"] + ob.radius
+    P = backend.vertex_positions
+    nv = max(len(P), 1)
+
+    def cross_obstacle(pq, sub):                             # each row once per piece of the obstacle
+        k = len(ob_pieces)
+        return np.repeat(np.arange(len(pq)), k), np.tile(ob_pieces, len(pq))
+
+    # ---- vertices
+    rows, vid = backend._vertex_candidates(mp["x0"], end, reach)
+    idx, sub = _expand_pieces(rows, sub_lo, sub_cnt)
+    pq, vid = rows[idx], vid[idx]
+    if other_heading is None:                                # the obstacle's bounding ball
+        grow = np.full(len(mp["w0"]), ob.radius)
+        hit, t1, t2 = _vertex_windows(pq, sub, vid, P, mp["x0"], mp["v"], T, mp["rot"], mp["ball_r"], *geo, eps,
+                                      grow, reach)
+    else:
+        r, cb = cross_obstacle(pq, sub)
+        pq, sub, vid = pq[r], sub[r], vid[r]
+        RB = np.ascontiguousarray(np.broadcast_to(_heading_matrix(other_heading, dim), (len(pq), dim, dim)))
+        hit, t1, t2 = _obstacle_windows(pq, sub, cb, np.ascontiguousarray(P[vid]), np.zeros((len(pq), dim)), RB,
+                                        mp["x0"], mp["v"], T, mp["rot"], mp["ball_r"], V, FN, E, pr, eps)
+    va, vk = mp["agent"][pq[hit]], vid[hit]
+    vm = merge_intervals(va * nv + vk, mp["w0"][pq[hit]] + t1[hit], mp["w0"][pq[hit]] + t2[hit])
+
+    # ---- directed edges: the obstacle swept along the edge, facing along it
+    rows, eid = backend._edge_candidates(mp["x0"], end, reach)
+    idx, sub = _expand_pieces(rows, sub_lo, sub_cnt)
+    pq, eid = rows[idx], eid[idx]
+    dirs = np.frombuffer(backend.edge_dir, dtype=np.uint8)[eid] if len(eid) else np.empty(0, np.uint8)
+    lo_v, hi_v = backend.edge_src_array[eid], backend.edge_tgt_array[eid]
+    fwd, bwd = dirs != EdgeDir.HIGH, dirs != EdgeDir.LOW
+    pq = np.concatenate([pq[fwd], pq[bwd]]); sub = np.concatenate([sub[fwd], sub[bwd]])
+    src = np.concatenate([lo_v[fwd], hi_v[bwd]]); tgt = np.concatenate([hi_v[fwd], lo_v[bwd]])
+    r, cb = cross_obstacle(pq, sub)
+    pq, sub, src, tgt = pq[r], sub[r], src[r], tgt[r]
+    O = np.ascontiguousarray(P[src])
+    sw = np.ascontiguousarray(P[tgt] - P[src])
+    length = np.linalg.norm(sw, axis=1)
+    RB = np.ascontiguousarray(_travel_frames(sw / np.where(length > 0, length, 1.0)[:, None])) if len(sw) \
+        else np.zeros((0, dim, dim))
+    hit, t1, t2 = _obstacle_windows(pq, sub, cb, O, sw, RB, mp["x0"], mp["v"], T, mp["rot"], mp["ball_r"],
+                                    V, FN, E, pr, eps)
+    ea = mp["agent"][pq[hit]]
+    em = merge_intervals((ea * nv + src[hit]) * nv + tgt[hit], mp["w0"][pq[hit]] + t1[hit], mp["w0"][pq[hit]] + t2[hit])
+
+    v_cut = np.searchsorted(vm[0] // nv, np.arange(n + 1))
+    e_cut = np.searchsorted(em[0] // (nv * nv), np.arange(n + 1))
+    out = []
+    for i in range(n):
+        vs, es = slice(v_cut[i], v_cut[i + 1]), slice(e_cut[i], e_cut[i + 1])
+        code = em[0][es]
+        out.append(((vm[0][vs] % nv, vm[1][vs], vm[2][vs]), ((code // nv) % nv, code % nv, em[1][es], em[2][es])))
+    return out
+
+
 def body_agent_conflicts(paths, shapes, velocity=None, t0=0.0, turning_speed=None, goal_hold=0.0, heading=None,
                          pairs=None, first_only: bool = False, as_arrays: bool = False, eps: float = 1e-9):
-    """``CGALCollisionHetero.agent_conflicts``: when two agents' bodies overlap (2D or 3D)."""
+    """``CollisionBase.agent_conflicts`` for bodies of any shape: when two agents' bodies overlap (2D or 3D)."""
     paths = as_path_list(paths)
     n = len(paths)
     empty = (np.empty(0, np.int64), np.empty(0, np.int64), np.empty(0), np.empty(0))

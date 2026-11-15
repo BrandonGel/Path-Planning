@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from path_planning.common.world.collision_checking.cgal.cgal_collision import CGALCollision
 from path_planning.common.world.collision_checking.sweep.disc_sweep import assemble, as_path_list
-from path_planning.common.world.collision_checking.sweep.polytope_sweep import body_roadmap_hits, body_agent_conflicts
+from path_planning.common.world.collision_checking.sweep.polytope_sweep import body_roadmap_hits
 
 
 class CGALCollisionHetero(CGALCollision):
@@ -57,13 +57,3 @@ class CGALCollisionHetero(CGALCollision):
         v_parts, e_parts = body_roadmap_hits(self, paths, shapes, velocity, t0, turning_speed, goal_hold,
                                              heading, self.STRICT_EPS)
         return assemble(self, len(paths), v_parts, e_parts, as_arrays)
-
-    def agent_conflicts(self, paths, shapes, velocity=None, t0=0.0, turning_speed=None, goal_hold=0.0,
-                        heading=None, pairs=None, first_only: bool = False, as_arrays: bool = False):
-        """When two agents' bodies overlap, exactly: ``{(i, j): [(t1, t2), ...]}`` with ``i < j``.
-        ``first_only``: ``{(i, j): first contact time}``. ``as_arrays``: ``(i, j, t1, t2)`` arrays.
-        ``pairs``: only check these agent pairs. Inputs as in ``overlapping_interval_paths``; no roadmap is
-        needed (the dimension comes from the paths). An agent exists from ``t0`` until it arrives, then for
-        ``goal_hold``. See ``polytope_sweep`` for the method."""
-        return body_agent_conflicts(paths, shapes, velocity, t0, turning_speed, goal_hold, heading, pairs,
-                                    first_only, as_arrays, self.STRICT_EPS)

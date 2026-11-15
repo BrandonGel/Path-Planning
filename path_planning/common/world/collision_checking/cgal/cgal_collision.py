@@ -1,7 +1,7 @@
 """Disc / sphere sweep collision checker over a ``GraphSampler`` roadmap (2D or 3D).
 
 Agents are balls, each with its own radius and speed. The queries (``overlapping_interval_paths``,
-``agent_conflicts``) are those of ``collision_sweep.CollisionSweep``; this class supplies the candidate search
+``agent_conflicts``) are those of ``collision_base.CollisionBase``; this class supplies the candidate search
 (``spatial_index``, same results either way):
 
 - ``"grid"`` (default): uniform grids (``spatial_grid.BoxGrid``), built and queried in parallel in numba.
@@ -18,7 +18,7 @@ import itertools
 
 import numpy as np
 
-from path_planning.common.world.collision_checking.sweep.collision_sweep import CollisionSweep
+from path_planning.common.world.collision_checking.sweep.collision_base import CollisionBase
 from path_planning.common.world.collision_checking.sweep.disc_sweep import EdgeDir   # noqa: F401  (re-exported)
 from path_planning.common.world.collision_checking.sweep.spatial_grid import BoxGrid
 
@@ -26,7 +26,7 @@ from path_planning.common.world.collision_checking.sweep.spatial_grid import Box
 SPATIAL_INDEXES = ("grid", "rtree")
 
 
-class CGALCollision(CollisionSweep):
+class CGALCollision(CollisionBase):
     """Disc / sphere sweeps against a roadmap (2D or 3D). ``spatial_index``: ``"grid"`` or ``"rtree"``."""
 
     def __init__(self, spatial_index: str = "grid"):
