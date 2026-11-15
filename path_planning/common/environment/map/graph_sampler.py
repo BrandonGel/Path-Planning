@@ -5,7 +5,13 @@ from scipy.spatial import KDTree
 from path_planning.common.environment.node import Node
 from python_motion_planning.common.env.map.grid import GridTypeMap
 from python_motion_planning.common import TYPES
-from path_planning.utils.cgal_sweep import CGAL_Sweep
+from path_planning.agent import Agent
+from path_planning.common.world.collision_checking.collision_sweep import CollisionSweep
+from path_planning.common.world.collision_checking.sweep.disc_sweep import (
+    sweep_paths as _disc_sweep_paths, assemble as _assemble_hits, per_agent as _per_agent,
+    as_path_list)
+from path_planning.common.world.collision_checking.sweep.polytope_sweep import (
+    make_body, body_roadmap_hits, body_roadmap_hits_minkowski)
 from path_planning.common.environment.map.graph_sampler_base import GraphSamplerBase, ROADMAP_TYPES, validate_roadmap_type, snap_to_cell_centers  # re-exported: cluster_map, ctopprm, dataset_ground_truth_map import them from here
 from path_planning.common.environment.roadmap.roadmap_base import RoadmapConfig
 from path_planning.common.environment.node_sampler.node_sampler import NodeSampler
@@ -16,16 +22,12 @@ import pickle
 
 
 class GraphSampler(GraphSamplerBase):
-    def __init__(self,*args,start,goal,roadmap_config: "dict | RoadmapConfig | str | None" = None,use_discrete_space=True,use_constraint_sweep=True,record_sweep=True,use_exact_collision_check=True,sampling_dist_dict = {},sweep_backend="auto",**kwargs):
+    def __init__(self,*args,start,goal,roadmap_config: "dict | RoadmapConfig | str | None" = None,use_discrete_space=True,use_collision_sweep=True,record_sweep=True,use_exact_collision_check=True,sampling_dist_dict = {},sweep_backend="auto",sweep_spatial_index="grid",**kwargs):
         super().__init__(*args, **kwargs)
 
         # Check if start and goal are lists, non-empty, and not None
-        assert start is not None, "Start must not be None"
-        assert goal is not None, "Goal must not be None"
         assert isinstance(start, list), "Start must be a list"
         assert isinstance(goal, list), "Goal must be a list"
-        self.start = start
-        self.goal = goal
         self.obstacles = []
         self.obs_size = 0.5
         # Roadmap parameters (sample_num, num_neighbors, edge band, RRG rates,
@@ -35,7 +37,6 @@ class GraphSampler(GraphSamplerBase):
         self.roadmap = Roadmap(self, config=roadmap_config)
         
         self.obstacle_nodes = []
-        self.track_with_link = False
 
         self.use_discrete_space = use_discrete_space
 
@@ -44,11 +45,12 @@ class GraphSampler(GraphSamplerBase):
         self._start_edges_khop = None
         self._goal_edges_khop = None
 
-        self.use_constraint_sweep = use_constraint_sweep
-        self.record_sweep = record_sweep
+        self.use_collision_sweep = use_collision_sweep
+        self.record_sweep = record_sweep    # legacy flag kept for saved maps; sweeps are cached by planners
         self.use_exact_collision_check = use_exact_collision_check
         self.sweep_backend = sweep_backend
-        self.constraint_sweep = self._make_constraint_sweep()
+        self.sweep_spatial_index = sweep_spatial_index
+        self.collision_sweep = self._make_collision_sweep()
         self._inflated_esdf = None          # inflated esdf cache
         self._inflated_esdf_source = None   # inflated esdf source to update inflated esdf
 
@@ -255,12 +257,9 @@ class GraphSampler(GraphSamplerBase):
             idx = self._index_of(node.current)
         except KeyError:
             return []
-        road_map = self.roadmap_edges
-        if idx >= len(road_map):
+        if self.roadmap is None or idx >=  self.roadmap.num_nodes:
             return []
-        neighbors = [self.nodes[i] for i in road_map[idx]]
-        if self.track_with_link:
-            neighbors = [neighbor.link(node) for neighbor in neighbors]
+        neighbors = [ self.nodes[i] for i in  self.roadmap.neighbors(idx).tolist()]
         return neighbors
 
     def generateRandomNodes(self,sample_num: int = None, generate_grid_nodes = False, generate_boundary_nodes = False, prob_map = None, samp_from_prob_map_ratio = 0.5, roadmap_type: str = None, boundary_node_spacing: float | None = None):
@@ -339,41 +338,11 @@ class GraphSampler(GraphSamplerBase):
         self.roadmap.apply()
         return self.roadmap
 
-    def _make_constraint_sweep(self):
-        """Build the spatial-sweep backend.
-
-        ``sweep_backend``:
-        - ``"auto"`` (default): use the Shapely (GEOS) backend in 2D and the CGAL
-          backend in 3D+ (Shapely/GEOS is planar). Falls back to CGAL in 2D if
-          Shapely is not installed.
-        - ``"shapely"``: force the Shapely backend (2D only).
-        - ``"cgal"``: force the CGAL backend (2D or 3D).
-        Shapely is imported lazily so it is only required when actually selected."""
-        backend = getattr(self, "sweep_backend", "auto")
-        dim = getattr(self, "dim", None)
-        if dim is None:
-            dim = len(self.bounds) if getattr(self, "bounds", None) is not None else 2
-
-        if backend == "auto":
-            backend = "shapely" if dim == 2 else "cgal"
-            if backend == "shapely":
-                try:  # 2D auto falls back to CGAL when Shapely is unavailable.
-                    import shapely  # noqa: F401
-                except Exception:
-                    backend = "cgal"
-
-        if backend == "shapely":
-            from path_planning.utils.shapely_sweep import ShapelySweep
-            return ShapelySweep(
-                record_sweep=self.record_sweep,
-                use_exact_collision_check=self.use_exact_collision_check,
-            )
-        if backend != "cgal":
-            raise ValueError(f"Unknown sweep_backend {backend!r}; expected 'auto', 'cgal' or 'shapely'.")
-        return CGAL_Sweep(
-            record_sweep=self.record_sweep,
-            use_exact_collision_check=self.use_exact_collision_check,
-        )
+    # ------------------------------------------------------------ collision sweep
+    def _make_collision_sweep(self):
+        """A ``CollisionSweep`` from ``sweep_backend`` and ``sweep_spatial_index`` (see there)."""
+        dim = getattr(self, "dim", None) or (len(self.bounds) if getattr(self, "bounds", None) is not None else 2)
+        return CollisionSweep(getattr(self, "sweep_backend", "auto"), getattr(self, "sweep_spatial_index", "grid"), dim)
 
     def _roadmap_signature(self):
         """Cheap content fingerprint of the roadmap the sweep is built for."""
@@ -383,91 +352,185 @@ class GraphSampler(GraphSamplerBase):
             hash(tuple((int(e[0]), int(e[1])) for e in self.edges)),
         )
 
-    def set_constraint_sweep(self, force: bool = False, keep_query_caches: bool = False):
-        """(Re)bind the sweep backend to the current roadmap.
+    def set_collision_sweep(self, backend: "str | None" = None, spatial_index: "str | None" = None,
+                            force: bool = False):
+        """Bind ``collision_sweep`` to the current roadmap (node positions and directed edges).
 
-        Building the backend's spatial indices (vertex KD-tree / edge R-tree, edge
-        geometry arrays) is the expensive part and depends on the roadmap only, so it
-        is skipped when the roadmap is unchanged since the last call (content
-        fingerprint of nodes + edges); per-query memo caches are still cleared then,
-        keeping memory behaviour identical to a full rebuild. Callers that plan many
-        times on one roadmap (NeuralATTF builds a SippPlanner per low-level call)
-        therefore pay the index build once. ``force`` rebuilds regardless;
-        ``keep_query_caches`` also keeps the sweep's memoized query results.
-        """
+        - ``backend`` / ``spatial_index``: switch ``sweep_backend`` / ``sweep_spatial_index`` (None keeps the
+          current one). A change rebuilds ``collision_sweep``, then binds it if the roadmap has nodes.
+        - The index depends on the roadmap only, so it is kept while the roadmap's fingerprint is unchanged;
+          ``force`` rebinds regardless.
+
+        Each bind bumps ``sweep_version``, which planner-side sweep caches key on."""
+        current = (getattr(self, "sweep_backend", "auto"), getattr(self, "sweep_spatial_index", "grid"))
+        wanted = (backend or current[0], spatial_index or current[1])
+        if wanted != current:
+            self.sweep_backend, self.sweep_spatial_index = wanted
+            self.collision_sweep = self._make_collision_sweep()
+            self._collision_sweep_signature = None
+            if not self.nodes:
+                return
         sig = self._roadmap_signature()
-        if not force and getattr(self, "_constraint_sweep_signature", None) == sig:
-            if not keep_query_caches:
-                self.constraint_sweep.clear_caches()
-            self._constraint_sweep_locations_cache = {}
+        if not force and getattr(self, "_collision_sweep_signature", None) == sig:
             return
-        self.constraint_sweep.set_graph([node.current for node in self.nodes],self.edges)
-        self._constraint_sweep_signature = sig
-        self._sipp_sweep_memo = {}  # SippGraph's cross-call sweep memo is roadmap-bound
-        # Precompute tuples for fast per-index coordinate access — avoids the
-        # repeated `self.nodes[idx].current` attribute walk in the hot path.
+        self.collision_sweep.set_graph([node.current for node in self.nodes], self.edges)
+        self._collision_sweep_signature = sig
         self._node_current_tuples = [tuple(n.current) for n in self.nodes]
-        # Memoize the coordinate-converted sweep result so identical queries
-        # don't re-pay the set-comprehension cost on every CBS conflict check.
-        self._constraint_sweep_locations_cache = {}
+        self.sweep_version = getattr(self, "sweep_version", 0) + 1
 
-    def get_constraint_sweep(self, p1: tuple[float,float], p2: tuple[float,float],v: float = 0.0, r: float = 0.5, use_interval: bool = False,get_time_interval: bool = False):
-        if not self.use_constraint_sweep:
+
+    def get_collision_sweep(self, p1: tuple[float,float], p2: tuple[float,float],v=None, r: float = 0.5, use_interval: bool = False,get_time_interval: bool = False):
+        """The planners' per-move disc query: the roadmap elements a disc of radius ``r`` moving ``p1 -> p2``
+        at speed ``v`` touches, keyed by node coordinates.
+
+        - ``use_interval`` and ``get_time_interval``: ``({vertex: (t1, t2)}, {(a, b): (t1, t2)})``, times
+          from 0 at ``p1`` (a wait ``p1 == p2``: ``(0, inf)``).
+        - ``use_interval`` only: the two key sets. Neither: the set of directed edge keys.
+
+        Edge keys include a self-loop ``(p, p)`` for every vertex hit. ``v`` of None or 0: the move takes 1
+        time unit. Not cached: planners memoize it (see ``sipp.graph_generation.cached_collision_sweep``).
+        For agent types and other shapes see ``sweep_paths``."""
+        if not self.use_collision_sweep:
             return None
-        if use_interval:
-            overlapping_vertices,overlapping_edges = self.constraint_sweep.overlapping_interval_cgal(p1, p2,v, r,get_time_interval=get_time_interval)
-            node_tuples = getattr(self, "_node_current_tuples", None)
-            if node_tuples is None:
-                node_tuples = [tuple(n.current) for n in self.nodes]
-            if get_time_interval:
-                vertices_interval = {node_tuples[vi]: iv for vi, iv in overlapping_vertices.items()}
-                edges_interval = {(node_tuples[e[0]], node_tuples[e[1]]): iv for e, iv in overlapping_edges.items()}
-                return vertices_interval, edges_interval
-            vertices_locations = set(node_tuples[vi] for vi in overlapping_vertices)
-            edges_locations = set((node_tuples[e[0]], node_tuples[e[1]]) for e in overlapping_edges)
-            return vertices_locations, edges_locations
+        wait = tuple(p1) == tuple(p2)
+        (vid, vt1, vt2), (src, tgt, et1, et2) = _disc_sweep_paths(
+            self.collision_sweep, [p1] if wait else [p1, p2], r, v or None, goal_hold=float("inf") if wait else 0.0)[0]
+        nt = self._node_current_tuples
+        v_pos, v_win = [nt[i] for i in vid.tolist()], list(zip(vt1.tolist(), vt2.tolist()))
+        vertices = dict(zip(v_pos, v_win))
+        edges = {(nt[a], nt[b]): w for a, b, w in zip(src.tolist(), tgt.tolist(), zip(et1.tolist(), et2.tolist()))}
+        edges.update(((p, p), w) for p, w in zip(v_pos, v_win))
+        if use_interval and get_time_interval:
+            return vertices, edges
+        return (set(vertices), set(edges)) if use_interval else set(edges)
 
-        cache = getattr(self, "_constraint_sweep_locations_cache", None)
-        if cache is not None:
-            cache_key = (p1, p2, v, r)
-            cached = cache.get(cache_key)
-            if cached is not None:
-                return cached
+    # ------------------------------------------------------------ agent queries (Agent types, any shape)
+    def sweep_paths(self, agents, paths, t0=0.0, goal_hold=0.0, other=None, clearance: str = "radius",
+                    heading=None, other_heading=None, prev=None, speed=None) -> list:
+        """When each agent's body covers each roadmap vertex and directed edge along its path. One entry
+        per path: ``((vertex, t1, t2), (src, tgt, t1, t2))`` node-index arrays, one row per window,
+        times from ``t0`` at the path's first waypoint. Ball agents use the disc code, other shapes the exact
+        polytope sweep. A single move is a 2-point path; a wait a 1-point path with ``goal_hold`` (``inf``:
+        it stays).
 
-        overlapping_edges = self.constraint_sweep.overlapping_graph_elements_cgal(p1, p2, v, r)
-        node_tuples = getattr(self, "_node_current_tuples", None)
-        if node_tuples is None:
-            node_tuples = [tuple(n.current) for n in self.nodes]
-        edges_locations = set((node_tuples[e[0]], node_tuples[e[1]]) for e in overlapping_edges)
-        if cache is not None:
-            cache[cache_key] = edges_locations
-        return edges_locations
+        - ``agents``: one ``Agent`` (type) for all paths, or one per path; speed and turning come from it.
+        - ``paths``: a list of ``(P, D)`` waypoint arrays.
+        - ``t0``, ``goal_hold``, ``heading``, ``prev``, ``speed``: one value or one per path.
+          ``heading``: a fixed attitude (an angle in 2D; a yaw or 3x3 rotation in 3D).
+        - ``prev``: the waypoint the agent arrives from. It then turns in place at the first waypoint for
+          ``angle / max_rotation`` (covered as its bounding ball) before moving, a waiting polygon keeps its
+          arrival attitude, and elements it still covers on arrival start at ``t0``. Ignored for a
+          never-turning agent (``max_rotation = 0``).
+        - ``speed``: overrides the agent's ``max_speed``.
+        - ``other`` (an ``Agent`` or a radius): who the result will constrain; None: the body alone.
+        - ``clearance="radius"``: the body grows by ``other``'s bounding radius. Exact for ball agents; for
+          polygons every face moves out by it (never less than the true clearance, more near sharp corners).
+        - ``clearance="minkowski"`` (``other`` a polygon / polyhedron ``Agent``): exact. A directed edge is
+          covered while ``other``, anywhere on it and facing along it, would overlap the body; a vertex
+          while ``other`` standing on it would, with attitude ``other_heading`` or, without it, as its
+          bounding ball. A ball ``other`` uses the ``"radius"`` rule.
 
-    def get_constraint_segment(self, p1a: Tuple[float, ...],p1b: Tuple[float, ...],p2a: Tuple[float, ...],p2b: Tuple[float, ...],v: float = 0.0,r: float = 0.5) -> bool:
-        p1a = np.array(p1a)
-        p2a = np.array(p2a)
-        p1b = np.array(p1b)
-        p2b = np.array(p2b)
-        if v == 0.0:
-            v1 = p1b-p1a
-            v2 = p2b-p2a
-            t_dur = 1.0
-        else:
-            dist1 = np.linalg.norm(p1b-p1a)
-            dist2 = np.linalg.norm(p2b-p2a)
-            t_dur1 = dist1/v
-            t_dur2 = dist2/v
-            t_dur = min(t_dur1, t_dur2)
-            v1 = (p1b-p1a)/t_dur1 if dist1 > 0.0 else np.zeros(self.dim)
-            v2 = (p2b-p2a)/t_dur2 if dist2 > 0.0 else np.zeros(self.dim)
-        r = 2*r
-        r_vec = p2a-p1a
-        vel = v2-v1
-        tmin = np.clip(-np.dot(vel,r_vec)/(np.dot(vel,vel)+1e-10),0.0,t_dur)
-        r_min_vec = r_vec + vel*tmin
-        if np.linalg.norm(r_min_vec) < r:
-            return True
-        return False
+        Not cached: the planner memoizes what it reuses."""
+        if clearance not in ("radius", "minkowski"):
+            raise ValueError(f"clearance must be 'radius' or 'minkowski', got {clearance!r}")
+        paths = [np.asarray(p, dtype=float).reshape(-1, self.dim) for p in as_path_list(paths)]
+        n = len(paths)
+        agents = [agents] * n if isinstance(agents, Agent) else list(agents)
+        if len(agents) != n:
+            raise ValueError(f"expected one Agent or one per path ({n}), got {len(agents)}")
+        single_point = prev is not None and np.ndim(prev) == 1 and all(np.isscalar(x) for x in prev)
+        prevs = [prev] * n if prev is None or single_point else list(prev)
+        t0s, holds, heads, speeds = (_per_agent(x, n) for x in (t0, goal_hold, heading, speed))
+        movers = [a if sp is None else Agent(a.shape, sp, a.max_rotation, a.type) for a, sp in zip(agents, speeds)]
+        prevs = [None if q is None or a.max_rotation == 0 or tuple(map(float, q)) == tuple(p[0]) else
+                 np.asarray(q, dtype=float) for q, a, p in zip(prevs, movers, paths)]
+        # A path arriving from ``prev`` is swept with ``prev`` in front, started earlier by its travel time.
+        arrive = [0.0 if q is None else (1.0 if a.max_speed is None else float(np.linalg.norm(p[0] - q)) / a.max_speed)
+                  for q, a, p in zip(prevs, movers, paths)]
+        full = [p if q is None else np.vstack([q, p]) for q, p in zip(prevs, paths)]
+        out = self._sweep_batch(movers, full, [t - dt for t, dt in zip(t0s, arrive)], holds, other, clearance,
+                                heads, other_heading)
+        for i, (dt, t) in enumerate(zip(arrive, t0s)):
+            if dt > 0.0:                                         # drop what ended before the arrival
+                (vid, t1, t2), (src, tgt, e1, e2) = out[i]
+                kv, ke = t2 > t + 1e-12, e2 > t + 1e-12
+                out[i] = ((vid[kv], np.maximum(t1[kv], t), t2[kv]),
+                          (src[ke], tgt[ke], np.maximum(e1[ke], t), e2[ke]))
+        return out
+
+    def _sweep_batch(self, agents, paths, t0s, holds, other, clearance, heads, other_heading) -> list:
+        """``sweep_paths`` without ``prev``: one result per path, absolute times."""
+        n = len(paths)
+        backend, eps = self.collision_sweep, self.collision_sweep.STRICT_EPS
+        shapes, speeds, turns = ([getattr(a, f) for a in agents] for f in ("shape", "max_speed", "max_rotation"))
+        grow = 0.0
+        if isinstance(other, Agent):
+            body = make_body(other.shape, self.dim)
+            if clearance == "minkowski" and body.ball_r <= 0:
+                return body_roadmap_hits_minkowski(backend, paths, shapes, other.shape, speeds, t0s, turns,
+                                                   holds, heads, eps, other_heading)
+            grow = body.radius
+        elif other is not None:
+            grow = float(other)
+        ball_r = [make_body(sh, self.dim).ball_r for sh in shapes]
+        out = [None] * n
+        for is_ball in (True, False):
+            idx = [i for i in range(n) if (ball_r[i] > 0) == is_ball]
+            take = lambda xs: [xs[i] for i in idx]
+            if not idx:
+                continue
+            if is_ball:
+                res = _disc_sweep_paths(backend, take(paths), [ball_r[i] + grow for i in idx], take(speeds),
+                                        take(t0s), take(turns), take(holds))
+            else:
+                res = _assemble_hits(backend, len(idx), *body_roadmap_hits(
+                    backend, take(paths), take(shapes), take(speeds), take(t0s), take(turns), take(holds),
+                    take(heads), eps, grow), True)
+            for i, r in zip(idx, res):
+                out[i] = r
+        return out
+
+    def agent_conflicts(self, agents, paths, t0=0.0, goal_hold=0.0, heading=None, pairs=None,
+                        first_only: bool = False, as_arrays: bool = False):
+        """When two agents' bodies overlap along their paths: ``{(i, j): [(t1, t2), ...]}`` with ``i < j``.
+        ``first_only``: ``{(i, j): first contact time}``. ``as_arrays``: ``(i, j, t1, t2)`` arrays.
+        ``pairs``: only check these agent pairs. ``agents``, ``paths``, ``t0``, ``goal_hold`` and ``heading``
+        as in ``sweep_paths``. Exact; no roadmap is needed."""
+        paths = as_path_list(paths)
+        agents = [agents] * len(paths) if isinstance(agents, Agent) else list(agents)
+        shapes, speeds, turns = ([getattr(a, f) for a in agents] for f in ("shape", "max_speed", "max_rotation"))
+        return self.collision_sweep.agent_conflicts(paths, shapes, speeds, t0, turns, goal_hold, heading, pairs,
+                                                    first_only, as_arrays)
+
+    def get_constraint_segment(self, p1a: Tuple[float, ...], p1b: Tuple[float, ...], p2a: Tuple[float, ...],
+                               p2b: Tuple[float, ...], v=None, r: float = 0.5, agents=None, heading=None) -> bool:
+        """Whether two agents collide while moving ``p1a -> p1b`` and ``p2a -> p2b`` over the same time step,
+        both starting at 0: ``agent_conflicts`` on the pair.
+
+        - ``agents``: one ``Agent`` for both moves or one per move, any shape; each move takes its length /
+          ``max_speed`` (1 time unit if ``max_speed`` is None). Default: discs of radius ``r`` at speed ``v``
+          (None or 0: 1 time unit). A moved agent is gone once it arrives.
+        - A wait (``a == b``) lasts the whole step (the longest move's duration).
+        - ``heading``: one fixed attitude per move (None: a move faces along itself). A waiting polygon
+          without a heading is checked as its bounding ball, since its attitude is unknown."""
+        if agents is None:
+            if r <= 0:
+                return False
+            agents = Agent.disc(r, v or None)
+        agents = [agents] * 2 if isinstance(agents, Agent) else list(agents)
+        heads = [None, None] if heading is None else list(heading)
+        moves = [(tuple(p1a), tuple(p1b)), (tuple(p2a), tuple(p2b))]
+        waits = [a == b for a, b in moves]
+        for i, (ag, w) in enumerate(zip(agents, waits)):
+            if w and heads[i] is None and not ag.is_ball:
+                agents[i] = Agent(ag.radius, ag.max_speed, ag.max_rotation, ag.type)
+        dur = [1.0 if ag.max_speed is None else float(np.linalg.norm(np.subtract(b, a))) / ag.max_speed
+               for ag, (a, b), w in zip(agents, moves, waits) if not w]
+        step = max(dur, default=1.0)
+        paths = [np.array([a]) if w else np.array([a, b]) for (a, b), w in zip(moves, waits)]
+        holds = [step if w else 0.0 for w in waits]
+        return bool(self.agent_conflicts(agents, paths, goal_hold=holds, first_only=True,
+                                         heading=None if all(h is None for h in heads) else heads))
 
     def clear_data(self):
         self.start_to_all_edges_dict = {}
@@ -504,11 +567,11 @@ class GraphSampler(GraphSamplerBase):
             "obstacles": np.asarray(self.obstacles, dtype=np.int64) if len(self.obstacles) else [],
             "obs_size": self.obs_size,
             "inflation_radius": self.inflation_radius,
-            "track_with_link": self.track_with_link,
-            "use_constraint_sweep": self.use_constraint_sweep,
+            "use_collision_sweep": self.use_collision_sweep,
             "record_sweep": self.record_sweep,
             "use_exact_collision_check": self.use_exact_collision_check,
-            "sweep_backend": getattr(self, "sweep_backend", "cgal"),
+            "sweep_backend": getattr(self, "sweep_backend", "auto"),
+            "sweep_spatial_index": getattr(self, "sweep_spatial_index", "grid"),
         }
         with open(path, 'wb') as f:
             pickle.dump(data, f)
@@ -535,7 +598,6 @@ class GraphSampler(GraphSamplerBase):
         self.inflation_radius = data["inflation_radius"]
         self.set_obstacles(self.obstacles)
         self.inflate_obstacles(self.inflation_radius)
-        self.track_with_link = data.get("track_with_link", False)
 
         if "node_sampler" in data:              # version 2: plain-array state dicts carry the config and sampling parameters
             self.node_sampler.load_state_dict(data["node_sampler"])
@@ -559,13 +621,15 @@ class GraphSampler(GraphSamplerBase):
         # The start/goal edge lists are built lazily by get_start/goal_nodes_with_all_edges.
 
         # Set up constraint sweep
-        self.use_constraint_sweep = data["use_constraint_sweep"] if not 'use_constraint_sweep' in args else args["use_constraint_sweep"]
+        # Maps saved before the rename store ``use_constraint_sweep``.
+        self.use_collision_sweep = args.get("use_collision_sweep", data.get("use_collision_sweep", data.get("use_constraint_sweep", True)))
         self.record_sweep = data["record_sweep"]
         self.use_exact_collision_check = data["use_exact_collision_check"]
         self.sweep_backend = args.get("sweep_backend", data.get("sweep_backend", "auto"))
-        self.constraint_sweep = self._make_constraint_sweep()
-        if self.use_constraint_sweep:
-            self.set_constraint_sweep()
+        self.sweep_spatial_index = args.get("sweep_spatial_index", data.get("sweep_spatial_index", "grid"))
+        self.collision_sweep = self._make_collision_sweep()
+        if self.use_collision_sweep:
+            self.set_collision_sweep()
 
         points = np.array([samp.current for samp in self.nodes])
         self.sample_kd_tree = KDTree(points)
@@ -704,8 +768,8 @@ class GraphSampler(GraphSamplerBase):
         else:
             self.sample_kd_tree = None
 
-        if self.use_constraint_sweep and len(self.edges) > 0:
-            self.set_constraint_sweep()
+        if self.use_collision_sweep and len(self.edges) > 0:
+            self.set_collision_sweep()
 
     def create_pruned_copy(self, kept_node_indices: np.ndarray):
         """
@@ -765,13 +829,13 @@ class GraphSampler(GraphSamplerBase):
             "nodes": pruned_nodes,
             "obstacles": self.obstacles,
             "inflation_radius": self.inflation_radius,
-            "track_with_link": self.track_with_link,
             "road_map": pruned_road_map,
             "road_map_edge_weights": pruned_road_map_edge_weights,
-            "use_constraint_sweep": self.use_constraint_sweep,
+            "use_collision_sweep": self.use_collision_sweep,
             "record_sweep": self.record_sweep,
             "use_exact_collision_check": self.use_exact_collision_check,
-            "sweep_backend": getattr(self, "sweep_backend", "cgal"),
+            "sweep_backend": getattr(self, "sweep_backend", "auto"),
+            "sweep_spatial_index": getattr(self, "sweep_spatial_index", "grid"),
             "sampling_dist_dict": self.node_sampler.sampling_dist_dict,
         }
 
@@ -784,10 +848,11 @@ class GraphSampler(GraphSamplerBase):
             goal=[],
             roadmap_config={**self.roadmap_config.as_dict(), "sample_num": 0},
             use_discrete_space=self.use_discrete_space,
-            use_constraint_sweep=self.use_constraint_sweep,
+            use_collision_sweep=self.use_collision_sweep,
             record_sweep=self.record_sweep,
             use_exact_collision_check=self.use_exact_collision_check,
-            sweep_backend=getattr(self, "sweep_backend", "cgal"),
+            sweep_backend=getattr(self, "sweep_backend", "auto"),
+            sweep_spatial_index=getattr(self, "sweep_spatial_index", "grid"),
             sampling_dist_dict=self.node_sampler.sampling_dist_dict,
         )
         pruned_sampler._load_from_dict(pruned_data)
