@@ -95,7 +95,7 @@ class ShapelyCollisionHetero(ShapelyCollision):
         rows are the directed edges the roadmap allows. ``as_arrays=False`` gives dicts instead,
         ``[({vertex: [(t1, t2), ...]}, {(src, tgt): [(t1, t2), ...]}), ...]``. All paths go into one piece set, the
         roadmap trees are queried once and the hits are timed in one numba pass, then split per agent.
-        Touching is not contact.
+        Touching is not contact, and contacts of zero duration (e.g. at an instant turn) are left out.
 
         ``exact=False``: the pieces of ``sweep_rings_timed(..., method)``. Polygon pieces (``front_face``
         rectangles, ``exact`` hulls) are clipped to when the body's reach along travel spans the element
@@ -184,7 +184,9 @@ class ShapelyCollisionHetero(ShapelyCollision):
         """Raw hits of a piece set: ``(v_agent, v_id, v_t1, v_t2), (e_agent, e_edge, e_t1, e_t2)`` with
         canonical edge indices. Bounding-box candidates from the trees, then the fused numba kernels
         (inside test / clipping by ``STRICT_EPS`` + time window); a concave goal footprint goes through
-        shapely and keeps its whole window."""
+        shapely and keeps its whole window. Contacts of zero duration are left out, as in the disc classes and
+        ``CGALCollisionHetero``: pieces whose window has no length (an instant turn, ``goal_hold = 0``) are not
+        queried at all, and hits whose window has no length (a grazing touch) are dropped."""
         empty_i, empty_f = np.empty(0, np.int64), np.empty(0)
         none = (empty_i, empty_i, empty_f, empty_f)
         if len(ps["windows"]) == 0 or self.vertex_tree is None:
@@ -192,11 +194,13 @@ class ShapelyCollisionHetero(ShapelyCollision):
         rings, seg, eps = ps["rings"], ps["seg"], self.STRICT_EPS
         common = (ps["segment"], ps["windows"][:, 0].copy(), ps["windows"][:, 1].copy(), ps["vel"], ps["xmin"],
                   ps["xmax"]) + seg
-        b = ps["bounds"]
+        live = np.flatnonzero(ps["windows"][:, 1] - ps["windows"][:, 0] > 1e-12)   # pieces with a duration
+        b = ps["bounds"][live]
         boxes = shapely.box(b[:, 0], b[:, 1], b[:, 2], b[:, 3])
         out = []
         for tree, is_vertex in ((self.vertex_tree, True), (self.edge_tree, False)):
-            pc, ic = tree.query(boxes)
+            pl, ic = tree.query(boxes)
+            pc = live[pl]
             if is_vertex:
                 xy = self.vertex_positions[ic]
                 st, t1, t2 = _vertex_hit_times(pc, xy[:, 0].copy(), xy[:, 1].copy(), ps["kind"], ps["cap"],
@@ -216,6 +220,7 @@ class ShapelyCollisionHetero(ShapelyCollision):
                 st[fb[ok]] = 1
                 t1[fb[ok]], t2[fb[ok]] = ps["windows"][pc[fb[ok]], 0], ps["windows"][pc[fb[ok]], 1]
             h = st == 1
+            h[h] = t2[h] - t1[h] > 1e-12                    # drop zero-duration hits (only real hits have times)
             out.append((ps["agent"][pc[h]], ic[h].astype(np.int64), t1[h], t2[h]))
         return out[0], out[1]
 
