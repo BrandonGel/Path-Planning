@@ -9,170 +9,17 @@ from path_planning.common.environment.node import Node
 from path_planning.multi_agent_planner.centralized.cbs.a_star import AStar
 import heapq
 import time
-from math import fabs, atan2, floor, ceil, inf, degrees, radians, cos, sin, hypot
+from math import fabs
 from itertools import count,combinations
-from collections import namedtuple
-from functools import lru_cache, partial
-import numpy as np
 from path_planning.agent import Agent
 from path_planning.common.environment.map.graph_sampler import GraphSampler
-from path_planning.common.world.collision_checking.sweep.polytope_sweep import _travel_frames
 from path_planning.multi_agent_planner.data_type import HEURISTIC_TYPE
-from path_planning.multi_agent_planner.sweep_cache import shared_sweep_cache
+from path_planning.multi_agent_planner.centralized.cbs.bodies import BodyConflicts
+from path_planning.multi_agent_planner.centralized.cbs.data_types import (   # noqa: F401  (re-exported)
+    FREE, Conflict, Constraints, EdgeConstraint, HighLevelNode, Location, State, Step, VertexConstraint,
+    _is_set, _make_ori, _ori_between)
 
-class Location(object):
-    def __init__(self, point:tuple = None):
-        self.point = tuple(point) if point is not None else None
-    def __hash__(self):
-        return hash(self.point)
-    def __eq__(self, other):
-        return self.point == other.point
-    def __str__(self):
-        return str(self.point)
-    def __len__(self):
-        return len(self.point)
-    def __getitem__(self, index):
-        return self.point[index]
-    def __add__(self, other):
-        return Location(tuple(self.point + other.point))
-
-#: ``State.ori`` of an agent that has a heading but has not taken one yet (it may leave in any direction).
-FREE = "free"
-
-
-def _is_set(ori) -> bool:
-    """Whether ``ori`` is an actual heading (not None: no heading; not ``FREE``: none taken yet)."""
-    return ori is not None and ori != FREE
-
-
-def _make_ori(yaw, pitch=None):
-    """A ``State.ori`` from degrees: the yaw in ``[0, 360)``, or ``(yaw, pitch)`` in 3D. Every heading is
-    built here, so headings from edges and from the agents' start values compare equal."""
-    yaw = round(float(yaw) % 360.0, 6) % 360.0
-    return yaw if pitch is None else (yaw, round(float(pitch), 6))
-
-
-@lru_cache(maxsize=1 << 18)
-def _ori_between(a, b):
-    """The ``State.ori`` of an agent facing along ``a -> b`` (two points)."""
-    d = np.subtract(b, a).astype(float)
-    flat = hypot(d[0], d[1])
-    return _make_ori(degrees(atan2(d[1], d[0])) if flat > 1e-12 else 0.0,
-                     None if len(d) == 2 else degrees(atan2(d[2], flat)))
-
-
-@lru_cache(maxsize=1 << 14)
-def _heading_of(ori):
-    """A ``State.ori`` as the fixed heading the collision queries take: radians in 2D; in 3D a rotation whose
-    first axis is the travel direction (shared: do not modify)."""
-    if not isinstance(ori, tuple):
-        return radians(ori)
-    yaw, pitch = radians(ori[0]), radians(ori[1])
-    return _travel_frames(np.array([[cos(pitch) * cos(yaw), cos(pitch) * sin(yaw), sin(pitch)]]))[0]
-
-
-@lru_cache(maxsize=None)
-def _bounding_ball(body: Agent) -> Agent:
-    """``body``'s bounding ball: what it sweeps while turning in place."""
-    return body if body.is_ball else Agent(body.radius, None, None, body.type)
-
-
-#: One step of an agent's plan: ``agent`` (its body) goes ``a -> b`` (equal: it stays). ``body`` is what it
-#: sweeps meanwhile (its bounding ball while ``turning`` in place) at ``heading`` (None: a move faces along
-#: itself; a ball has none). ``oriented``: the agent plans its heading.
-Step = namedtuple("Step", "agent body a b heading turning oriented")
-
-
-class State(object):
-    """``ori``: the agent's heading, in degrees in 2D (``[0, 360)``, counterclockwise from +x) and
-    ``(yaw, pitch)`` degrees in 3D; ``FREE`` before it is set; None for an agent without a heading."""
-    def __init__(self, time, location, ori=None):
-        self.time = time
-        self.location = location
-        self.ori = ori
-    def __eq__(self, other):
-        return self.time == other.time and self.location == other.location and self.ori == other.ori
-    def __hash__(self):
-        return hash((self.time, self.location.point, self.ori))
-    def is_equal_except_time(self, state):
-        return self.location == state.location
-    def __str__(self):
-        return str((self.time, self.location) if self.ori is None else (self.time, self.location, self.ori))
-
-class Conflict(object):
-    VERTEX = 1
-    EDGE = 2
-    SWEEP = 3
-    def __init__(self):
-        self.time = -1
-        self.type = -1
-
-        self.agent_1 = ''
-        self.agent_2 = ''
-
-        self.location_1 = Location()
-        self.location_2 = Location()
-        # What each agent may not do at ``time``, as (fan 1, no turn 1, fan 2, no turn 2): a fan is the set
-        # of destinations forbidden from the agent's location; "no turn" forbids turning in place there.
-        # A SWEEP conflict holds a function instead, called when the fans are first read.
-        self.forbidden = (set(), False, set(), False)
-
-    def _forbidden(self, k):
-        if callable(self.forbidden):
-            self.forbidden = self.forbidden()
-        return self.forbidden[k]
-
-    location_1_f = property(lambda self: self._forbidden(0))
-    no_turn_1 = property(lambda self: self._forbidden(1))
-    location_2_f = property(lambda self: self._forbidden(2))
-    no_turn_2 = property(lambda self: self._forbidden(3))
-
-    def __str__(self):
-        return '(' + str(self.time) + ', ' + self.agent_1 + ', ' + self.agent_2 + \
-             ', '+ str(self.location_1) + ', ' + str(self.location_2)  + ')'
-
-class VertexConstraint(object):
-    def __init__(self, time, location):
-        self.time = time
-        self.location = location
-
-    def __eq__(self, other):
-        return self.time == other.time and self.location == other.location
-    def __hash__(self):
-        return hash((self.time, self.location))
-    def __str__(self):
-        return '(' + str(self.time) + ', '+ str(self.location) + ')'
-
-class EdgeConstraint(object):
-    """Forbids the step ``location_1 -> location_2`` at ``time``; with equal locations, staying there
-    (waiting or turning). ``turn``: forbids only turning in place at ``location_1``."""
-    def __init__(self, time, location_1, location_2, turn=False):
-        self.time = time
-        self.location_1 = location_1
-        self.location_2 = location_2
-        self.turn = turn
-    def __eq__(self, other):
-        return self.time == other.time and self.location_1 == other.location_1 \
-            and self.location_2 == other.location_2 and self.turn == other.turn
-    def __hash__(self):
-        return hash((self.time, self.location_1, self.location_2, self.turn))
-    def __str__(self):
-        return '(' + str(self.time) + ', '+ str(self.location_1) +', '+ str(self.location_2) + (', turn' if self.turn else '') + ')'
-
-class Constraints(object):
-    def __init__(self):
-        self.vertex_constraints = set()
-        self.edge_constraints = set()
-
-    def add_constraint(self, other):
-        self.vertex_constraints |= other.vertex_constraints
-        self.edge_constraints |= other.edge_constraints
-
-    def __str__(self):
-        return "VC: " + str([str(vc) for vc in self.vertex_constraints])  + \
-            "EC: " + str([str(ec) for ec in self.edge_constraints])
-
-class Environment(object):
+class Environment(BodyConflicts):
     """CBS on a roadmap with unit time steps: every move and every wait takes 1 time unit.
 
     Agent bodies: ``agents[i]["agent"]`` (an ``Agent`` of any shape, 2D or 3D), else ``agent`` (one type for
@@ -184,16 +31,38 @@ class Environment(object):
       takes one step, during which it is checked as its bounding ball. ``agents[i]["yaw"]`` (and
       ``"pitch"`` in 3D, default 0) is the start heading in degrees; without it the agent leaves in any
       direction. The plan gets ``yaw`` (and ``pitch`` in 3D) per step.
+    - ``move_parked_agents`` (default True): an agent does not end its plan at its goal while a constraint
+      still forbids it being or staying there; it moves off and comes back. This is the correct rule, and
+      what makes point-agent searches optimal. False: its plan ends the first time it reaches the goal,
+      so a parked agent is never moved and the other agent always goes around. Faster on some instances
+      with bodies, but it can miss cheaper plans and problems where a parked agent has to give way.
     - Conflicts of agents with bodies: one ``graph_map.agent_conflicts`` call over the whole plan (when and
       where two bodies overlap).
+    - ``goal_conflicts`` (agents with bodies, with ``move_parked_agents``): a conflict with an agent that
+      has already stopped at its goal is resolved in one branching. Either that agent may not be stopped
+      there yet at that step (it arrives later, or moves off and comes back), or it stays stopped and
+      every other agent keeps out of the space its body covers from that step on. Without it the second
+      branch only forbids the other agent's moves at that one step, which a slightly different route gets
+      around, over and over.
+    - ``conflict_span`` (agents with bodies): ``"step"`` (default): each time step of an overlap is its own
+      conflict, so an overlap lasting k steps can take k branchings. ``"window"``: one conflict per
+      overlap; a branch forbids its agent the colliding moves at every step of it at once. Far fewer
+      nodes when two agents stay in each other's way for long, but a plan in which each agent keeps a
+      different step of the overlap is not reachable from either branch, so it can cost more or miss a
+      solution.
     - Constraints: per conflict, one sweep of each agent's move at that step; the other agent may not
-      leave its vertex along a roadmap edge that move covers (``use_collision_sweep``; off: only the
-      move it made is forbidden). ``clearance``: ``"radius"`` or ``"minkowski"`` as in
+      leave its vertex along a roadmap edge that move covers. ``clearance``: ``"radius"`` or ``"minkowski"`` as in
       ``GraphSampler.sweep_paths``."""
 
-    def __init__(self, graph_map:GraphSampler, agents, astar_max_iterations=10000, radius = 0.0, velocity = 0.0, use_collision_sweep=True,heuristic_type: str = 'dijkstra', agent: "Agent | None" = None, clearance: str = "radius", use_orientation: "bool | None" = None):
+    def __init__(self, graph_map:GraphSampler, agents, astar_max_iterations=10000, radius = 0.0, velocity = 0.0, heuristic_type: str = 'dijkstra', agent: "Agent | None" = None, clearance: str = "radius", use_orientation: "bool | None" = None, move_parked_agents: bool = True, conflict_span: str = "step", goal_conflicts: bool = False):
+        self.goal_conflicts = goal_conflicts
+        self._regions = {}                   # (parked step, other body) -> (vertices, edges) it keeps out of
+        if conflict_span not in ("step", "window"):
+            raise ValueError(f"conflict_span must be 'step' or 'window', got {conflict_span!r}")
+        self.conflict_span = conflict_span
         self.graph_map = graph_map
         self.use_orientation = use_orientation
+        self.move_parked_agents = move_parked_agents
         self._moves_cache = {}               # point -> [(neighbour point, its Location, ori facing it)]
         default = agent if agent is not None else (Agent.disc(radius) if radius > 0 else None)
         self._default_agent = self._unit_step(default)
@@ -216,7 +85,6 @@ class Environment(object):
         self.constraint_dict = {}
 
         self.a_star = AStar(self, astar_max_iterations)
-        self.use_collision_sweep = use_collision_sweep
         self._dijkstra_cache = {}  # (start_idx, goal_idx) -> (states, cost)
         self._heuristic_cache = {}  # (location.point, agent_name) -> heuristic value
         self._goal_dist_maps = {}  # goal_idx -> {node_idx: shortest-path cost to goal}
@@ -387,145 +255,46 @@ class Environment(object):
                         return conflicts
         return conflicts
 
-    # ------------------------------------------------------------ agents with bodies
-    @staticmethod
-    def _unit_step(agent):
-        """``agent``'s shape as a unit-step type (no speed, instant turns); None stays None."""
-        return None if agent is None else Agent(agent.shape, None, None, agent.type)
+    def branches(self, conflict) -> list:
+        """The ways to resolve ``conflict``: a list of ``{agent: Constraints to add}``, one per child.
 
-    def agent_type(self, name) -> "Agent | None":
-        """The body of agent ``name`` (None: a point agent)."""
-        return self.agent_types.get(name, self._default_agent)
+        Normally two children, each constraining one of the two agents. A goal conflict
+        (``goal_conflicts``: one of the two has already stopped at its goal) instead gives:
 
-    def has_orientation(self, name) -> bool:
-        """Whether agent ``name`` plans its heading: ``use_orientation``, else any body that is not a ball."""
-        body = self.agent_type(name)
-        if self.use_orientation is not None:
-            return bool(self.use_orientation) and body is not None
-        return body is not None and not body.is_ball
+        1. the stopped agent may not stay at its goal over that step, so it is not stopped there yet;
+        2. it has stopped by that step for good, and every other agent keeps out of the roadmap vertices
+           and edges its body covers from then on.
 
-    def _headings(self, name, points, oris):
-        """The attitude of agent ``name``'s body at each state of its plan, for the collision queries: its
-        heading ``ori`` when it has one; else that of its last move, or of its first move before it has
-        moved. None for a ball, and for a body that never moves (it faces +x)."""
-        if self.agent_type(name).is_ball:
-            return [None] * len(points)
-        moves = [_heading_of(_ori_between(points[k - 1], points[k])) if points[k] != points[k - 1] else None
-                 for k in range(1, len(points))]
-        last = next((h for h in moves if h is not None), None)
-        heads = []
-        for k, ori in enumerate(oris):
-            if k and moves[k - 1] is not None:
-                last = moves[k - 1]
-            heads.append(_heading_of(ori) if _is_set(ori) else last)
-        return heads
+        (2) falls back to the normal child when another agent's goal lies in that space."""
+        standard = self.create_constraints_from_conflict(conflict)
+        normal = [{agent: constraints} for agent, constraints in standard.items()]
+        if not (self.goal_conflicts and self.move_parked_agents and conflict.parked):
+            return normal
+        name, step = conflict.parked
+        hold = Constraints()
+        hold.deadline = conflict.time
+        keep_out = {name: hold}
+        for other, info in self.agent_dict.items():
+            if other == name:
+                continue
+            vertices, edges = self._region(step, self.agent_type(other))
+            if info["goal"].location in vertices:
+                return normal
+            keep_out[other] = Constraints()
+            keep_out[other].regions.append((conflict.time, vertices, edges))
+        return [{name: standard[name]}, keep_out]
 
-    def _step(self, name, points, oris, heads, t) -> Step:
-        """Step ``t`` of agent ``name``'s plan (past its end the agent stays at its last state)."""
-        k, k1 = min(t, len(points) - 1), min(t + 1, len(points) - 1)
-        agent, a, b = self.agent_type(name), points[k], points[k1]
-        turning = a == b and oris[k] != oris[k1]
-        return Step(agent, _bounding_ball(agent) if turning else agent, a, b,
-                    heads[k] if a == b and not turning else None, turning, oris[k] is not None)
-
-    def _plan_pieces(self, names, plans, oris, heads):
-        """The plan as timed pieces for ``agent_conflicts``: one 2-point path per move (``t0`` = its step),
-        one 1-point path per run of waits (held for the run; forever at the end of the plan) and one
-        1-point bounding-ball piece per turn in place. Returns ``(owner index, agents, paths, t0,
-        goal_hold, heading)`` tuples, one entry per piece."""
-        pieces = []
-        for i, (name, points, ori, head) in enumerate(zip(names, plans, oris, heads)):
-            body, n, t = self.agent_type(name), len(points), 0
-            while t < n:
-                k = t                                            # the agent stays as it is over [t, k]
-                while k + 1 < n and points[k + 1] == points[t] and ori[k + 1] == ori[t]:
-                    k += 1
-                last = k == n - 1
-                if k > t or last:
-                    pieces.append((i, body, [points[t]], t, inf if last else float(k - t), head[t]))
-                if not last and points[k + 1] == points[k]:      # then turns in place for one step
-                    pieces.append((i, _bounding_ball(body), [points[k]], k, 1.0, None))
-                elif not last:                                   # or moves to the next vertex
-                    pieces.append((i, body, [points[k], points[k + 1]], k, 0.0, None))
-                t = k + 1
-        owner, agents, paths, t0, hold, heading = zip(*pieces)
-        return owner, agents, [np.array(p, dtype=float) for p in paths], [float(t) for t in t0], hold, heading
-
-    def _covered(self, step: Step, other: Agent):
-        """What ``other`` may not use during ``step``: ``({source node index: {target points}}, {covered
-        node indices})`` from one roadmap sweep, cached for every CBS environment on this map."""
-        body, a, b, heading = step.body, step.a, step.b, step.heading
-        key = (body.key, a, b, None if heading is None else np.asarray(heading, dtype=float).tobytes(),
-               other.key, self.clearance)
-
-        def compute():
-            wait = a == b
-            (vid, _, _), (src, tgt, _, _) = self.graph_map.sweep_paths(
-                body, [np.array([a] if wait else [a, b], dtype=float)], goal_hold=1.0 if wait else 0.0,
-                other=other, clearance=self.clearance, heading=None if heading is None else [heading])[0]
-            nodes, edges = self.graph_map.nodes, {}
-            for u, v in zip(src.tolist(), tgt.tolist()):
-                edges.setdefault(u, set()).add(tuple(nodes[v].current))
-            return edges, set(vid.tolist())
-
-        return shared_sweep_cache(self.graph_map, "cbs").get_or_compute(key, compute)
-
-    def _fan(self, mine: Step, other: Step):
-        """What an agent may not do from its vertex during its step ``mine``, as ``(fan, no_turn)``: the
-        destinations it may not take (its vertex itself: it may not stay) and whether it may not turn there.
-
-        - Its own step is always forbidden: a move, a wait (then turning collides too) or a turn.
-        - ``use_collision_sweep``: also every roadmap edge from its vertex that the ``other`` agent's step
-          covers. When the vertex itself is covered, an agent without a heading may not stay; one with a
-          heading may not turn (its bounding ball would be hit) but may still wait."""
-        fan, no_turn = (set() if mine.turning else {Location(mine.b)}), mine.turning
-        src = self.graph_map.pos_index_dict.get(mine.a)
-        if self.use_collision_sweep and src is not None:
-            edges, vertices = self._covered(other, mine.agent)
-            fan.update(Location(p) for p in edges.get(int(src), ()))
-            if int(src) in vertices:
-                if mine.oriented:
-                    no_turn = True
-                else:
-                    fan.add(Location(mine.a))
-        return fan, no_turn
-
-    def _fans(self, step_1: Step, step_2: Step):
-        """Both agents' ``_fan``, as ``Conflict.forbidden``."""
-        return (*self._fan(step_1, step_2), *self._fan(step_2, step_1))
-
-    def _body_conflicts(self, solution, max_t, get_first_conflict, max_conflicts):
-        """``get_conflicts`` for agents with bodies. One ``agent_conflicts`` call gives every time window in
-        which two bodies overlap; each step ``t`` such a window touches is one ``SWEEP`` conflict of that
-        pair, ordered by step then pair. A conflict's constraint fans are computed when first read."""
-        names = list(solution)
-        plans = [[s.location.point for s in solution[name]] for name in names]
-        oris = [[getattr(s, "ori", None) for s in solution[name]] for name in names]   # states of other planners have none
-        heads = [self._headings(*plan) for plan in zip(names, plans, oris)]
-        owner, agents, paths, t0, hold, heading = self._plan_pieces(names, plans, oris, heads)
-        i, j, t1, t2 = self.graph_map.agent_conflicts(
-            agents, paths, t0=t0, goal_hold=hold, as_arrays=True,
-            heading=None if all(h is None for h in heading) else list(heading))
-        found = set()
-        for a, b, w1, w2 in zip(i.tolist(), j.tolist(), t1.tolist(), t2.tolist()):
-            a, b = sorted((owner[a], owner[b]))
-            if a != b:                                           # the steps the window [w1, w2] touches
-                first = floor(w1 + 1e-9)
-                last = max_t if w2 == inf else min(max_t, ceil(w2 - 1e-9))
-                found.update((t, a, b) for t in range(first, min(max(last, first + 1), max_t)))
-        conflicts = []
-        for t, a, b in ([min(found)] if get_first_conflict and found else sorted(found)):
-            step_1, step_2 = (self._step(names[k], plans[k], oris[k], heads[k], t) for k in (a, b))
-            c = Conflict()
-            c.time, c.type, c.agent_1, c.agent_2 = t, Conflict.SWEEP, names[a], names[b]
-            c.location_1, c.location_2 = Location(step_1.a), Location(step_2.a)
-            c.forbidden = partial(self._fans, step_1, step_2)
-            if get_first_conflict:
-                return c
-            conflicts.append(c)
-            if max_conflicts is not None and len(conflicts) >= max_conflicts:
-                break
-        return conflicts
+    def path_allowed(self, agent, path, constraints) -> bool:
+        """Whether ``agent``'s current ``path`` already obeys ``constraints`` (then it needs no replanning)."""
+        self.constraints = constraints
+        if not all(self.state_valid(s) for s in path[1:]):
+            return False
+        if not all(self.transition_valid(a, b) for a, b in zip(path, path[1:])):
+            return False
+        end = path[-1]                                           # then it stays where it ended, for good
+        if any(end.location in vertices for _, vertices, _ in constraints.regions):
+            return False
+        return end.time >= constraints.free_from(end.location)
 
     def create_constraints_from_conflict(self, conflict):
         constraint_dict = {}
@@ -551,16 +320,13 @@ class Environment(object):
         elif conflict.type == Conflict.SWEEP:
             constraint1 = Constraints()
             constraint2 = Constraints()
-            for loc in conflict.location_1_f:
-                e_constraint1 = EdgeConstraint(conflict.time, conflict.location_1, loc)
-                constraint1.edge_constraints |= {e_constraint1}
-            for loc in conflict.location_2_f:
-                e_constraint2 = EdgeConstraint(conflict.time, conflict.location_2, loc)
-                constraint2.edge_constraints |= {e_constraint2}
-            if conflict.no_turn_1:
-                constraint1.edge_constraints.add(EdgeConstraint(conflict.time, conflict.location_1, conflict.location_1, True))
-            if conflict.no_turn_2:
-                constraint2.edge_constraints.add(EdgeConstraint(conflict.time, conflict.location_2, conflict.location_2, True))
+            for c in [conflict, *conflict.later]:                # every step of the overlap ("window" span)
+                constraint1.edge_constraints.update(EdgeConstraint(c.time, c.location_1, loc) for loc in c.location_1_f)
+                constraint2.edge_constraints.update(EdgeConstraint(c.time, c.location_2, loc) for loc in c.location_2_f)
+                if c.no_turn_1:
+                    constraint1.edge_constraints.add(EdgeConstraint(c.time, c.location_1, c.location_1, True))
+                if c.no_turn_2:
+                    constraint2.edge_constraints.add(EdgeConstraint(c.time, c.location_2, c.location_2, True))
             constraint_dict[conflict.agent_1] = constraint1
             constraint_dict[conflict.agent_2] = constraint2
 
@@ -573,9 +339,18 @@ class Environment(object):
             return solution[agent_name][-1]
 
     def state_valid(self, state):
-        return  VertexConstraint(state.time,state.location) not in self.constraints.vertex_constraints
+        con = self.constraints
+        if con.deadline is not None and state.time > con.deadline:
+            return False
+        for start, vertices, _ in con.regions:
+            if state.time >= start and state.location in vertices:
+                return False
+        return  VertexConstraint(state.time,state.location) not in con.vertex_constraints
 
     def transition_valid(self, state_1, state_2):
+        for start, _, edges in self.constraints.regions:
+            if state_1.time >= start and (state_1.location, state_2.location) in edges:
+                return False
         banned = self.constraints.edge_constraints
         if not banned:
             return True
@@ -583,9 +358,6 @@ class Environment(object):
             return False
         turning = state_1.location == state_2.location and state_1.ori != state_2.ori
         return not (turning and EdgeConstraint(state_1.time, state_1.location, state_1.location, True) in banned)
-
-    def is_solution(self, agent_name):
-        pass
 
     def admissible_heuristic(self, state, agent_name):
         key = (state.location.point, agent_name)
@@ -639,8 +411,14 @@ class Environment(object):
         return float(self.graph_map.get_distance(node1.current, node2.current))
 
     def is_at_goal(self, state, agent_name):
+        """Whether the agent can end its plan in ``state``: at its goal, with no constraint left that
+        forbids it being or staying there later (it then has to move off and come back)."""
         goal_state = self.agent_dict[agent_name]["goal"]
-        return state.is_equal_except_time(goal_state)
+        if not state.is_equal_except_time(goal_state):
+            return False
+        if self.move_parked_agents:
+            return state.time >= self.constraints.free_from(goal_state.location)
+        return state.time >= max(self.constraints.must_be, default=float("-inf"))     # (forced moves still hold)
 
     def make_agent_dict(self,t=0):
         for agent in self.agents:
@@ -661,8 +439,7 @@ class Environment(object):
         for agent in self.agent_dict.keys():
             self.constraints = self.constraint_dict.setdefault(agent, Constraints())
             if (
-                len(self.constraints.vertex_constraints) == 0
-                and len(self.constraints.edge_constraints) == 0
+                self.constraints.is_empty()
                 and self.agent_dict[agent]["start"].ori is None      # turns cost steps: needs the time-expanded search
             ):
                 local_solution, local_cost = self._static_shortest_path_states(agent)
@@ -673,23 +450,6 @@ class Environment(object):
             solution.update({agent:local_solution})
             solution_cost[agent] = local_cost
         return solution, solution_cost
-
-class HighLevelNode(object):
-    def __init__(self):
-        self.solution = {}
-        self.solution_cost = {}
-        self.constraint_dict = {}
-        self.cost = 0
-
-    def __eq__(self, other):
-        if not isinstance(other, type(self)): return NotImplemented
-        return self.solution == other.solution and self.cost == other.cost
-
-    def __hash__(self):
-        return hash(self.cost)
-
-    def __lt__(self, other):
-        return self.cost < other.cost
 
 class CBS(object):
     def __init__(self, environment: Environment, time_limit: float | None = None, max_iterations: int | None = None,verbose: bool = False):
@@ -710,114 +470,125 @@ class CBS(object):
         self.total_time = 0
         self.total_iterations = 0
         
+    def _root(self):
+        """The root of the search tree: no constraints, every agent on its own best path. None when some
+        agent has no path at all."""
+        root = HighLevelNode()
+        root.constraint_dict = {agent: Constraints() for agent in self.env.agent_dict}
+        self.env.constraint_dict = root.constraint_dict
+        root.solution, root.solution_cost = self.env.compute_solution()
+        if not root.solution:
+            return None
+        root.cost = sum(root.solution_cost.values())
+        return root
+
+    def _push_node(self, node):
+        heapq.heappush(self.open_list, (node.cost, next(self.counter), node))
+
+    def _out_of_budget(self, started, iterations) -> bool:
+        """Whether the time limit or the node limit has been reached."""
+        if time.time() - started > self.time_limit:
+            reason = f"time limit of {self.time_limit} seconds exceeded"
+        elif iterations >= self.max_iterations:
+            reason = f"max iterations of {self.max_iterations} reached"
+        else:
+            return False
+        if self.verbose:
+            print(f"Search terminated: {reason}.")
+        return True
+
+    def _report(self, started, iterations, success) -> dict:
+        """Record the run's totals and return them as the ``solution_info`` dict."""
+        self.total_time = min(self.time_limit, time.time() - started)
+        self.total_iterations = min(self.max_iterations, iterations)
+        return {"runtime": self.total_time, "total_iterations": self.total_iterations, "success": success}
+
     def search(self):
-        st = time.time()
-        iterations = 1
-        success = False
-        start = HighLevelNode()
-        start.constraint_dict = {}
-        solution = {}
-        solution_info = {}
-
-        for agent in self.env.agent_dict.keys():
-            start.constraint_dict[agent] = Constraints()
-
-        start.solution, start.solution_cost = self.env.compute_solution()
-        if not start.solution:
+        """Best-first search over the constraint tree. Returns ``(plan, solution_info)``; the plan is empty
+        when none was found within the limits."""
+        started, iterations, solution = time.time(), 1, {}
+        root = self._root()
+        if root is None:
             if self.verbose:
                 print("No initial solution found")
-            self.total_time = min(self.time_limit, time.time() - st) 
-            self.total_iterations = min(self.max_iterations, iterations)
-            solution_info["runtime"] = self.total_time
-            solution_info["total_iterations"] = self.total_iterations
-            solution_info["success"] = success
-            return solution,solution_info
-
-        start.cost = sum(start.solution_cost.values())
-
-        # Add start node to heap
-        heapq.heappush(self.open_list, (start.cost, next(self.counter), start))
-        while self.open_list :
+            return solution, self._report(started, iterations, False)
+        self._push_node(root)
+        while self.open_list:
             iterations += 1
-            if self.time_limit is not None and (time.time() - st) > self.time_limit:
-                if self.verbose:
-                    print(f"Search terminated: time limit of {self.time_limit} seconds exceeded.")
+            if self._out_of_budget(started, iterations):
                 break
-
-            if self.max_iterations is not None and iterations >= self.max_iterations:
-                if self.verbose:
-                    print(f"Search terminated: max iterations of {self.max_iterations} reached.")                
-                break
-
             _, _, P = heapq.heappop(self.open_list)
-
-            
-            if P is None:
-                break
             state_key = self._get_state_key(P)
             if state_key in self.closed_set:
                 continue
             self.closed_set.add(state_key)
 
             self.env.constraint_dict = P.constraint_dict
-            conflict_dict = self.env.get_conflicts(P.solution)
-            if not conflict_dict:
+            conflict = self.env.get_conflicts(P.solution)
+            if not conflict:
                 if self.verbose:
                     print("solution found")
-                success = True
                 solution = self.generate_plan(P.solution)
                 break
-            constraint_dict = self.env.create_constraints_from_conflict(conflict_dict)
-            for agent in constraint_dict.keys():
-                new_node = HighLevelNode()
-                new_node.solution = P.solution.copy()
-                new_node.solution_cost = P.solution_cost.copy()
+            for branch in self.env.branches(conflict):
+                child = self._child(P, branch, selective=len(branch) > 1)
+                if child is not None:
+                    self._push_node(child)
+        return solution, self._report(started, iterations, bool(solution))
 
-                # Selective deep copy only for affected agent's constraints
-                new_node.constraint_dict = {}
-                for a in self.env.agent_dict.keys():
-                    if a == agent:
-                        # Deep copy only the modified agent's constraints
-                        new_constraints = Constraints()
-                        new_constraints.vertex_constraints = P.constraint_dict[a].vertex_constraints.copy()
-                        new_constraints.edge_constraints = P.constraint_dict[a].edge_constraints.copy()
-                        new_constraints.add_constraint(constraint_dict[agent])
-                        new_node.constraint_dict[a] = new_constraints
-                    else:
-                        # Share unchanged constraints
-                        new_node.constraint_dict[a] = P.constraint_dict[a]
+    def _replan_agent(self, node, agent) -> bool:
+        """Replan ``agent`` under ``node.constraint_dict``; False when it has no plan."""
+        self.env.constraint_dict = node.constraint_dict
+        self.env.constraints = node.constraint_dict[agent]
+        path, cost = self.env.a_star.search(agent)
+        if not path:
+            return False
+        node.solution[agent], node.solution_cost[agent] = path, cost
+        return True
 
-                self.env.constraint_dict = new_node.constraint_dict
-                new_node.solution, new_node.solution_cost = self.env.compute_solution()
-                if not new_node.solution:
-                    continue
-                new_node.cost = sum(new_node.solution_cost.values())
-                heapq.heappush(self.open_list, (new_node.cost, next(self.counter), new_node))
-        
-        self.total_time = min(self.time_limit, time.time() - st) 
-        self.total_iterations = min(self.max_iterations, iterations)
-        solution_info["runtime"] = self.total_time
-        solution_info["total_iterations"] = self.total_iterations
-        solution_info["success"] = success
-        return solution,solution_info
+    def _child(self, P, branch, selective: bool):
+        """The child of ``P`` with ``branch`` (``{agent: Constraints to add}``) applied, or None when some
+        agent has no plan. Only the constrained agents get new constraint sets; the rest are shared.
+        ``selective``: replan just the agents whose path breaks their new constraints; otherwise every
+        agent's plan is recomputed (``Environment.compute_solution``, as plain CBS always has)."""
+        node = HighLevelNode()
+        node.solution, node.solution_cost = P.solution.copy(), P.solution_cost.copy()
+        node.constraint_dict = dict(P.constraint_dict)
+        for agent, added in branch.items():
+            node.constraint_dict[agent] = P.constraint_dict[agent].copy()
+            node.constraint_dict[agent].add_constraint(added)
+        self.env.constraint_dict = node.constraint_dict
+        if selective:
+            for agent in branch:
+                if not self.env.path_allowed(agent, node.solution[agent], node.constraint_dict[agent]) \
+                        and not self._replan_agent(node, agent):
+                    return None
+        else:
+            node.solution, node.solution_cost = self.env.compute_solution()
+            if not node.solution:
+                return None
+        node.cost = sum(node.solution_cost.values())
+        return node
 
     def _get_state_key(self, node):
-        """Generate a hashable state key for closed-set deduplication.
+        """A hashable key for closed-set deduplication.
 
-        Keyed on the *solution* (every agent's full path), NOT the constraint
-        set. Constraints uniquely determine a solution, but the converse is
-        false: an "inactive" constraint (one the agent's optimal path already
-        satisfies) leaves the solution unchanged, so two CBS nodes reached via
-        different constraints can share an identical solution. Those are pure
-        redundancy — same solution -> same conflicts -> same children — and
-        must be deduped by solution. A constraint-based key fails to catch
-        them and the search tree blows up combinatorially at large radius.
-        """
+        - Point agents: every agent's path AND its constraints. Nodes with equal paths but different
+          constraints have different children, so they are kept apart; dropping one would lose its
+          subtree and with it the optimal solution.
+        - Agents with bodies: the paths only. Their constraint fans are conservative, so those searches
+          are not optimal to begin with, and many constraint sets lead to the same paths: keying on the
+          paths alone prunes that redundancy and keeps the tree from blowing up at large radius."""
+        if self.env.has_bodies:
+            return tuple((agent, tuple((s.time, s.location.point, s.ori) for s in path))
+                         for agent, path in sorted(node.solution.items()))
         return tuple(
-            (agent, tuple((s.time, s.location.point, s.ori) for s in path))
+            (agent, tuple((s.time, s.location.point, s.ori) for s in path),
+             frozenset(con.vertex_constraints), frozenset(con.edge_constraints), frozenset(con.must_be.items()))
             for agent, path in sorted(node.solution.items())
+            for con in (node.constraint_dict[agent],)
         )
-   
+
     def generate_plan(self, solution):
         """The plan as ``{agent: [entry, ...]}``. An entry is ``t, x, y`` in 2D and ``t, x, y, z`` in 3D; agents
         with a heading also get ``yaw`` (2D) or ``yaw, pitch`` (3D), in degrees. Before the agent's first
@@ -840,4 +611,3 @@ class CBS(object):
                 path_dict_list.append(entry)
             plan[agent] = path_dict_list
         return plan
-

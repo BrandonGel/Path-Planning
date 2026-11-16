@@ -20,9 +20,13 @@ class AStar():
             total_path.append(current)
         return total_path[::-1]
 
-    def search(self, agent_name, solution=None):
+    def search(self, agent_name, solution=None, cost_limit=None):
         """
         Modified low level search with conflict-aware tie-breaking.
+
+        ``cost_limit``: only look for a path of at most this cost. A state whose cost so far plus the
+        heuristic exceeds it is dropped (the heuristic never overestimates, so no such path goes through
+        it), which makes a search that cannot succeed end early.
         """
         initial_state = self.agent_dict[agent_name]["start"]
         closed_set = set()
@@ -67,11 +71,12 @@ class AStar():
                     num_conflicts = self._count_conflicts(agent_name, neighbor, current, solution)
 
                 if neighbor not in open_set or tentative_g_score < g_score.get(neighbor, float("inf")):
+                    f_score = tentative_g_score + self.admissible_heuristic(neighbor, agent_name)
+                    if cost_limit is not None and f_score > cost_limit + 1e-6:
+                        continue
                     came_from[neighbor] = current
                     g_score[neighbor] = tentative_g_score
                     conflicts_count[neighbor] = conflicts_count[current] + num_conflicts
-                    
-                    f_score = g_score[neighbor] + self.admissible_heuristic(neighbor, agent_name)
                     
                     if neighbor not in open_set:
                         open_set.add(neighbor)
@@ -83,7 +88,7 @@ class AStar():
     def _count_conflicts(self, agent_name, neighbor, current, solution):
         """Helper to check if this move conflicts with any other agent's current path."""
         count = 0
-        if self.radius == 0:
+        if not self.env.has_bodies:                      # point agents: vertex and swap conflicts
             for other_agent, path in solution.items():
                 if other_agent == agent_name: continue
                 
