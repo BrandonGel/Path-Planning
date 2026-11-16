@@ -3,7 +3,7 @@ from itertools import count
 from path_planning.multi_agent_planner.centralized.cbs.cbs import Environment
 
 class AStar():
-    def __init__(self, env:Environment, max_iterations=-1,radius=0.0):
+    def __init__(self, env:Environment, max_iterations=-1):
         self.env = env # Access to get_conflicts logic
         self.agent_dict = env.agent_dict
         self.admissible_heuristic = env.admissible_heuristic
@@ -11,7 +11,6 @@ class AStar():
         self.get_neighbors = env.get_neighbors
         self.get_step_cost = env.get_step_cost
         self.max_iterations = max_iterations if max_iterations > 0 or max_iterations is None else float("inf")
-        self.radius = radius
 
     def reconstruct_path(self, came_from, current):
         total_path = [current]
@@ -28,6 +27,7 @@ class AStar():
         heuristic exceeds it is dropped (the heuristic never overestimates, so no such path goes through
         it), which makes a search that cannot succeed end early.
         """
+        self.env.current_agent = agent_name                      # get_neighbors turns at this agent's rate
         initial_state = self.agent_dict[agent_name]["start"]
         closed_set = set()
         counter = count()

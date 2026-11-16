@@ -633,9 +633,11 @@ def _minkowski_range(d0, w, T, Rm, qa, ca, qb, cb, V, FN, E, pr, eps):
 
 @njit(cache=True, parallel=True)
 def _body_pair_windows(qa, qb, ca, cb, w0, w1, x0, v, Rm, ball_r,
-                       V, FN, FH, FB, FCL, FCH, CN, CH, RA, RB, E, pr, eps):
+                       V, FN, FH, FB, FCL, FCH, CN, CH, RA, RB, E, pr, eps, clear):
     """Row ``k``: when motion pieces ``qa[k]`` and ``qb[k]`` (convex pieces ``ca[k]`` / ``cb[k]``, a ball
-    when negative) overlap by more than ``eps``. Absolute times."""
+    when negative) overlap by more than ``eps``. Absolute times. ``clear[q]``: the radial buffer of motion
+    piece ``q``; two pieces collide when closer than the sum of theirs. Exact when either is a ball; for
+    two polytopes the separating faces move out by it (a little more than a round buffer at corners)."""
     m = len(qa)
     t1 = np.empty(m)
     t2 = np.empty(m)
@@ -652,16 +654,17 @@ def _body_pair_windows(qa, qb, ca, cb, w0, w1, x0, v, Rm, ball_r,
         d0 = pb - pa
         w = v[b] - v[a]
         z = np.zeros_like(d0)
+        gap = clear[a] + clear[b]
         if ca[k] < 0 and cb[k] < 0:
-            lo, hi = _capsule_range(d0, w, T, z, z, ball_r[a] + ball_r[b] - eps)
+            lo, hi = _capsule_range(d0, w, T, z, z, ball_r[a] + ball_r[b] + gap - eps)
         elif cb[k] < 0:
-            lo, hi = _offset_piece_range(d0, w, T, Rm, a, ca[k], ball_r[b] - eps, V, FN, FH, FCL, FCH, CN, CH,
+            lo, hi = _offset_piece_range(d0, w, T, Rm, a, ca[k], ball_r[b] + gap - eps, V, FN, FH, FCL, FCH, CN, CH,
                                          RA, RB, pr)
         elif ca[k] < 0:
-            lo, hi = _offset_piece_range(-d0, -w, T, Rm, b, cb[k], ball_r[a] - eps, V, FN, FH, FCL, FCH, CN, CH,
+            lo, hi = _offset_piece_range(-d0, -w, T, Rm, b, cb[k], ball_r[a] + gap - eps, V, FN, FH, FCL, FCH, CN, CH,
                                          RA, RB, pr)
         else:
-            lo, hi = _minkowski_range(d0, w, T, Rm, a, ca[k], b, cb[k], V, FN, E, pr, eps)
+            lo, hi = _minkowski_range(d0, w, T, Rm, a, ca[k], b, cb[k], V, FN, E, pr, eps - gap)
         if hi - lo > 1e-12:
             hit[k] = True
             t1[k], t2[k] = s + lo, s + hi
@@ -922,8 +925,10 @@ def body_roadmap_hits_minkowski(backend, paths, shapes, other, velocity=None, t0
 
 
 def body_agent_conflicts(paths, shapes, velocity=None, t0=0.0, turning_speed=None, goal_hold=0.0, heading=None,
-                         pairs=None, first_only: bool = False, as_arrays: bool = False, eps: float = 1e-9):
-    """``CollisionBase.agent_conflicts`` for bodies of any shape: when two agents' bodies overlap (2D or 3D)."""
+                         pairs=None, first_only: bool = False, as_arrays: bool = False, eps: float = 1e-9,
+                         clearance=0.0):
+    """``CollisionBase.agent_conflicts`` for bodies of any shape: when two agents' bodies overlap (2D or 3D).
+    ``clearance`` (one value or one per agent): a radial buffer around each body."""
     paths = as_path_list(paths)
     n = len(paths)
     empty = (np.empty(0, np.int64), np.empty(0, np.int64), np.empty(0), np.empty(0))
@@ -934,7 +939,8 @@ def body_agent_conflicts(paths, shapes, velocity=None, t0=0.0, turning_speed=Non
     mp, sub_lo, sub_cnt, geo = _prepare(paths, shapes, velocity, t0, turning_speed, goal_hold, heading, dim)
     if len(mp["w0"]) == 0:
         return empty if as_arrays else {}
-    w0, w1, x0, v, R = mp["w0"], mp["w1"], mp["x0"], mp["v"], mp["radius"]
+    clear = np.array([float(c) for c in per_agent(clearance, n)])[mp["agent"]]
+    w0, w1, x0, v, R = mp["w0"], mp["w1"], mp["x0"], mp["v"], mp["radius"] + clear
     end_t = np.where(np.isfinite(w1), w1, w0)
     xe = x0 + (end_t - w0)[:, None] * v
     qa, qb = _ball_sweep_prune(np.minimum(x0, xe) - R[:, None], np.maximum(x0, xe) + R[:, None], w0, w1,
@@ -952,6 +958,6 @@ def body_agent_conflicts(paths, shapes, velocity=None, t0=0.0, turning_speed=Non
     qa2, qb2 = qa[ia], qb[ia]
     ib, cb = _expand_pieces(qb2, sub_lo, sub_cnt)
     qa3, ca3, qb3 = qa2[ib], ca[ib], qb2[ib]
-    hit, t1, t2 = _body_pair_windows(qa3, qb3, ca3, cb, w0, w1, x0, v, mp["rot"], mp["ball_r"], *geo, eps)
+    hit, t1, t2 = _body_pair_windows(qa3, qb3, ca3, cb, w0, w1, x0, v, mp["rot"], mp["ball_r"], *geo, eps, clear)
     return pair_windows_output(n, mp["agent"][qa3[hit]], mp["agent"][qb3[hit]], t1[hit], t2[hit],
                                first_only, as_arrays)
