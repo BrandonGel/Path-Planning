@@ -10,6 +10,7 @@ from itertools import count
 
 class AStar():
     def __init__(self, env, max_iterations= -1):
+        self.env = env
         self.agent_dict = env.agent_dict
         self.admissible_heuristic = env.admissible_heuristic
         self.is_at_goal = env.is_at_goal
@@ -28,6 +29,7 @@ class AStar():
         """
         low level search 
         """
+        self.env.current_agent = agent_name                      # get_neighbors turns at this agent's rate
         initial_state = self.agent_dict[agent_name]["start"]
 
         closed_set = set()

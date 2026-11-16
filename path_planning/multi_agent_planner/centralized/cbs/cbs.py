@@ -4,30 +4,43 @@ original author: Ashwin Bose (@atb033)
 description: This file implements the Conflict-based search algorithm for multi-agent path planning. Modified from the original implementation to work with the new common environment.
 """
 
-from typing import Any
-from path_planning.common.environment.node import Node
-from path_planning.multi_agent_planner.centralized.cbs.a_star import AStar
 import heapq
 import time
-from math import fabs
-from itertools import count,combinations
-from path_planning.agent import Agent
-from path_planning.common.environment.map.graph_sampler import GraphSampler
-from path_planning.multi_agent_planner.data_type import HEURISTIC_TYPE
-from path_planning.multi_agent_planner.centralized.cbs.bodies import BodyConflicts
-from path_planning.multi_agent_planner.centralized.cbs.data_types import (   # noqa: F401  (re-exported)
-    FREE, Conflict, Constraints, EdgeConstraint, HighLevelNode, Location, State, Step, VertexConstraint,
-    _is_set, _make_ori, _ori_between)
+from itertools import combinations, count
 
-class Environment(BodyConflicts):
+from path_planning.common.environment.map.graph_sampler import GraphSampler
+from path_planning.multi_agent_planner.centralized.cbs.a_star import AStar
+from path_planning.multi_agent_planner.centralized.cbs.bodies import BodyConflicts
+from path_planning.multi_agent_planner.centralized.cbs.data_types import (   # noqa: F401  (the types are re-exported)
+    FREE, Conflict, Constraints, EdgeConstraint, HighLevelNode, Location, State, Step, VertexConstraint,
+    _make_ori, _turn_toward)
+from path_planning.multi_agent_planner.centralized.cbs.routing import RoadmapCosts
+from path_planning.multi_agent_planner.data_type import HEURISTIC_TYPE
+
+class Environment(BodyConflicts, RoadmapCosts):
     """CBS on a roadmap with unit time steps: every move and every wait takes 1 time unit.
 
-    Agent bodies: ``agents[i]["agent"]`` (an ``Agent`` of any shape, 2D or 3D), else ``agent`` (one type for
-    all), else a disc / sphere of ``radius``; without any of them the agents are points. Only an ``Agent``'s
-    shape is used: its speed and turning rate, and ``velocity``, do not apply to unit steps.
+    ``agents`` is a list of dicts: ``name``, ``start``, ``goal`` and optionally ``agent`` (an ``Agent``: the
+    body) and ``yaw`` / ``pitch`` (a start heading). Everything about an agent's body comes from its
+    ``Agent``. When no dict has one the agents are point particles: no body, no heading, no clearance.
+    Bodies and point particles cannot be mixed.
 
-    - Heading (``use_orientation``; default: agents whose body is not a ball): the heading is part of the
-      state. An agent moves only along the edge it faces, and turning in place to another edge's direction
+    - Size: the ``Agent``'s shape (2D or 3D). Clearance: the ``Agent``'s ``clearance``, a buffer that
+      expands its body radially, so two agents stay at least the sum of their clearances apart (0: they
+      may touch). The moves a conflict forbids are found by growing one body by the other's bounding
+      radius and clearance, which is exact for discs / spheres and a safe margin for polygons.
+    - Timing: every move and every wait takes 1 time unit, for points and bodies alike; an ``Agent``'s
+      ``max_speed`` is not used.
+    - Turning: an ``Agent`` with a finite ``max_rotation`` has to turn when it changes direction, whatever
+      its shape (discs and spheres too). With ``max_rotation`` None or infinite it turns instantly: it may
+      leave along any edge and no step is spent turning (a polygon still faces along each move for the
+      collision checks, and keeps its last heading while it waits).
+    - The plan shows every body's heading as ``yaw`` (and ``pitch`` in 3D), whichever way it turns: for
+      instant turns, the direction of the move it last made. Point particles have none.
+    - Heading (agents that have to turn): the heading is part of the state. ``max_rotation`` is in radians
+      per time step: turning in place through an angle ``a`` takes ``ceil(a / max_rotation)`` steps, each
+      at the same position with the heading ``max_rotation`` closer (15 degrees per step: 6 steps for a
+      90 degree turn). The agent may stop part-way and wait. An agent moves only along the edge it faces, and turning in place to another edge's direction
       takes one step, during which it is checked as its bounding ball. ``agents[i]["yaw"]`` (and
       ``"pitch"`` in 3D, default 0) is the start heading in degrees; without it the agent leaves in any
       direction. The plan gets ``yaw`` (and ``pitch`` in 3D) per step.
@@ -44,175 +57,76 @@ class Environment(BodyConflicts):
       every other agent keeps out of the space its body covers from that step on. Without it the second
       branch only forbids the other agent's moves at that one step, which a slightly different route gets
       around, over and over.
-    - ``conflict_span`` (agents with bodies): ``"step"`` (default): each time step of an overlap is its own
-      conflict, so an overlap lasting k steps can take k branchings. ``"window"``: one conflict per
-      overlap; a branch forbids its agent the colliding moves at every step of it at once. Far fewer
-      nodes when two agents stay in each other's way for long, but a plan in which each agent keeps a
-      different step of the overlap is not reachable from either branch, so it can cost more or miss a
-      solution.
-    - Constraints: per conflict, one sweep of each agent's move at that step; the other agent may not
-      leave its vertex along a roadmap edge that move covers. ``clearance``: ``"radius"`` or ``"minkowski"`` as in
-      ``GraphSampler.sweep_paths``."""
+    - ``conflict_span`` (agents with bodies): ``"window"`` (default): one conflict per overlap of two
+      bodies; a branch forbids its agent the colliding moves at every step of the overlap at once.
+      ``"step"``: each time step of an overlap is its own conflict, so an overlap lasting k steps can take
+      k branchings. Window needs far fewer nodes when two agents stay in each other's way, and solved
+      more of the benchmark instances at no extra cost. Its one drawback: a plan in which each agent
+      keeps a different step of the overlap is not reachable from either branch.
+    """
 
-    def __init__(self, graph_map:GraphSampler, agents, astar_max_iterations=10000, radius = 0.0, velocity = 0.0, heuristic_type: str = 'dijkstra', agent: "Agent | None" = None, clearance: str = "radius", use_orientation: "bool | None" = None, move_parked_agents: bool = True, conflict_span: str = "step", goal_conflicts: bool = False):
-        self.goal_conflicts = goal_conflicts
-        self._regions = {}                   # (parked step, other body) -> (vertices, edges) it keeps out of
+    def __init__(self, graph_map: GraphSampler, agents, astar_max_iterations=10000, heuristic_type: str = 'dijkstra',
+                 move_parked_agents: bool = True, conflict_span: str = "window", goal_conflicts: bool = False):
         if conflict_span not in ("step", "window"):
             raise ValueError(f"conflict_span must be 'step' or 'window', got {conflict_span!r}")
-        self.conflict_span = conflict_span
         self.graph_map = graph_map
-        self.use_orientation = use_orientation
+        self.agents = agents
         self.move_parked_agents = move_parked_agents
-        self._moves_cache = {}               # point -> [(neighbour point, its Location, ori facing it)]
-        default = agent if agent is not None else (Agent.disc(radius) if radius > 0 else None)
-        self._default_agent = self._unit_step(default)
-        self.agent_types = {a["name"]: self._unit_step(a["agent"]) for a in agents if a.get("agent") is not None}
-        self.has_bodies = self._default_agent is not None or bool(self.agent_types)
-        if self.has_bodies and self._default_agent is None and len(self.agent_types) < len(agents):
-            raise ValueError("CBS: every agent needs a body (an Agent or a radius) once any agent has one")
-        self.clearance = clearance
+        self.conflict_span = conflict_span
+        self.goal_conflicts = goal_conflicts
+        self.heuristic_type = HEURISTIC_TYPE[heuristic_type if heuristic_type in HEURISTIC_TYPE else "dijkstra"]
+
+        # The agents' bodies and how they turn (BodyConflicts): each agent dict's "agent" (an Agent). Without
+        # any, the agents are point particles.
+        bodies = {a["name"]: a.get("agent") for a in agents}
+        self.has_bodies = any(body is not None for body in bodies.values())
+        if self.has_bodies and None in bodies.values():
+            raise ValueError('CBS: every agent dict needs an "agent" (an Agent) once any of them has one')
+        self.agent_types = {name: self._unit_step(body) for name, body in bodies.items()}
+        self._turn_rates = {name: self._turn_rate_of(body) for name, body in bodies.items()}   # degrees per step; None: instant
         if self.has_bodies:
             self.graph_map.set_collision_sweep()
-        self.agents = agents
-        self.agent_dict = {}
-        if heuristic_type not in HEURISTIC_TYPE or heuristic_type is None:
-            self.heuristic_type = HEURISTIC_TYPE["dijkstra"]
-        else:
-            self.heuristic_type = HEURISTIC_TYPE[heuristic_type]
-        self.make_agent_dict()
+        self._start_ori = {}                 # agent -> its given start heading (make_agent_dict)
+        self._regions = {}                   # (parked step, other body) -> (vertices, edges) it keeps out of
 
+        # Roadmap distances (RoadmapCosts).
+        self._moves_cache = {}               # point -> [(neighbour point, its Location, ori facing it)]
+        self._links = None                   # directed roadmap edges by node index (_roadmap_links)
+        self._dijkstra_cache = {}            # (start index, goal index) -> (states, cost)
+        self._goal_dist_maps = {}            # goal index -> {node: distance to the goal}
+        self._turn_dist_maps = {}            # (goal index, turn rate) -> {(node, heading): cost to the goal}
+        self._heuristic_cache = {}           # (point, agent[, heading]) -> estimate
+
+        # The agent being planned: its constraints, and whose turning rate get_neighbors uses.
         self.constraints = Constraints()
         self.constraint_dict = {}
-
+        self.current_agent = None
+        self.agent_dict = {}
+        self.make_agent_dict()
         self.a_star = AStar(self, astar_max_iterations)
-        self._dijkstra_cache = {}  # (start_idx, goal_idx) -> (states, cost)
-        self._heuristic_cache = {}  # (location.point, agent_name) -> heuristic value
-        self._goal_dist_maps = {}  # goal_idx -> {node_idx: shortest-path cost to goal}
-
-    def _static_shortest_path_states(self, agent_name: str):
-        """Compute a static shortest path on the roadmap (no time expansion).
-
-        Safe to use only when there are no time-indexed constraints for this agent.
-        Returns (states, cost) in the same format as A*.
-        """
-        start_pt = tuple(float(x) for x in self.agent_dict[agent_name]["start"].location.point)
-        goal_pt = tuple(float(x) for x in self.agent_dict[agent_name]["goal"].location.point)
-        start_node = Node(start_pt, None, 0, 0)
-        goal_node = Node(goal_pt, None, 0, 0)
-        pos_index_dict = getattr(self.graph_map, "pos_index_dict", {})
-        if start_node.current not in pos_index_dict or goal_node.current not in pos_index_dict:
-            return False, float("inf")
-        s = int(pos_index_dict[start_node.current])
-        g = int(pos_index_dict[goal_node.current])
-        if s == g:
-            return [State(0, Location(start_pt))], 0.0
-
-        cache_key = (s, g)
-        if cache_key in self._dijkstra_cache:
-            return self._dijkstra_cache[cache_key]
-
-        road_map = getattr(self.graph_map, "road_map", None)
-        if road_map is None or len(road_map) == 0:
-            return False, float("inf")
-
-        # Dijkstra over node indices.
-        INF = float("inf")
-        dist = {s: 0.0}
-        prev = {}
-        heap = [(0.0, s)]
-        seen = set()
-        while heap:
-            d, u = heapq.heappop(heap)
-            if u in seen:
-                continue
-            seen.add(u)
-            if u == g:
-                break
-            u_node = self.graph_map.nodes[u]
-            for v in road_map[u]:
-                nd = d + float(self.graph_map.get_distance(u_node.current, self.graph_map.nodes[v].current))
-                if nd < dist.get(v, INF):
-                    dist[v] = nd
-                    prev[v] = u
-                    heapq.heappush(heap, (nd, v))
-        if g not in dist:
-            return False, float("inf")
-
-        # Reconstruct path indices.
-        path_idx = [g]
-        cur = g
-        while cur != s:
-            cur = prev[cur]
-            path_idx.append(cur)
-        path_idx.reverse()
-        states = []
-        for t, idx in enumerate(path_idx):
-            pt = tuple(float(x) for x in self.graph_map.nodes[idx].current)
-            states.append(State(t, Location(pt)))
-        result = states, float(dist[g])
-        self._dijkstra_cache[cache_key] = result
-        return result
-
-    def _goal_distance_map(self, goal_idx: int):
-        """Single-source Dijkstra from the goal over the roadmap.
-
-        Roadmap edges are bidirectional with symmetric costs, so distances from
-        the goal equal shortest-path costs to the goal from every node. Computed
-        once per goal and cached; used as the exact (admissible, consistent)
-        low-level A* heuristic.
-        """
-        cached = self._goal_dist_maps.get(goal_idx)
-        if cached is not None:
-            return cached
-        road_map = getattr(self.graph_map, "road_map", None)
-        dist = {goal_idx: 0.0}
-        if road_map is None or len(road_map) == 0:
-            self._goal_dist_maps[goal_idx] = dist
-            return dist
-        heap = [(0.0, goal_idx)]
-        seen = set()
-        while heap:
-            d, u = heapq.heappop(heap)
-            if u in seen:
-                continue
-            seen.add(u)
-            u_node = self.graph_map.nodes[u]
-            for v in road_map[u]:
-                nd = d + float(self.graph_map.get_distance(u_node.current, self.graph_map.nodes[v].current))
-                if nd < dist.get(v, float("inf")):
-                    dist[v] = nd
-                    heapq.heappush(heap, (nd, v))
-        self._goal_dist_maps[goal_idx] = dist
-        return dist
-
-    def _moves_from(self, point):
-        """The roadmap moves out of ``point``: ``[(neighbour point, its Location, ori facing it)]``, cached."""
-        moves = self._moves_cache.get(point)
-        if moves is None:
-            targets = [tuple(n.current) for n in self.graph_map.get_neighbors(Node(tuple[Any, ...](point)))]
-            moves = self._moves_cache[point] = [(q, Location(q), _ori_between(point, q)) for q in targets]
-        return moves
 
     def get_neighbors(self, state):
-        """The states one step after ``state``: wait; move along a roadmap edge (an agent with a heading only
-        along the edge it faces, any edge while ``FREE``); turn in place to face another edge."""
+        """The states one step after ``state`` for ``current_agent``: wait; move along a roadmap edge (an
+        agent with a heading only along the edge it faces, any edge while ``FREE``); turn in place towards
+        another edge, by at most its turning rate (``turn_rate``) per step."""
         t, ori = state.time + 1, state.ori
         steps = [State(t, state.location, ori)]
-        turns = {}                                               # an ordered set of the other headings
+        turns = {}                                               # an ordered set of the headings one turn step away
+        rate = self.turn_rate(self.current_agent) if ori is not None and ori != FREE else None
         for _, location, facing in self._moves_from(state.location.point):
             if ori is None:
                 steps.append(State(t, location))
             elif ori == FREE or ori == facing:
                 steps.append(State(t, location, facing))
             else:
-                turns.setdefault(facing)
-        steps += [State(t, state.location, facing) for facing in turns]
+                turns.setdefault(_turn_toward(ori, facing, rate))
+        steps += [State(t, state.location, heading) for heading in turns]
         return [n for n in steps if self.state_valid(n) and self.transition_valid(state, n)]
 
     def get_conflicts(self, solution, get_first_conflict: bool = True, max_conflicts: int | None = None):
-        """Enumerate conflicts; ``max_conflicts`` stops the sweep once that
-        many are collected (callers that only compare a count against a known
-        bound don't need the full list)."""
+        """The conflicts of ``solution``, earliest first: the first one (``get_first_conflict``; a false
+        value when there is none) or the list of them, cut off at ``max_conflicts`` for callers that only
+        compare the count against a bound."""
         max_t = max(len(plan) for plan in solution.values())
         if self.has_bodies:
             return self._body_conflicts(solution, max_t, get_first_conflict, max_conflicts)
@@ -221,38 +135,19 @@ class Environment(BodyConflicts):
         agent_pairs = list(combinations(solution.keys(), 2))
         for t in range(max_t):
             for agent_1, agent_2 in agent_pairs:
-                state_1 = self.get_state(agent_1, solution, t)
-                state_2 = self.get_state(agent_2, solution, t)
-
-                if state_1.is_equal_except_time(state_2):
-                    c = Conflict()
-                    c.time = t
-                    c.type = Conflict.VERTEX
-                    c.location_1 = state_1.location
-                    c.agent_1 = agent_1
-                    c.agent_2 = agent_2
-                    if get_first_conflict:
-                        return c
-                    conflicts.append(c)
-                    if max_conflicts is not None and len(conflicts) >= max_conflicts:
-                        return conflicts
+                here_1, here_2 = self.get_state(agent_1, solution, t).location, self.get_state(agent_2, solution, t).location
+                next_1, next_2 = self.get_state(agent_1, solution, t + 1).location, self.get_state(agent_2, solution, t + 1).location
+                if here_1 == here_2:                             # both at one vertex
+                    c = Conflict(Conflict.VERTEX, t, agent_1, agent_2, here_1)
+                elif here_1 == next_2 and next_1 == here_2:      # swapping along an edge
+                    c = Conflict(Conflict.EDGE, t, agent_1, agent_2, here_1, next_1)
+                else:
                     continue
-
-                state_1b = self.get_state(agent_1, solution, t + 1)
-                state_2b = self.get_state(agent_2, solution, t + 1)
-                if state_1.is_equal_except_time(state_2b) and state_1b.is_equal_except_time(state_2):
-                    c = Conflict()
-                    c.time = t
-                    c.type = Conflict.EDGE
-                    c.agent_1 = agent_1
-                    c.agent_2 = agent_2
-                    c.location_1 = state_1.location
-                    c.location_2 = state_1b.location
-                    if get_first_conflict:
-                        return c
-                    conflicts.append(c)
-                    if max_conflicts is not None and len(conflicts) >= max_conflicts:
-                        return conflicts
+                if get_first_conflict:
+                    return c
+                conflicts.append(c)
+                if max_conflicts is not None and len(conflicts) >= max_conflicts:
+                    return conflicts
         return conflicts
 
     def branches(self, conflict) -> list:
@@ -297,46 +192,31 @@ class Environment(BodyConflicts):
         return end.time >= constraints.free_from(end.location)
 
     def create_constraints_from_conflict(self, conflict):
-        constraint_dict = {}
-        if conflict.type == Conflict.VERTEX:
-            v_constraint = VertexConstraint(conflict.time, conflict.location_1)
-            constraint = Constraints()
-            constraint.vertex_constraints |= {v_constraint}
-            constraint_dict[conflict.agent_1] = constraint
-            constraint_dict[conflict.agent_2] = constraint
-
-        elif conflict.type == Conflict.EDGE:
-            constraint1 = Constraints()
-            constraint2 = Constraints()
-
-            e_constraint1 = EdgeConstraint(conflict.time, conflict.location_1, conflict.location_2)
-            e_constraint2 = EdgeConstraint(conflict.time, conflict.location_2, conflict.location_1)
-
-            constraint1.edge_constraints |= {e_constraint1}
-            constraint2.edge_constraints |= {e_constraint2}
-
-            constraint_dict[conflict.agent_1] = constraint1
-            constraint_dict[conflict.agent_2] = constraint2
-        elif conflict.type == Conflict.SWEEP:
-            constraint1 = Constraints()
-            constraint2 = Constraints()
-            for c in [conflict, *conflict.later]:                # every step of the overlap ("window" span)
-                constraint1.edge_constraints.update(EdgeConstraint(c.time, c.location_1, loc) for loc in c.location_1_f)
-                constraint2.edge_constraints.update(EdgeConstraint(c.time, c.location_2, loc) for loc in c.location_2_f)
+        """What ``conflict`` forbids each of its two agents: ``{agent: Constraints}``."""
+        first, second = Constraints(), Constraints()
+        t = conflict.time
+        if conflict.type == Conflict.VERTEX:                     # neither may be there then
+            first.vertex_constraints.add(VertexConstraint(t, conflict.location_1))
+            second.vertex_constraints.add(VertexConstraint(t, conflict.location_1))
+        elif conflict.type == Conflict.EDGE:                     # neither may make its half of the swap
+            first.edge_constraints.add(EdgeConstraint(t, conflict.location_1, conflict.location_2))
+            second.edge_constraints.add(EdgeConstraint(t, conflict.location_2, conflict.location_1))
+        elif conflict.type == Conflict.SWEEP:                    # each agent's fan, at every step of the overlap
+            for c in [conflict, *conflict.later]:
+                first.edge_constraints.update(EdgeConstraint(c.time, c.location_1, loc) for loc in c.location_1_f)
+                second.edge_constraints.update(EdgeConstraint(c.time, c.location_2, loc) for loc in c.location_2_f)
                 if c.no_turn_1:
-                    constraint1.edge_constraints.add(EdgeConstraint(c.time, c.location_1, c.location_1, True))
+                    first.edge_constraints.add(EdgeConstraint(c.time, c.location_1, c.location_1, True))
                 if c.no_turn_2:
-                    constraint2.edge_constraints.add(EdgeConstraint(c.time, c.location_2, c.location_2, True))
-            constraint_dict[conflict.agent_1] = constraint1
-            constraint_dict[conflict.agent_2] = constraint2
-
-        return constraint_dict
+                    second.edge_constraints.add(EdgeConstraint(c.time, c.location_2, c.location_2, True))
+        else:
+            return {}
+        return {conflict.agent_1: first, conflict.agent_2: second}
 
     def get_state(self, agent_name, solution, t):
-        if t < len(solution[agent_name]):
-            return solution[agent_name][t]
-        else:
-            return solution[agent_name][-1]
+        """The agent's state at step ``t``: its last one once its plan has ended."""
+        path = solution[agent_name]
+        return path[t] if t < len(path) else path[-1]
 
     def state_valid(self, state):
         con = self.constraints
@@ -359,57 +239,6 @@ class Environment(BodyConflicts):
         turning = state_1.location == state_2.location and state_1.ori != state_2.ori
         return not (turning and EdgeConstraint(state_1.time, state_1.location, state_1.location, True) in banned)
 
-    def admissible_heuristic(self, state, agent_name):
-        key = (state.location.point, agent_name)
-        cached = self._heuristic_cache.get(key)
-        if cached is not None:
-            return cached
-        goal_pt = self.agent_dict[agent_name]["goal"].location.point
-        loc_pt = state.location.point
-        if self.heuristic_type == HEURISTIC_TYPE["manhattan"]:
-            result = sum(fabs(a - b) for a, b in zip(loc_pt, goal_pt))
-        elif self.heuristic_type == HEURISTIC_TYPE["euclidean"]:
-            result = sum((a - b) ** 2 for a, b in zip(loc_pt, goal_pt)) ** 0.5
-        elif self.heuristic_type == HEURISTIC_TYPE["dijkstra"]:
-            result = self._dijkstra_heuristic(loc_pt, goal_pt)
-        else:
-            raise ValueError(f"Invalid heuristic type: {self.heuristic_type}")
-        self._heuristic_cache[key] = result
-        return result
-
-    def _dijkstra_heuristic(self, loc_pt, goal_pt):
-        """True roadmap shortest-path distance from loc_pt to goal_pt.
-
-        Falls back to euclidean distance (an admissible lower bound, since move
-        costs are euclidean edge lengths) when either point is not a roadmap
-        node or the goal is unreachable from loc_pt.
-        """
-        pos_index_dict = getattr(self.graph_map, "pos_index_dict", {})
-        loc_node = Node(tuple(float(x) for x in loc_pt), None, 0, 0)
-        goal_node = Node(tuple(float(x) for x in goal_pt), None, 0, 0)
-        if loc_node.current in pos_index_dict and goal_node.current in pos_index_dict:
-            dist = self._goal_distance_map(int(pos_index_dict[goal_node.current]))
-            d = dist.get(int(pos_index_dict[loc_node.current]))
-            if d is not None:
-                return d
-        return sum((a - b) ** 2 for a, b in zip(loc_pt, goal_pt)) ** 0.5
-
-    def get_step_cost(self, state_1: State, state_2: State) -> float:
-        """Incremental cost between consecutive time-expanded states.
-
-        Matches roadmap edge weights via ``GraphSampler.get_cost`` for moves,
-        so low-level costs align with discrete Dijkstra in
-        ``_static_shortest_path_states``. Waiting in place consumes one timestep
-        with unit cost so idle steps are not free.
-        """
-        p1 = tuple(state_1.location.point)
-        p2 = tuple(state_2.location.point)
-        if p1 == p2:
-            return 1.0
-        node1 = Node(tuple[Any, ...](p1), None, 0, 0)
-        node2 = Node(tuple[Any, ...](p2), None, 0, 0)
-        return float(self.graph_map.get_distance(node1.current, node2.current))
-
     def is_at_goal(self, state, agent_name):
         """Whether the agent can end its plan in ``state``: at its goal, with no constraint left that
         forbids it being or staying there later (it then has to move off and come back)."""
@@ -421,34 +250,29 @@ class Environment(BodyConflicts):
         return state.time >= max(self.constraints.must_be, default=float("-inf"))     # (forced moves still hold)
 
     def make_agent_dict(self,t=0):
+        self._start_ori = {}
         for agent in self.agents:
-            ori = None
-            if self.has_orientation(agent['name']):              # the start heading, or free to leave any way
-                ori = FREE
-                if agent.get('yaw') is not None:
-                    ori = _make_ori(agent['yaw'], agent.get('pitch', 0.0) if len(agent['start']) == 3 else None)
-            start_state = State(t, Location(agent['start']), ori)
-            goal_state = State(t, Location(agent['goal']))
-            
-            self.agent_dict.update({agent['name']:{'start':start_state, 'goal':goal_state}})
+            name = agent['name']
+            if agent.get('yaw') is not None and self.agent_type(name) is not None:
+                self._start_ori[name] = _make_ori(agent['yaw'], agent.get('pitch', 0.0) if len(agent['start']) == 3 else None)
+            # An agent that has to turn carries its heading in its state: the given one, or free to leave any way.
+            ori = self._start_ori.get(name, FREE) if self.has_orientation(name) else None
+            self.agent_dict[name] = {'start': State(t, Location(agent['start']), ori), 'goal': State(t, Location(agent['goal']))}
 
     def compute_solution(self):
-        # Clear caches for fresh solution attempt
-        solution = {}
-        solution_cost = {}
-        for agent in self.agent_dict.keys():
+        """Every agent's best path under its constraints in ``constraint_dict``: ``(paths, costs)`` by agent,
+        or ``(False, inf)`` when one has none. An agent without constraints or turn steps takes its plain
+        shortest path; the others run the time-expanded search."""
+        solution, solution_cost = {}, {}
+        for agent, info in self.agent_dict.items():
             self.constraints = self.constraint_dict.setdefault(agent, Constraints())
-            if (
-                self.constraints.is_empty()
-                and self.agent_dict[agent]["start"].ori is None      # turns cost steps: needs the time-expanded search
-            ):
-                local_solution, local_cost = self._static_shortest_path_states(agent)
+            if self.constraints.is_empty() and info["start"].ori is None:
+                path, cost = self._static_shortest_path_states(agent)
             else:
-                local_solution, local_cost = self.a_star.search(agent)
-            if not local_solution:
+                path, cost = self.a_star.search(agent)
+            if not path:
                 return False, float('inf')
-            solution.update({agent:local_solution})
-            solution_cost[agent] = local_cost
+            solution[agent], solution_cost[agent] = path, cost
         return solution, solution_cost
 
 class CBS(object):
@@ -590,24 +414,21 @@ class CBS(object):
         )
 
     def generate_plan(self, solution):
-        """The plan as ``{agent: [entry, ...]}``. An entry is ``t, x, y`` in 2D and ``t, x, y, z`` in 3D; agents
-        with a heading also get ``yaw`` (2D) or ``yaw, pitch`` (3D), in degrees. Before the agent's first
-        move the heading is that of the move (0 if it never moves)."""
+        """The plan as ``{agent: [entry, ...]}``. An entry is ``t, x, y`` in 2D and ``t, x, y, z`` in 3D; every
+        agent with a body also gets its heading in degrees, ``yaw`` (2D) or ``yaw, pitch`` (3D): see
+        ``Environment.plan_oris``."""
         plan = {}
         for agent, path in solution.items():
             if len(path[0].location) not in (2, 3):
                 raise ValueError(f"Invalid location dimension: {len(path[0].location)}")
-            unset = 0.0 if len(path[0].location) == 2 else (0.0, 0.0)
-            first = next((s.ori for s in path if _is_set(s.ori)), unset)     # shown while the heading is FREE
-            path_dict_list = []
-            for state in path:
+            oris = self.env.plan_oris(agent, [s.location.point for s in path], [getattr(s, "ori", None) for s in path])
+            entries = []
+            for state, ori in zip(path, oris):
                 entry = {'t': state.time, **dict(zip('xyz', state.location.point))}
-                if state.ori is not None:
-                    ori = first if state.ori == FREE else state.ori
-                    if isinstance(ori, tuple):
-                        entry['yaw'], entry['pitch'] = ori
-                    else:
-                        entry['yaw'] = ori
-                path_dict_list.append(entry)
-            plan[agent] = path_dict_list
+                if isinstance(ori, tuple):
+                    entry['yaw'], entry['pitch'] = ori
+                elif ori is not None:
+                    entry['yaw'] = ori
+                entries.append(entry)
+            plan[agent] = entries
         return plan

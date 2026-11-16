@@ -1,7 +1,7 @@
 """The data types of CBS: locations, states, headings, conflicts, constraints and search-tree nodes."""
 from collections import namedtuple
 from functools import lru_cache
-from math import atan2, cos, degrees, hypot, radians, sin
+from math import acos, atan2, ceil, cos, degrees, hypot, radians, sin
 
 import numpy as np
 
@@ -56,14 +56,56 @@ def _heading_of(ori):
     first axis is the travel direction (shared: do not modify)."""
     if not isinstance(ori, tuple):
         return radians(ori)
+    return _travel_frames(_direction(ori)[None])[0]
+
+
+def _direction(ori):
+    """The unit vector of a 3D ``State.ori`` ``(yaw, pitch)``."""
     yaw, pitch = radians(ori[0]), radians(ori[1])
-    return _travel_frames(np.array([[cos(pitch) * cos(yaw), cos(pitch) * sin(yaw), sin(pitch)]]))[0]
+    return np.array([cos(pitch) * cos(yaw), cos(pitch) * sin(yaw), sin(pitch)])
+
+
+@lru_cache(maxsize=1 << 18)
+def _turn_toward(ori, target, rate: float):
+    """The heading after one turn step from ``ori`` towards ``target`` (both ``State.ori``), turning at most
+    ``rate`` degrees the short way round: ``target`` itself once it is within reach. A turn through an
+    angle ``a`` so takes ``ceil(a / rate)`` steps."""
+    if not isinstance(ori, tuple):                               # 2D: a signed angle
+        diff = (target - ori + 180.0) % 360.0 - 180.0
+        if diff == -180.0:
+            diff = 180.0
+        return target if abs(diff) <= rate + 1e-6 else _make_ori(ori + (rate if diff > 0 else -rate))
+    u, v = _direction(ori), _direction(target)                   # 3D: along the great arc between them
+    angle = degrees(acos(max(-1.0, min(1.0, float(u @ v)))))
+    if angle <= rate + 1e-6:
+        return target
+    if angle > 180.0 - 1e-6:                                     # opposite: any way round; turn about the z or x axis
+        axis = np.array([0.0, 0.0, 1.0]) if abs(u[2]) < 0.9 else np.array([1.0, 0.0, 0.0])
+        v = np.cross(axis, u) / np.linalg.norm(np.cross(axis, u))
+        angle = 90.0
+    s = rate / angle
+    w = (sin(radians((1.0 - s) * angle)) * u + sin(radians(s * angle)) * v) / sin(radians(angle))
+    flat = hypot(w[0], w[1])
+    return _make_ori(degrees(atan2(w[1], w[0])) if flat > 1e-9 else 0.0, degrees(atan2(w[2], flat)))
+
+
+@lru_cache(maxsize=1 << 18)
+def _turn_steps(ori, target, rate: float) -> int:
+    """How many ``_turn_toward`` steps take ``ori`` to ``target`` at ``rate`` degrees per step:
+    ``ceil(angle / rate)``."""
+    if ori == target:
+        return 0
+    if not isinstance(ori, tuple):
+        angle = abs((target - ori + 180.0) % 360.0 - 180.0)
+    else:
+        angle = degrees(acos(max(-1.0, min(1.0, float(_direction(ori) @ _direction(target))))))
+    return max(1, ceil((angle - 1e-6) / rate))
 
 
 @lru_cache(maxsize=None)
 def _bounding_ball(body: Agent) -> Agent:
     """``body``'s bounding ball: what it sweeps while turning in place."""
-    return body if body.is_ball else Agent(body.radius, None, None, body.type)
+    return body if body.is_ball else Agent(body.radius, None, None, body.type, body.clearance)
 
 
 #: One step of an agent's plan: ``agent`` (its body) goes ``a -> b`` (equal: it stays). ``body`` is what it
@@ -89,18 +131,20 @@ class State(object):
         return str((self.time, self.location) if self.ori is None else (self.time, self.location, self.ori))
 
 class Conflict(object):
+    """Two agents in each other's way at step ``time``. ``VERTEX`` / ``EDGE`` (point agents): both at
+    ``location_1``, or swapping along ``location_1 -> location_2``. ``SWEEP`` (bodies): their bodies
+    overlap while each is at, or leaving, its own ``location_1`` / ``location_2``."""
     VERTEX = 1
     EDGE = 2
     SWEEP = 3
-    def __init__(self):
-        self.time = -1
-        self.type = -1
 
-        self.agent_1 = ''
-        self.agent_2 = ''
-
-        self.location_1 = Location()
-        self.location_2 = Location()
+    def __init__(self, type=-1, time=-1, agent_1='', agent_2='', location_1=None, location_2=None):
+        self.type = type
+        self.time = time
+        self.agent_1 = agent_1
+        self.agent_2 = agent_2
+        self.location_1 = location_1 if location_1 is not None else Location()
+        self.location_2 = location_2 if location_2 is not None else Location()
         # What each agent may not do at ``time``, as (fan 1, no turn 1, fan 2, no turn 2): a fan is the set
         # of destinations forbidden from the agent's location; "no turn" forbids turning in place there.
         # A SWEEP conflict holds a function instead, called when the fans are first read.
