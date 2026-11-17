@@ -12,7 +12,7 @@ import time
 from collections import deque
 
 from path_planning.common.environment.map.graph_sampler import GraphSampler
-from path_planning.multi_agent_planner.centralized.cbs.data_types import _ori_between, start_heading
+from path_planning.multi_agent_planner.centralized.cbs.data_types import _ori_between, put_heading, start_heading
 from path_planning.multi_agent_planner.centralized.sipp.graph_generation import SippGraph, SippNode, State
 from path_planning.multi_agent_planner.data_type import HEURISTIC_TYPE
 
@@ -308,6 +308,7 @@ class SippPlanner:
         best_solution_cost = float('inf')
         iterations = 0
         total_low_level_iterations = 0
+        start_blocked = set()                    # agents whose start is never safe (blocked for good)
         for _ in range(len(self.agents)):
             self.shuffle_agents()
             self._new_round()
@@ -324,6 +325,8 @@ class SippPlanner:
                 graph = self._graph(name)
                 # At its start the agent stands with its start heading (given, else 0).
                 start_node = graph.vertex_node(start, self.start_ori[name])
+                if len(start_node.interval_list) == 0:
+                    start_blocked.add(name)
                 if len(start_node.interval_list) == 0 or (not graph.oriented and len(graph.sipp_graph[goal].interval_list) == 0):
                     success = False
                     break
@@ -360,6 +363,7 @@ class SippPlanner:
         solution_info["runtime"] = self.total_time
         solution_info["total_iterations"] = self.total_iterations
         solution_info["low_level_iterations"] = total_low_level_iterations
+        solution_info["start_blocked"] = sorted(start_blocked)
         solution_info["success"] = best_solution is not None
         return (best_solution if best_solution is not None else {}), solution_info
 
@@ -545,8 +549,4 @@ class SippPlanner:
 
     @staticmethod
     def _with_heading(entry: dict, facing) -> dict:
-        if isinstance(facing, tuple):
-            entry["yaw"], entry["pitch"] = facing
-        else:
-            entry["yaw"] = facing
-        return entry
+        return put_heading(entry, facing)

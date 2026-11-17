@@ -41,6 +41,16 @@ def start_heading(agent: dict):
     return _make_ori(yaw, (agent.get("pitch") or 0.0) if three_d else None)
 
 
+def put_heading(entry: dict, ori) -> dict:
+    """Write a ``State.ori`` into a plan / schedule entry as degrees: ``yaw``, plus ``pitch`` in 3D (the
+    inverse of ``start_heading``). ``ori`` None: nothing is written."""
+    if isinstance(ori, tuple):
+        entry["yaw"], entry["pitch"] = ori
+    elif ori is not None:
+        entry["yaw"] = ori
+    return entry
+
+
 @lru_cache(maxsize=1 << 18)
 def _ori_between(a, b):
     """The ``State.ori`` of an agent facing along ``a -> b`` (two points)."""

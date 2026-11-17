@@ -11,6 +11,7 @@ from path_planning.common.environment.map.graph_sampler import GraphSampler
 from path_planning.multi_agent_planner.centralized.cbs.data_types import _heading_of, _make_ori, _ori_between
 from path_planning.multi_agent_planner.sweep_cache import shared_sweep_cache
 
+_LAYOUT = weakref.WeakKeyDictionary()     # graph_map -> (roadmap signature, vertex keys, directed edge keys)
 _STATIC = weakref.WeakKeyDictionary()     # graph_map -> (roadmap signature, its move lists and edge ids)
 
 class State(object):
@@ -213,19 +214,26 @@ class SippGraph(object):
 
     # ------------------------------------------------------------------ the table
     def init_graph(self):
-        self.sipp_graph = {}
-        for node in self.graph_map.nodes:
-            self.sipp_graph[node.current] = SippNode()
+        """A fresh record per vertex and per directed edge (both ways of every roadmap edge), keyed by
+        position / end positions; the key layout is worked out once per roadmap."""
+        gm = self.graph_map
+        sig = gm._roadmap_signature()
+        layout = _LAYOUT.get(gm)
+        if layout is None or layout[0] != sig:
+            nodes = gm.nodes
+            vertex_keys = [node.current for node in nodes]
+            edge_keys = {}
+            for src_idx, tgt_idx in gm.edges:
+                src_pos, tgt_pos = nodes[src_idx].current, nodes[tgt_idx].current
+                edge_keys.setdefault((src_pos, tgt_pos), None)
+                edge_keys.setdefault((tgt_pos, src_pos), None)
+            layout = _LAYOUT[gm] = (sig, vertex_keys, list(edge_keys))
+        _, vertex_keys, edge_keys = layout
+        self.sipp_graph = {p: SippNode() for p in vertex_keys}
         # Node ids for the compiled search: the vertices first (id = vertex index), per-heading lists after.
-        self._nobj = [self.sipp_graph[node.current] for node in self.graph_map.nodes]
-        # Directed edge records keyed by their end positions (graph_map.edges usually lists both ways).
-        for src_idx, tgt_idx in self.graph_map.edges:
-            src_pos = self.graph_map.nodes[src_idx].current
-            tgt_pos = self.graph_map.nodes[tgt_idx].current
-            if (src_pos, tgt_pos) not in self.sipp_graph:
-                self.sipp_graph[(src_pos, tgt_pos)] = SippEdge()
-            if (tgt_pos, src_pos) not in self.sipp_graph:
-                self.sipp_graph[(tgt_pos, src_pos)] = SippEdge()
+        self._nobj = [self.sipp_graph[p] for p in vertex_keys]
+        for key in edge_keys:
+            self.sipp_graph[key] = SippEdge()
 
     def reset_graph(self):
         """Back to the dynamic obstacles alone."""
