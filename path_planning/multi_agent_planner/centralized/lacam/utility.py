@@ -5,16 +5,14 @@ utility functions for loading MAPF problem instances, validating solutions, and
 computing solution costs.
 """
 
-import re
 import time
+import weakref
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TypeAlias
 from path_planning.common.environment.map.graph_sampler import GraphSampler
 import numpy as np
-from numpy.typing import NDArray
-from typing import Any
 from path_planning.common.environment.node import Node
 
 
@@ -140,25 +138,44 @@ class Deadline:
         return self.elapsed > self.time_limit_ms
 
 
-def set_starts_goals_config(starts_list: list = None, goals_list:list = None) -> tuple[Config, Config]:
-    """Load start and goal configurations.
-    Args:
-        starts: List of starting positions
-        goals: List of goal positions
+# LaCAM works on the grid's cells (integer indices; its tables are arrays of ``graph_map.shape``), one
+# roadmap node per cell, at the cell centre. These convert at its boundary.
+def cell_of(graph_map: GraphSampler, point) -> Coord:
+    """The cell of a roadmap point (a node at its cell centre)."""
+    return graph_map.world_to_map(point, discrete=True)
 
-    Returns:
-        A tuple (starts, goals) where:
-        - starts: Configuration of starting positions
-        - goals: Configuration of goal positions
-    """
-    starts,goals = Config(),Config()
-    if starts_list is not None:
-        for start in np.array(starts_list).astype(int):
-            starts.append(tuple(start.tolist()))  # align with grid
-    if goals_list is not None:
-        for goal in np.array(goals_list).astype(int):
-            goals.append(tuple(goal.tolist()))
-    return starts, goals
+
+def centre_of(graph_map: GraphSampler, cell: Coord) -> tuple:
+    """The world position of a cell: its centre, where the grid node is."""
+    return graph_map.map_to_world(cell)
+
+
+def set_starts_goals_config(starts_list: list, goals_list: list, graph_map: GraphSampler) -> tuple[Config, Config]:
+    """The start and goal configurations: the cells of the agents' start / goal roadmap nodes on
+    ``graph_map``, which must be a grid roadmap (one node per cell)."""
+    if not getattr(graph_map, "use_discrete_space", False):
+        raise ValueError("LaCAM plans on a grid roadmap (use_discrete_space=True)")
+    to_config = lambda points: Config([cell_of(graph_map, p) for p in points])
+    return to_config(starts_list), to_config(goals_list)
+
+
+# graph_map -> (roadmap signature, {cell: passable}, {cell: neighbour cells}): what LaCAM's inner loops
+# (PIBT, the distance tables) ask for again and again, worked out once per cell. ``reset_cells`` empties it
+# (each solve does, so a changed map is never served stale results).
+_CELLS = weakref.WeakKeyDictionary()
+
+
+def _cells(graph_map: GraphSampler):
+    sig = graph_map._roadmap_signature()
+    entry = _CELLS.get(graph_map)
+    if entry is None or entry[0] != sig:
+        entry = _CELLS[graph_map] = (sig, {}, {})
+    return entry
+
+
+def reset_cells(graph_map: GraphSampler) -> None:
+    """Forget the cached cell validity and neighbours of ``graph_map``."""
+    _CELLS.pop(graph_map, None)
 
 def is_valid_coord(graph_map: GraphSampler, coord: Coord) -> bool:
     """Check if a coordinate is valid and passable in the grid.
@@ -171,7 +188,11 @@ def is_valid_coord(graph_map: GraphSampler, coord: Coord) -> bool:
         True if the coordinate is within bounds and represents a passable cell,
         False otherwise.
     """
-    return not graph_map.in_collision(coord)
+    valid = _cells(graph_map)[1]
+    ok = valid.get(coord)
+    if ok is None:
+        ok = valid[coord] = not graph_map.in_collision(centre_of(graph_map, coord))
+    return ok
 
 def get_neighbors(graph_map: GraphSampler, coord: Coord) -> list[Coord]:
     """Get all valid neighboring coordinates (4-connected).
@@ -184,22 +205,15 @@ def get_neighbors(graph_map: GraphSampler, coord: Coord) -> list[Coord]:
         List of valid neighboring coordinates. Returns empty list if coord
         itself is invalid.
     """
-    # coord: y, x
-    neigh: list[Coord] = []
-
-    # check valid input
-    if not is_valid_coord(graph_map, coord):
-        return neigh
-
-    node = Node(tuple[Any, ...](coord))
-    nodes = graph_map.get_neighbors(node)
-
-    # Move action
-    for node in nodes:
-        if is_valid_coord(graph_map,node.current):
-            pos = tuple(int(pt) for pt in node.current)
-            neigh.append(pos)
-    return neigh
+    table = _cells(graph_map)[2]
+    neigh = table.get(coord)
+    if neigh is None:
+        neigh = ()
+        if is_valid_coord(graph_map, coord):
+            nodes = graph_map.get_neighbors(Node(centre_of(graph_map, coord)))   # that cell's roadmap node
+            neigh = tuple(pos for pos in (cell_of(graph_map, n.current) for n in nodes) if is_valid_coord(graph_map, pos))
+        table[coord] = neigh
+    return list(neigh)                                    # a copy: callers extend it
 
 
 def save_configs_for_visualizer(configs: Configs, filename: str | Path) -> None:

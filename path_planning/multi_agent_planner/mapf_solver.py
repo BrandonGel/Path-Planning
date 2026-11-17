@@ -14,9 +14,11 @@ from path_planning.multi_agent_planner.decentralized.neural_attf.simulation impo
 from path_planning.utils.checker import _xyz, check_collision, check_collision_bodies
 from path_planning.utils.util import agents_yaml_to_roadmap_frame
 
-#: Solvers that take ``Agent`` bodies from the agent dicts (the rest plan point particles on the grid).
+#: Solvers that take ``Agent`` bodies from the agent dicts.
 BODY_SOLVERS = ("cbs", "icbs", "ccbs", "iccbs", "sipp", "neural_attf")
-#: Of those, the ones that plan in continuous time: their bodies also carry the speed.
+#: Solvers restricted to point particles (agent_radius 0, no ``"agent"``): LaCAM.
+POINT_SOLVERS = ("lacam", "lacam_random")
+#: Of the body solvers, the ones that plan in continuous time: their bodies also carry the speed.
 TIMED_SOLVERS = ("ccbs", "iccbs", "sipp", "neural_attf")
 
 
@@ -144,11 +146,15 @@ def solve_mapf(map_, agents,mapf_solver_config:dict) -> Tuple[dict, float]:
         num_nodes = int(len(getattr(map_, "nodes", [])))
     except Exception:
         num_nodes = 0
-    low_level_astar_max_iterations = int(max(int(max_iterations), num_nodes * 5, 10000))
+    low_level_astar_max_iterations = int(max(int(max_iterations or 0), num_nodes * 5, 10000))   # None: no cap given
     low_level_cap = mapf_solver_config.get("low_level_astar_max_iterations")
     if low_level_cap is not None:
         low_level_astar_max_iterations = min(low_level_astar_max_iterations, int(low_level_cap))
 
+    if mapf_solver_name in POINT_SOLVERS and (
+            (mapf_solver_config.get("agent_radius") or 0.0) > 0 or mapf_solver_config.get("agent") is not None
+            or any(a.get("agent") is not None for a in agents_rt)):
+        raise ValueError(f"{mapf_solver_name} plans point particles only: use agent_radius 0 and no agent bodies")
     # The body goes in each agent's dict (agent dicts may carry their own); see config_agent.
     agents_rt = with_bodies(agents_rt, mapf_solver_config, mapf_solver_name)
     bodies = _bodies_of(agents_rt)
@@ -184,22 +190,22 @@ def solve_mapf(map_, agents,mapf_solver_config:dict) -> Tuple[dict, float]:
             merge_bound=mapf_solver_config.get("icbs_merge_bound"),                 # point agents only; None: no meta-agents
         )
         solution, solution_info = icbs.search()
-    elif mapf_solver_name == 'lacam':
+    elif mapf_solver_name in POINT_SOLVERS:
+        # Point particles on the roadmap (one vertex per agent per step); checked for vertex and swap
+        # conflicts and roadmap moves by LaCAM's own validator (the disc / body checks do not apply).
         starts, goals = set_starts_goals_config(
             [a["start"] for a in agents_rt],
             [a["goal"] for a in agents_rt],
+            map_,
         )
-        planner = LaCAM()
+        planner = LaCAM() if mapf_solver_name == 'lacam' else LaCAM_random()
         solution_config = planner.solve(map_, starts, goals,seed=0,time_limit_ms=1000*time_limit,max_iterations=max_iterations,verbose=0)
-        solution, solution_info = planner.get_solution_dict(solution_config)
-    elif mapf_solver_name == 'lacam_random':
-        starts, goals = set_starts_goals_config(
-            [a["start"] for a in agents_rt],
-            [a["goal"] for a in agents_rt],
-        )
-        planner = LaCAM_random()
-        solution_config = planner.solve(map_, starts, goals,seed=0,time_limit_ms=1000*time_limit,max_iterations=max_iterations,verbose=0)
-        solution, solution_info = planner.get_solution_dict(solution_config)
+        solution, solution_info = planner.get_solution_dict(solution_config, [a["name"] for a in agents_rt])
+        solution_info["collision"] = False
+        if solution and not is_valid_mapf_solution(map_, starts, goals, solution_config):
+            solution_info.update(success=False, collision=True)
+        summary = summarize_solution(solution, solution_info, mapf_solver_config, map_)
+        return summary
     elif mapf_solver_name == 'sipp':
         dynamic_obstacles = dict()
         sipp_planner = SippPlanner(map_, agents_rt, dynamic_obstacles=dynamic_obstacles, heuristic_type=heuristic_type,
@@ -353,8 +359,9 @@ def computer_solution_cost(solution:dict):
 def check_solution_collision(solution, agent_radius, solution_info, bodies=None, map_=None, require_success=True):
     """``solution_info`` plus ``collision`` (and ``success`` False when there is one). Agents with bodies
     (``bodies``: name -> ``Agent``) get the exact check (``check_collision_bodies``, with ``map_``'s sweep),
-    which uses the planners' own contact rule; point particles the disc check at ``agent_radius`` (none at
-    0). Only a successful solution is checked unless ``require_success`` is False."""
+    which uses the planners' own contact rule; otherwise the disc check at ``agent_radius`` (none at 0;
+    LaCAM's point particles are validated by LaCAM itself). Only a successful solution is checked unless
+    ``require_success`` is False."""
     solution_info_collision = solution_info.copy()
     solution_info_collision["collision"] = False
     if not solution or (require_success and not solution_info["success"]):

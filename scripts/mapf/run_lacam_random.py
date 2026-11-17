@@ -38,7 +38,8 @@ if __name__ == "__main__":
         map_.set_start(start)
         map_.set_goal(goal)
         nodes = map_.generateRandomNodes(generate_grid_nodes=use_discrete_space)
-        road_map = map_.generate_roadmap(nodes)
+        map_.generate_roadmap(nodes)
+        road_map = map_.road_map            # per-node neighbour lists, as the plots read them
 
         start = [s.current for s in map_.start_nodes]
         goal = [g.current for g in map_.goal_nodes]
