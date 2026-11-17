@@ -235,7 +235,7 @@ def read_grid_from_yaml(filename: str):
         raise ValueError(f"Unsupported dimensions: {len(dimensions)}")
     return env
 
-def read_graph_sampler_from_yaml(filename: str,use_discrete_space: bool = True,graph_file: str = None, args: dict = {}, sampling_dist_dict: dict = None, sweep_backend: str = "auto", roadmap_config=None):
+def read_graph_sampler_from_yaml(filename: str,use_discrete_space: bool = True,graph_file: str = None, args: dict = {}, sampling_dist_dict: dict = None, sweep_backend: str = "auto", roadmap_config=None, sweep_spatial_index: str = None):
     """
     Read a YAML file and recreate a GraphSampler environment.
 
@@ -250,6 +250,10 @@ def read_graph_sampler_from_yaml(filename: str,use_discrete_space: bool = True,g
     present, else the ``RoadmapConfig`` defaults. ``GraphSampler.generate_roadmap``
     passes this config to the ``Roadmap`` it builds.
 
+    Sweep backend: ``sweep_backend`` (``"auto"`` / ``"shapely"`` / ``"cgal"``) and, for the CGAL backend,
+    ``sweep_spatial_index`` (``"grid"`` / ``"rtree"``). When ``sweep_spatial_index`` is None, a top-level
+    ``sweep_spatial_index:`` key in the map YAML is used if present, else ``"grid"``.
+
     Args:
         filename: The filename of the YAML file to read.
     Returns:
@@ -260,6 +264,8 @@ def read_graph_sampler_from_yaml(filename: str,use_discrete_space: bool = True,g
         yaml_data = yaml.load(yaml_file, Loader=yaml.FullLoader)
     if roadmap_config is None:
         roadmap_config = yaml_data.get("roadmap_config")
+    if sweep_spatial_index is None:
+        sweep_spatial_index = yaml_data.get("sweep_spatial_index", "grid")
 
     dimensions = yaml_data['map']['dimensions'] if 'dimensions' in yaml_data['map'] else [0, 0]
     bounds = yaml_data['map']['bounds'] if 'bounds' in yaml_data['map'] else [[0, dim] for dim in dimensions]
@@ -268,7 +274,7 @@ def read_graph_sampler_from_yaml(filename: str,use_discrete_space: bool = True,g
     obs_size = yaml_data.get("obs_size", yaml_data.get("map", {}).get("obs_size", 0.5))
     
     
-    env = GraphSampler(bounds=bounds, resolution=resolution,start=[],goal=[],roadmap_config=roadmap_config,use_discrete_space=use_discrete_space,sampling_dist_dict=sampling_dist_dict or {},sweep_backend=sweep_backend)
+    env = GraphSampler(bounds=bounds, resolution=resolution,start=[],goal=[],roadmap_config=roadmap_config,use_discrete_space=use_discrete_space,sampling_dist_dict=sampling_dist_dict or {},sweep_backend=sweep_backend,sweep_spatial_index=sweep_spatial_index)
     if graph_file is None:
         validate_obstacle_map_config(env, obstacles_world, obs_size)
         obstacles = obstacles_world_to_grid(env, obstacles_world, obs_size)
@@ -377,7 +383,7 @@ def agents_yaml_to_roadmap_frame(map_: GraphSampler, agents: List[dict]) -> List
         else:
             s_t = _coord_to_tuple(a["start"], as_int=False)
             g_t = _coord_to_tuple(a["goal"], as_int=False)
-        out.append({"name": name, "start": s_t, "goal": g_t})
+        out.append({**a, "name": name, "start": s_t, "goal": g_t})   # other keys (agent body, yaw, ...) kept
     return out
 
 
@@ -386,9 +392,8 @@ def points_to_roadmap_frame(map_: GraphSampler, points: Sequence[Sequence[float]
     Convert a list of world-coordinate points into the roadmap-native frame, using
     the same convention as :func:`agents_yaml_to_roadmap_frame`:
 
-    - discrete (``map_.use_discrete_space`` True): world -> grid indices via
-      ``world_to_map(..., discrete=True)`` (these match the integer coords of grid
-      nodes created by ``GraphSampler.generateRandomNodes``);
+    - discrete (``map_.use_discrete_space`` True): the world coordinates of the centre
+      of the cell containing the point, where discrete roadmap nodes are stored;
     - continuous: world coordinates passed through unchanged.
 
     Args:
@@ -403,7 +408,7 @@ def points_to_roadmap_frame(map_: GraphSampler, points: Sequence[Sequence[float]
     for p in points:
         if discrete:
             m = map_.world_to_map(_coord_to_tuple(p, as_int=False), discrete=True)
-            out.append(_coord_to_tuple(m, as_int=True))
+            out.append(tuple(float(v) for v in map_.map_to_world(_coord_to_tuple(m, as_int=True))))
         else:
             out.append(_coord_to_tuple(p, as_int=False))
     return out

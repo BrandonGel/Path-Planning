@@ -78,8 +78,14 @@ class GraphSampler(GraphSamplerBase):
     @property
     def road_map(self) -> List[List[int]]:
         """Alias of ``roadmap_edges``: the per-node neighbour lists under the
-        name planners, scripts and pickles read."""
+        name planners, scripts and pickles read. Built afresh on every access
+        (callers may modify them): read it once, or use ``neighbors`` in loops."""
         return self.roadmap_edges
+
+    def neighbors(self, u: int) -> np.ndarray:
+        """Node indices ``u`` has an edge to, in ``road_map[u]`` order: a read-only view of the adjacency,
+        costing nothing to build."""
+        return self.roadmap.neighbors(u)
 
     @property
     def edges(self) -> List[Tuple[int, int]]:
@@ -351,12 +357,20 @@ class GraphSampler(GraphSamplerBase):
         return CollisionSweep(self.sweep_backend, self.sweep_spatial_index, self.dim)
 
     def _roadmap_signature(self):
-        """Cheap content fingerprint of the roadmap the sweep is built for."""
-        return (
-            len(self.nodes), len(self.edges),
-            hash(tuple(tuple(n.current) for n in self.nodes)),
+        """Content fingerprint of the roadmap the sweep is built for. Remembered while the node list (nodes
+        are immutable; the list is replaced or appended to) and the adjacency matrix (replaced on every
+        change) are the same objects, so repeated calls cost nothing."""
+        nodes, adj = self.nodes, self.roadmap.adj
+        memo = getattr(self, "_signature_memo", None)
+        if memo is not None and memo[0] is nodes and memo[1] == len(nodes) and memo[2] is adj:
+            return memo[3]
+        sig = (
+            len(nodes), len(self.edges),
+            hash(tuple(tuple(n.current) for n in nodes)),
             hash(tuple((int(e[0]), int(e[1])) for e in self.edges)),
         )
+        self._signature_memo = (nodes, len(nodes), adj, sig)
+        return sig
 
     def set_collision_sweep(self, backend: "str | None" = None, spatial_index: "str | None" = None,
                             force: bool = False):
@@ -698,8 +712,9 @@ class GraphSampler(GraphSamplerBase):
         new_index = {old: new for new, old in enumerate(kept)}
         weights = self.road_map_edge_weights if len(self.road_map_edge_weights) else None
         road_map, road_map_weights = [], []
+        old_map = self.road_map                    # built once: every access rebuilds all the lists
         for i in kept:
-            nbrs = self.road_map[i] if i < len(self.road_map) else []
+            nbrs = old_map[i] if i < len(old_map) else []
             slots = [n for n, j in enumerate(nbrs) if j in new_index]
             road_map.append([new_index[nbrs[n]] for n in slots])
             road_map_weights.append([weights[i][n] for n in slots] if weights is not None else [])
