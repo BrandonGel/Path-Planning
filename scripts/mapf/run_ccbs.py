@@ -1,6 +1,6 @@
 """
 Run CCBS for MAPF with agent radii (1.0, 2.0) and velocities (1.0, 2.0) in discrete and continuous space.
-CCBS requires radius > 0 and velocity > 0.
+CCBS requires radius > 0; velocity 0 means every move takes 1 time unit.
 
 python scripts/mapf/run_ccbs.py
 """
@@ -21,7 +21,7 @@ if __name__ == "__main__":
 
     set_global_seed(42)
     for use_discrete_space in [True, False]:
-        for agent_velocity, agent_radius in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0), (0.0,2.0)]:
+        for agent_velocity, agent_radius in [(0.0, 1.0), (1.0, 1.0), (0.0, 2.0)]:
             map_ = read_graph_sampler_from_yaml("path_planning/maps/2d/2d.yaml", use_discrete_space=use_discrete_space)
             agents = read_agents_from_yaml("path_planning/maps/2d/2d.yaml")
             map_.inflate_obstacles(radius=agent_radius + np.sqrt(2) / 2)
@@ -40,7 +40,8 @@ if __name__ == "__main__":
             map_.set_start(start)
             map_.set_goal(goal)
             nodes = map_.generateRandomNodes(generate_grid_nodes=use_discrete_space)
-            road_map = map_.generate_roadmap(nodes)
+            map_.generate_roadmap(nodes)
+            road_map = map_.road_map            # per-node neighbour lists, as the plots read them
 
             start = [s.current for s in map_.start_nodes]
             goal = [g.current for g in map_.goal_nodes]
@@ -49,7 +50,7 @@ if __name__ == "__main__":
                 for i, agent in enumerate(agents)
             ]
 
-            map_.set_constraint_sweep()
+            map_.set_collision_sweep()
 
             mapf_solver_config = {
                 "mapf_solver_name": "ccbs",
@@ -69,41 +70,41 @@ if __name__ == "__main__":
                 print(f"Solution not found for radius {agent_radius}, velocity {agent_velocity}")
                 continue
 
-            # space_tag = "discrete" if use_discrete_space else "continuous"
-            # write_to_yaml(
-            #     _to_native_yaml(solution_summary),
-            #     f"path_planning/maps/2d/ccbs/"
-            #     f"solution_radius{agent_radius}_velocity{agent_velocity}_{space_tag}.yaml",
-            # )
+            space_tag = "discrete" if use_discrete_space else "continuous"
+            write_to_yaml(
+                _to_native_yaml(solution_summary),
+                f"path_planning/maps/2d/ccbs/"
+                f"solution_radius{agent_radius}_velocity{agent_velocity}_{space_tag}.yaml",
+            )
 
-            # vis = Visualizer2D()
-            # vis.plot_grid_map(map_)
-            # vis.plot_road_map(map_, nodes, road_map, map_frame=use_discrete_space)
+            vis = Visualizer2D()
+            vis.plot_grid_map(map_)
+            vis.plot_road_map(map_, nodes, road_map, map_frame=use_discrete_space)
 
-            # solution = solution_summary["schedule"]
-            # for agent_name, trajectory in solution.items():
-            #     path = np.array([([point["x"], point["y"]]) for point in trajectory])
-            #     vis.plot_path(path, map_frame=use_discrete_space)
-            # vis.savefig(
-            #     f"figs/ccbs/ccbs_2d_radius{agent_radius}_velocity{agent_velocity}_{space_tag}.png"
-            # )
-            # vis.close()
+            solution = solution_summary["schedule"]
+            for agent_name, trajectory in solution.items():
+                path = np.array([([point["x"], point["y"]]) for point in trajectory])
+                vis.plot_path(path, map_frame=use_discrete_space)
+            vis.savefig(
+                f"figs/ccbs/ccbs_2d_radius{agent_radius}_velocity{agent_velocity}_{space_tag}.png"
+            )
+            vis.close()
 
-            # schedule = {"schedule": deepcopy(solution)}
-            # gif_filename = (
-            #     f"figs/ccbs/ccbs_2d_radius{agent_radius}_velocity{agent_velocity}_{space_tag}.gif"
-            # )
-            # vis = Visualizer2D()
-            # vis.animate(
-            #     gif_filename,
-            #     map_,
-            #     schedule,
-            #     road_map=road_map,
-            #     skip_frames=1,
-            #     intermediate_frames=3,
-            #     speed=3,
-            #     radius=agent_radius,
-            #     map_frame=use_discrete_space,
-            # )
-            # print(f"Animation saved to: {gif_filename}")
-            # vis.close()
+            schedule = {"schedule": deepcopy(solution)}
+            gif_filename = (
+                f"figs/ccbs/ccbs_2d_radius{agent_radius}_velocity{agent_velocity}_{space_tag}.gif"
+            )
+            vis = Visualizer2D()
+            vis.animate(
+                gif_filename,
+                map_,
+                schedule,
+                road_map=road_map,
+                skip_frames=1,
+                intermediate_frames=3,
+                speed=3,
+                radius=agent_radius,
+                map_frame=use_discrete_space,
+            )
+            print(f"Animation saved to: {gif_filename}")
+            vis.close()

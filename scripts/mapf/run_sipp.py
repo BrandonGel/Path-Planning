@@ -18,10 +18,9 @@ if __name__ == "__main__":
     os.makedirs("path_planning/maps/2d/sipp", exist_ok=True)
 
     set_global_seed(42)
-    num_perm = 5
-    set_global_seed(42)
     for use_discrete_space in [True, False]:
-        for agent_velocity,agent_radius in [(0.0, 0.0), (1.0, 0.0), (0.0, 2.0),(1.0, 0.0), (1.0, 1.0)]:
+        # (velocity, radius); radius 0: point particles (one time step per move, velocity unused)
+        for agent_velocity, agent_radius in [(0.0, 0.0), (1.0, 0.0), (0.0, 2.0), (1.0, 1.0)]:
             map_ = read_graph_sampler_from_yaml("path_planning/maps/2d/2d.yaml",use_discrete_space=use_discrete_space)
             agents = read_agents_from_yaml("path_planning/maps/2d/2d.yaml")
             map_.inflate_obstacles(radius=agent_radius+np.sqrt(2)/2)
@@ -41,7 +40,8 @@ if __name__ == "__main__":
             map_.set_start(start)
             map_.set_goal(goal)
             nodes = map_.generateRandomNodes(generate_grid_nodes=use_discrete_space)
-            road_map = map_.generate_roadmap(nodes)
+            map_.generate_roadmap(nodes)
+            road_map = map_.road_map            # per-node neighbour lists, as the plots read them
 
             start = [s.current for s in map_.start_nodes]
             goal = [g.current for g in map_.goal_nodes]
@@ -50,7 +50,7 @@ if __name__ == "__main__":
                 for i, agent in enumerate(agents)
             ]
 
-            map_.set_constraint_sweep()
+            map_.set_collision_sweep()
 
             # Searching
             mapf_solver_config = {
