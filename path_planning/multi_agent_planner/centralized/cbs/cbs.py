@@ -12,8 +12,7 @@ from path_planning.common.environment.map.graph_sampler import GraphSampler
 from path_planning.multi_agent_planner.centralized.cbs.a_star import AStar
 from path_planning.multi_agent_planner.centralized.cbs.bodies import BodyConflicts
 from path_planning.multi_agent_planner.centralized.cbs.data_types import (   # noqa: F401  (the types are re-exported)
-    Conflict, Constraints, EdgeConstraint, HighLevelNode, Location, State, Step, VertexConstraint,
-    _make_ori, _turn_toward, start_heading)
+    Conflict, Constraints, EdgeConstraint, HighLevelNode, Location, State, VertexConstraint, _turn_toward, start_heading)
 from path_planning.multi_agent_planner.centralized.cbs.routing import RoadmapCosts
 from path_planning.multi_agent_planner.data_type import HEURISTIC_TYPE
 
@@ -97,6 +96,7 @@ class Environment(BodyConflicts, RoadmapCosts):
         self._goal_dist_maps = {}            # goal index -> {node: distance to the goal}
         self._turn_dist_maps = {}            # (goal index, turn rate) -> {(node, heading): cost to the goal}
         self._heuristic_cache = {}           # (point, agent[, heading]) -> estimate
+        self._lengths = {}                   # (point, point) -> roadmap edge length
 
         # The agent being planned: its constraints, and whose turning rate get_neighbors uses.
         self.constraints = Constraints()
@@ -134,10 +134,11 @@ class Environment(BodyConflicts, RoadmapCosts):
 
         conflicts = []
         agent_pairs = list(combinations(solution.keys(), 2))
+        # Each agent's location per step up to max_t, holding its last one once its plan has ended.
+        at = {a: [s.location for s in path] + [path[-1].location] * (max_t + 1 - len(path)) for a, path in solution.items()}
         for t in range(max_t):
             for agent_1, agent_2 in agent_pairs:
-                here_1, here_2 = self.get_state(agent_1, solution, t).location, self.get_state(agent_2, solution, t).location
-                next_1, next_2 = self.get_state(agent_1, solution, t + 1).location, self.get_state(agent_2, solution, t + 1).location
+                here_1, here_2, next_1, next_2 = at[agent_1][t], at[agent_2][t], at[agent_1][t + 1], at[agent_2][t + 1]
                 if here_1 == here_2:                             # both at one vertex
                     c = Conflict(Conflict.VERTEX, t, agent_1, agent_2, here_1)
                 elif here_1 == next_2 and next_1 == here_2:      # swapping along an edge
@@ -226,19 +227,20 @@ class Environment(BodyConflicts, RoadmapCosts):
         for start, vertices, _ in con.regions:
             if state.time >= start and state.location in vertices:
                 return False
-        return  VertexConstraint(state.time,state.location) not in con.vertex_constraints
+        return not con.vertex_constraints or (state.time, state.location.point) not in con.bans()[0]
 
     def transition_valid(self, state_1, state_2):
         for start, _, edges in self.constraints.regions:
             if state_1.time >= start and (state_1.location, state_2.location) in edges:
                 return False
-        banned = self.constraints.edge_constraints
-        if not banned:
+        if not self.constraints.edge_constraints:
             return True
-        if EdgeConstraint(state_1.time, state_1.location, state_2.location) in banned:
+        banned = self.constraints.bans()[1]
+        p1, p2 = state_1.location.point, state_2.location.point
+        if (state_1.time, p1, p2, False) in banned:
             return False
-        turning = state_1.location == state_2.location and state_1.ori != state_2.ori
-        return not (turning and EdgeConstraint(state_1.time, state_1.location, state_1.location, True) in banned)
+        turning = p1 == p2 and state_1.ori != state_2.ori
+        return not (turning and (state_1.time, p1, p1, True) in banned)
 
     def is_at_goal(self, state, agent_name):
         """Whether the agent can end its plan in ``state``: at its goal, with no constraint left that
@@ -287,7 +289,7 @@ class CBS(object):
         """
         self.env = environment
         self.verbose = verbose
-        self.open_list =  []  # for fast membership checks
+        self.open_list = []                  # heap of (cost, push order, node)
         self.closed_set = set()
         self.time_limit = time_limit if time_limit is not None and time_limit > 0 else float('inf')
         self.max_iterations = max_iterations if max_iterations is not None and max_iterations > 0 else float('inf')
@@ -332,6 +334,7 @@ class CBS(object):
         """Best-first search over the constraint tree. Returns ``(plan, solution_info)``; the plan is empty
         when none was found within the limits."""
         started, iterations, solution = time.time(), 1, {}
+        self._stop_at = started + self.time_limit
         root = self._root()
         if root is None:
             if self.verbose:
@@ -347,19 +350,25 @@ class CBS(object):
             if state_key in self.closed_set:
                 continue
             self.closed_set.add(state_key)
-
             self.env.constraint_dict = P.constraint_dict
-            conflict = self.env.get_conflicts(P.solution)
-            if not conflict:
+            if self._expand(P):
                 if self.verbose:
                     print("solution found")
                 solution = self.generate_plan(P.solution)
                 break
-            for branch in self.env.branches(conflict):
-                child = self._child(P, branch, selective=len(branch) > 1)
-                if child is not None:
-                    self._push_node(child)
         return solution, self._report(started, iterations, bool(solution))
+
+    def _expand(self, P) -> bool:
+        """Branch ``P`` on its first conflict, pushing its children. True when ``P`` has no conflict: it is
+        the solution."""
+        conflict = self.env.get_conflicts(P.solution)
+        if not conflict:
+            return True
+        for branch in self.env.branches(conflict):
+            child = self._child(P, branch, selective=len(branch) > 1)
+            if child is not None:
+                self._push_node(child)
+        return False
 
     def _replan_agent(self, node, agent) -> bool:
         """Replan ``agent`` under ``node.constraint_dict``; False when it has no plan."""
@@ -375,25 +384,29 @@ class CBS(object):
         """The child of ``P`` with ``branch`` (``{agent: Constraints to add}``) applied, or None when some
         agent has no plan. Only the constrained agents get new constraint sets; the rest are shared.
         ``selective``: replan just the agents whose path breaks their new constraints; otherwise every
-        agent's plan is recomputed (``Environment.compute_solution``, as plain CBS always has)."""
+        constrained agent is replanned. (The others keep their paths: their constraints, and so their
+        searches, are unchanged.)"""
         node = HighLevelNode()
         node.solution, node.solution_cost = P.solution.copy(), P.solution_cost.copy()
-        node.constraint_dict = dict(P.constraint_dict)
-        for agent, added in branch.items():
-            node.constraint_dict[agent] = P.constraint_dict[agent].copy()
-            node.constraint_dict[agent].add_constraint(added)
+        node.constraint_dict = self._with_constraints(P, branch)
         self.env.constraint_dict = node.constraint_dict
-        if selective:
-            for agent in branch:
-                if not self.env.path_allowed(agent, node.solution[agent], node.constraint_dict[agent]) \
-                        and not self._replan_agent(node, agent):
-                    return None
-        else:
-            node.solution, node.solution_cost = self.env.compute_solution()
-            if not node.solution:
+        for agent in branch:
+            if selective and self.env.path_allowed(agent, node.solution[agent], node.constraint_dict[agent]):
+                continue
+            if not self._replan_agent(node, agent):
                 return None
         node.cost = sum(node.solution_cost.values())
         return node
+
+    @staticmethod
+    def _with_constraints(P, branch) -> dict:
+        """``P``'s constraints with ``branch`` (``{agent: Constraints to add}``) joined in; the other agents'
+        sets are shared, not copied."""
+        constraints = dict(P.constraint_dict)
+        for agent, added in branch.items():
+            constraints[agent] = P.constraint_dict[agent].copy()
+            constraints[agent].add_constraint(added)
+        return constraints
 
     def _get_state_key(self, node):
         """A hashable key for closed-set deduplication.
@@ -422,7 +435,7 @@ class CBS(object):
         for agent, path in solution.items():
             if len(path[0].location) not in (2, 3):
                 raise ValueError(f"Invalid location dimension: {len(path[0].location)}")
-            oris = self.env.plan_oris(agent, [s.location.point for s in path], [getattr(s, "ori", None) for s in path])
+            oris = self.env.plan_oris(agent, [s.location.point for s in path], [s.ori for s in path])
             entries = []
             for state, ori in zip(path, oris):
                 entry = {'t': state.time, **dict(zip('xyz', state.location.point))}

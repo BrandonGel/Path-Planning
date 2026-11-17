@@ -4,8 +4,7 @@ import heapq
 import time
 from itertools import count
 
-from path_planning.multi_agent_planner.centralized.cbs.data_types import (
-    Constraints, EdgeConstraint, Location, State, VertexConstraint, _turn_toward)
+from path_planning.multi_agent_planner.centralized.cbs.data_types import Constraints, Location, State, _turn_toward
 
 
 def _balls_collide(p, q, u, v, reach: float) -> bool:
@@ -51,9 +50,8 @@ class JointSearch:
         def allowed(con, t, p, q):
             if con.deadline is not None and t + 1 > con.deadline:
                 return False
-            if VertexConstraint(t + 1, loc(q)) in con.vertex_constraints:
-                return False
-            if EdgeConstraint(t, loc(p), loc(q)) in con.edge_constraints:
+            vertex_bans, step_bans = con.bans()
+            if (t + 1, q) in vertex_bans or (t, p, q, False) in step_bans:
                 return False
             for begin, vertices, edges in con.regions:
                 if (t + 1 >= begin and loc(q) in vertices) or (t >= begin and (loc(p), loc(q)) in edges):
@@ -109,11 +107,10 @@ class JointSearch:
                 for q, _, facing in self._moves_from(p):
                     if ori is None or ori == facing:                     # it moves only the way it faces
                         if allowed(cons[i], t, p, q):
-                            opts.append(((q, None if ori is None else facing), False,
-                                         float(self.graph_map.get_distance(p, q))))
+                            opts.append(((q, None if ori is None else facing), False, self._length(p, q)))
                     else:
                         turns.setdefault(_turn_toward(ori, facing, rates[i]))
-                if stay and turns and EdgeConstraint(t, loc(p), loc(p), True) not in cons[i].edge_constraints:
+                if stay and turns and (t, p, p, True) not in cons[i].bans()[1]:
                     opts += [((p, heading), False, 1.0) for heading in turns]    # one step of a turn in place
                 options.append(opts)
             for combo in joint_steps(options, locs):

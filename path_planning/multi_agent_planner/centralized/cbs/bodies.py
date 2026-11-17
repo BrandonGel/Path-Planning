@@ -66,7 +66,7 @@ class BodyConflicts:
         for k, ori in enumerate(oris):
             if ori is not None:
                 last = ori
-            elif ori is None and k and moves[k - 1] is not None:      # an instant turn, on leaving
+            elif k and moves[k - 1] is not None:                      # an instant turn, on leaving
                 last = moves[k - 1]
             shown.append(last)
         return shown
@@ -157,7 +157,7 @@ class BodyConflicts:
         pair, ordered by step then pair. A conflict's constraint fans are computed when first read."""
         names = list(solution)
         plans = [[s.location.point for s in solution[name]] for name in names]
-        oris = [[getattr(s, "ori", None) for s in solution[name]] for name in names]   # states of other planners have none
+        oris = [[s.ori for s in solution[name]] for name in names]
         heads = [self._headings(*plan) for plan in zip(names, plans, oris)]
         owner, agents, paths, t0, hold, heading = self._plan_pieces(names, plans, oris, heads)
         i, j, t1, t2 = self.graph_map.agent_conflicts(

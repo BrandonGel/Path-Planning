@@ -22,10 +22,8 @@ class Location(object):
         return len(self.point)
     def __getitem__(self, index):
         return self.point[index]
-    def __add__(self, other):
-        return Location(tuple(self.point + other.point))
 
-#: ``State.ori`` of an agent that has a heading but has not taken one yet (it may leave in any direction).
+
 def _make_ori(yaw, pitch=None):
     """A ``State.ori`` from degrees: the yaw in ``[0, 360)``, or ``(yaw, pitch)`` in 3D. Every heading is
     built here, so headings from edges and from the agents' start values compare equal."""
@@ -212,6 +210,16 @@ class Constraints(object):
         self.regions = []
         self.deadline = None
         self._free = (None, {})              # (sizes when computed, {location: free_from})
+        self._bans = (None, None, None)      # (sizes when built, vertex bans, step bans): see bans()
+
+    def bans(self):
+        """The vertex and step constraints as plain tuples for fast membership tests: ``({(time, point)},
+        {(time, point 1, point 2, turn)})``. Rebuilt when the constraints change (they only ever grow)."""
+        sizes = (len(self.vertex_constraints), len(self.edge_constraints))
+        if self._bans[0] != sizes:
+            self._bans = (sizes, {(c.time, c.location.point) for c in self.vertex_constraints},
+                          {(c.time, c.location_1.point, c.location_2.point, c.turn) for c in self.edge_constraints})
+        return self._bans[1], self._bans[2]
 
     def free_from(self, location):
         """The first time the agent may stop at ``location`` for good: after the last constraint that
@@ -260,13 +268,3 @@ class HighLevelNode(object):
         self.solution_cost = {}
         self.constraint_dict = {}
         self.cost = 0
-
-    def __eq__(self, other):
-        if not isinstance(other, type(self)): return NotImplemented
-        return self.solution == other.solution and self.cost == other.cost
-
-    def __hash__(self):
-        return hash(self.cost)
-
-    def __lt__(self, other):
-        return self.cost < other.cost

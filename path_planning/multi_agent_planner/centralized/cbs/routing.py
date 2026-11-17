@@ -144,7 +144,7 @@ class RoadmapCosts:
         """A lower bound on the cost from ``state`` to the agent's goal. For an agent that has to turn it
         is the exact roadmap cost with its turn steps (whatever ``heuristic_type`` says); otherwise the
         distance given by ``heuristic_type``."""
-        ori = getattr(state, "ori", None)                     # (states of other planners have none)
+        ori = state.ori
         key = (state.location.point, agent_name) if ori is None else (state.location.point, agent_name, ori)
         cached = self._heuristic_cache.get(key)
         if cached is not None:
@@ -170,4 +170,11 @@ class RoadmapCosts:
     def get_step_cost(self, state_1: State, state_2: State) -> float:
         """The cost of one step: the roadmap edge length for a move, 1 for a wait or a turn in place."""
         p1, p2 = state_1.location.point, state_2.location.point
-        return 1.0 if p1 == p2 else float(self.graph_map.get_distance(p1, p2))
+        return 1.0 if p1 == p2 else self._length(p1, p2)
+
+    def _length(self, p1, p2) -> float:
+        """The roadmap length of the move ``p1 -> p2``, cached."""
+        length = self._lengths.get((p1, p2))
+        if length is None:
+            length = self._lengths[(p1, p2)] = float(self.graph_map.get_distance(p1, p2))
+        return length

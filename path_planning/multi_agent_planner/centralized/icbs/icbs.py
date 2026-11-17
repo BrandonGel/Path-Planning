@@ -9,10 +9,8 @@ from path_planning.multi_agent_planner.centralized.cbs.cbs import (
     Environment, Constraints, HighLevelNode, CBS, Conflict, State, Location, VertexConstraint, EdgeConstraint)
 from path_planning.multi_agent_planner.centralized.icbs.meta_agents import JointSearch
 import heapq
-import time
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from path_planning.multi_agent_planner.centralized.icbs.a_star import AStar
-from path_planning.multi_agent_planner.data_type import HEURISTIC_TYPE
 
 class IEnvironment(Environment, JointSearch):
     """The CBS ``Environment`` (same arguments) with ICBS's low-level search and the joint search of
@@ -30,15 +28,6 @@ class IEnvironment(Environment, JointSearch):
             if need is not None and need != state.location:
                 return False
         return super().state_valid(state)
-
-    def compute_agent_solution(self, target_agent, curr_solution,curr_solution_cost):
-        self.constraints = self.constraint_dict.setdefault(target_agent, Constraints())
-        local_solution, local_cost = self.a_star.search(target_agent)
-        if not local_solution:
-            return False
-        curr_solution[target_agent] = local_solution
-        curr_solution_cost[target_agent] = local_cost
-        return curr_solution, curr_solution_cost
 
 class ICBS(CBS):
     def __init__(
@@ -77,7 +66,6 @@ class ICBS(CBS):
                            restarts from a fresh root. None: never merge.
         """
         super().__init__(environment, time_limit, max_iterations, verbose)
-        self.env = environment
         self.max_scored_conflicts = max_scored_conflicts
         # 'mdd' classifies conflicts from per-agent optimal-plateau tables
         # (one build per agent per CT node, covering every conflict) and
@@ -95,6 +83,10 @@ class ICBS(CBS):
         self._pair_conflicts = defaultdict(int)  # frozenset({a, b}) -> times their conflict was chosen
         self.restarts = 0
         self._stop_at = None                     # clock time at which the running search must stop
+        # Plateau tables (_build_opt_table) by (constraints, agent, cost, t_max): children share the
+        # constraints of the agents they leave alone, so most tables repeat. The constraints object is
+        # held by the key, so its id cannot be reused while the entry lives.
+        self._tables = OrderedDict()
 
     # ------------------------------------------------------------ meta-agents
     def _members(self, agent):
@@ -102,15 +94,12 @@ class ICBS(CBS):
         return self._group.get(agent) or frozenset([agent])
 
     def _replan_agent(self, node, agent) -> bool:
-        return self._replan(node, agent)
-
-    def _replan(self, node, agent) -> bool:
         """Replan ``agent`` under ``node.constraint_dict``, with its whole meta-agent when it is merged.
         Updates ``node.solution`` / ``node.solution_cost``; False when there is no plan."""
-        self.env.constraint_dict = node.constraint_dict
         group = self._group.get(agent)
         if group is None:
-            return bool(self.env.compute_agent_solution(agent, node.solution, node.solution_cost))
+            return super()._replan_agent(node, agent)
+        self.env.constraint_dict = node.constraint_dict
         planned = self.env.joint_search(sorted(group), node.constraint_dict, stop_at=self._stop_at)
         if not planned:
             return False
@@ -125,7 +114,7 @@ class ICBS(CBS):
         if root is None:
             return None
         for group in set(self._group.values()):
-            if not self._replan(root, next(iter(group))):
+            if not self._replan_agent(root, next(iter(group))):
                 return None
         root.cost = sum(root.solution_cost.values())
         return root
@@ -187,20 +176,26 @@ class ICBS(CBS):
         replanned, feasible = set(), True
         for a in P.solution:
             if a not in mine and a not in replanned and violates(a):
-                feasible = self._replan(child, a)
+                feasible = self._replan_agent(child, a)
                 replanned |= self._members(a)
                 if not feasible:
                     break
         if feasible:
             child.cost = sum(child.solution_cost.values())
             self._push_node(child)
+        self._branch(P, conflict, {agent: 0.0})      # the other child: the agent may not make the move
 
-        other = HighLevelNode()                      # the agent may not make the move
-        other.solution, other.solution_cost = P.solution.copy(), P.solution_cost.copy()
-        other.constraint_dict = self._get_updated_constraints(P, agent, conflict)
-        if self._replan(other, agent):
-            other.cost = sum(other.solution_cost.values())
-            self._push_node(other)
+    def _opt_table(self, P, agent, t_max):
+        """``_build_opt_table``, remembered for the last few hundred (constraints, agent, cost, t_max)."""
+        con = P.constraint_dict[agent]
+        key = (con, id(con), agent, P.solution_cost[agent], t_max)
+        if key in self._tables:
+            self._tables.move_to_end(key)
+            return self._tables[key]
+        table = self._tables[key] = self._build_opt_table(P, agent, t_max)
+        if len(self._tables) > 256:
+            self._tables.popitem(last=False)
+        return table
 
     def _build_opt_table(self, P, agent, t_max, state_cap=40000):
         """Weighted-graph analogue of an MDD for one agent at its current cost.
@@ -230,7 +225,7 @@ class ICBS(CBS):
                 h_cache[pt] = v
             return v
         start = agent_info["start"]
-        start_key = (start.location.point, getattr(start, "ori", None))
+        start_key = (start.location.point, start.ori)
         levels = {0: {start_key: 0.0}}
         heap = [(0.0, 0, next(self.counter), start_key)]
         n_states = 1
@@ -247,7 +242,7 @@ class ICBS(CBS):
                 if ng + h(npt) > C + eps:
                     continue
                 lvl = levels.setdefault(t + 1, {})
-                nkey = (npt, getattr(n, "ori", None))
+                nkey = (npt, n.ori)
                 cur = lvl.get(nkey)
                 if cur is None or ng < cur - 1e-12:
                     if cur is None:
@@ -322,7 +317,7 @@ class ICBS(CBS):
         for c in conflict_list:
             for a in (c.agent_1, c.agent_2):
                 if a not in tables:
-                    tables[a] = self._build_opt_table(P, a, t_max)
+                    tables[a] = self._opt_table(P, a, t_max)
                 if tables[a] is None:
                     return None
             card1 = self._is_cardinal_for(tables[c.agent_1], c, 1)
@@ -358,7 +353,7 @@ class ICBS(CBS):
         costs, paths = {}, {}
         original = self.env.constraint_dict
         for agent, added in self.env.create_constraints_from_conflict(conflict).items():
-            self.env.constraint_dict = constraints = self._with_constraint(P, agent, added)
+            self.env.constraint_dict = constraints = self._with_constraints(P, {agent: added})
             group = self._group.get(agent)
             if group is not None:                        # a merged agent: the cost change of its joint plan
                 planned = self.env.joint_search(sorted(group), constraints, stop_at=self._stop_at)
@@ -403,57 +398,34 @@ class ICBS(CBS):
                 return True
         return False
 
-    def search(self):
-        """CBS's best-first search with ICBS's improvements at each node: branch on a cardinal conflict
-        first, bypass a conflict when an agent has an equally cheap way around it, merge agents that keep
-        conflicting (``merge_bound``) and, optionally, split disjointly. Returns ``(plan, solution_info)``."""
-        started, iterations, solution = time.time(), 1, {}
-        self._stop_at = started + self.time_limit
-        root = self._root()
-        if root is None:
-            if self.verbose:
-                print("No initial solution found")
-            return solution, self._report(started, iterations, False)
-        self._push_node(root)
-        while self.open_list:
-            iterations += 1
-            if self._out_of_budget(started, iterations):
-                break
-            _, _, P = heapq.heappop(self.open_list)
-            state_key = self._get_state_key(P)
-            if state_key in self.closed_set:
-                continue
-            self.closed_set.add(state_key)
-
-            self.env.constraint_dict = P.constraint_dict
-
-            conflict_list = self.env.get_conflicts(P.solution, get_first_conflict=False)
-            if not conflict_list:
-                if self.verbose:
-                    print("solution found")
-                solution = self.generate_plan(P.solution)
-                break
-
-            # 1. Branch on a cardinal conflict when there is one.
-            conflict, costs, paths, _ = self._choose_conflict(P, conflict_list)
-            # 2. Bypass: an equally cheap path with fewer conflicts replaces the branching.
-            if self._bypass(P, conflict, costs, len(conflict_list)):
-                continue
-            # 3. Merge and restart: agents that keep conflicting are planned jointly from now on.
-            if self.merge_bound is not None and self._merge_and_restart(conflict):
-                continue
-            # 4. Branch.
-            branches = self.env.branches(conflict)
-            if any(len(branch) > 1 for branch in branches):      # a goal conflict: one child constrains many agents
-                for branch in branches:
-                    child = self._child(P, branch, selective=True)
-                    if child is not None:
-                        self._push_node(child)
-            elif self.disjoint and conflict.type in (Conflict.VERTEX, Conflict.EDGE):
-                self._branch_disjoint(P, conflict)
-            else:
-                self._branch(P, conflict, costs, paths)
-        return solution, self._report(started, iterations, bool(solution))
+    def _expand(self, P) -> bool:
+        """ICBS's improvements to expanding ``P`` (CBS's search runs the rest): branch on a cardinal
+        conflict first, bypass a conflict when an agent has an equally cheap way around it, merge agents
+        that keep conflicting (``merge_bound``) and, optionally, split disjointly. True when ``P`` has no
+        conflict."""
+        conflict_list = self.env.get_conflicts(P.solution, get_first_conflict=False)
+        if not conflict_list:
+            return True
+        # 1. Branch on a cardinal conflict when there is one.
+        conflict, costs, paths, _ = self._choose_conflict(P, conflict_list)
+        # 2. Bypass: an equally cheap path with fewer conflicts replaces the branching.
+        if self._bypass(P, conflict, costs, len(conflict_list)):
+            return False
+        # 3. Merge and restart: agents that keep conflicting are planned jointly from now on.
+        if self.merge_bound is not None and self._merge_and_restart(conflict):
+            return False
+        # 4. Branch.
+        branches = self.env.branches(conflict)
+        if any(len(branch) > 1 for branch in branches):          # a goal conflict: one child constrains many agents
+            for branch in branches:
+                child = self._child(P, branch, selective=True)
+                if child is not None:
+                    self._push_node(child)
+        elif self.disjoint and conflict.type in (Conflict.VERTEX, Conflict.EDGE):
+            self._branch_disjoint(P, conflict)
+        else:
+            self._branch(P, conflict, costs, paths)
+        return False
 
     def _report(self, started, iterations, success) -> dict:
         info = super()._report(started, iterations, success)
@@ -462,18 +434,9 @@ class ICBS(CBS):
         return info
 
 
-    @staticmethod
-    def _with_constraint(P, agent, added):
-        """``P``'s constraints with ``added`` joined to ``agent``'s (the other agents' sets are shared, not
-        copied)."""
-        constraints = dict(P.constraint_dict)
-        constraints[agent] = P.constraint_dict[agent].copy()
-        constraints[agent].add_constraint(added)
-        return constraints
-
     def _get_updated_constraints(self, P, agent, conflict):
         """``P``'s constraints with ``conflict``'s constraint added for ``agent``."""
-        return self._with_constraint(P, agent, self.env.create_constraints_from_conflict(conflict)[agent])
+        return self._with_constraints(P, {agent: self.env.create_constraints_from_conflict(conflict)[agent]})
 
     def _branch(self, P, conflict, costs, paths=None):
         """Standard splitting: one child per agent of ``conflict``, with its constraint added. ``paths``
@@ -489,7 +452,7 @@ class ICBS(CBS):
             if path is not None:
                 node.solution[agent] = path
                 node.solution_cost[agent] = P.solution_cost[agent] + cost
-            elif not self._replan(node, agent):
+            elif not self._replan_agent(node, agent):
                 continue
             node.cost = sum(node.solution_cost.values())
             self._push_node(node)
