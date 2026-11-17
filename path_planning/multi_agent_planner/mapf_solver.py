@@ -1,17 +1,54 @@
+from path_planning.agent import Agent
 from path_planning.multi_agent_planner.centralized.cbs.cbs import Environment, CBS
 from path_planning.multi_agent_planner.centralized.icbs.icbs import IEnvironment, ICBS
 from path_planning.multi_agent_planner.centralized.lacam.lacam import LaCAM
 from path_planning.multi_agent_planner.centralized.lacam.lacam_random import LaCAM as LaCAM_random
 from path_planning.multi_agent_planner.centralized.sipp.sipp import SippPlanner
-from path_planning.multi_agent_planner.centralized.ccbs.ccbs import CCBS
-from path_planning.multi_agent_planner.centralized.ccbs.iccbs import ICCBS
-from path_planning.multi_agent_planner.centralized.ccbs.graph_generation import Environment as CCBS_Environment
+from path_planning.multi_agent_planner.centralized.ccbs.ccbs import CCBS, Environment as CCBS_Environment
 from path_planning.multi_agent_planner.centralized.lacam.utility import set_starts_goals_config, is_valid_mapf_solution
 from typing import List, Tuple
 import numpy as np
 import time
-from path_planning.utils.checker import check_collision
+from path_planning.multi_agent_planner.decentralized.neural_attf.neural_attf import NeuralATTF
+from path_planning.multi_agent_planner.decentralized.neural_attf.simulation import Simulation
+from path_planning.utils.checker import _xyz, check_collision, check_collision_bodies
 from path_planning.utils.util import agents_yaml_to_roadmap_frame
+
+#: Solvers that take ``Agent`` bodies from the agent dicts (the rest plan point particles on the grid).
+BODY_SOLVERS = ("cbs", "icbs", "ccbs", "iccbs", "sipp", "neural_attf")
+#: Of those, the ones that plan in continuous time: their bodies also carry the speed.
+TIMED_SOLVERS = ("ccbs", "iccbs", "sipp", "neural_attf")
+
+
+def config_agent(mapf_solver_config: dict, mapf_solver_name: str):
+    """The ``Agent`` every agent of ``mapf_solver_name`` gets unless its dict carries its own: the config's
+    ``"agent"`` (any shape), else a disc / sphere of ``agent_radius`` (with the optional ``agent_clearance``
+    buffer and ``agent_max_rotation``: a finite rate makes it turn before changing direction), else None
+    (point particles). Continuous-time solvers also get the speed ``agent_velocity`` (0 or None: one time
+    unit per move) unless the config's ``"agent"`` already has one."""
+    agent_radius = mapf_solver_config.get("agent_radius") or 0.0
+    body = mapf_solver_config.get("agent") or (
+        Agent(agent_radius, max_rotation=mapf_solver_config.get("agent_max_rotation"), type="disc",
+              clearance=float(mapf_solver_config.get("agent_clearance", 0.0))) if agent_radius > 0 else None)
+    velocity = mapf_solver_config.get("agent_velocity")
+    if body is not None and mapf_solver_name in TIMED_SOLVERS and body.max_speed is None and velocity:
+        body = Agent(body.shape, float(velocity), body.max_rotation, body.type, body.clearance)
+    return body
+
+
+def with_bodies(agents: list, mapf_solver_config: dict, mapf_solver_name: str) -> list:
+    """``agents`` with the config's body (:func:`config_agent`) added to every dict without an ``"agent"``,
+    for the solvers that take bodies; unchanged otherwise."""
+    body = config_agent(mapf_solver_config, mapf_solver_name)
+    if body is None or mapf_solver_name not in BODY_SOLVERS:
+        return agents
+    return [{"agent": body, **a} for a in agents]
+
+
+def _bodies_of(agents: list) -> dict | None:
+    """``{name: Agent}`` when the agents carry bodies, else None (point particles)."""
+    bodies = {a["name"]: a.get("agent") for a in agents}
+    return bodies if any(b is not None for b in bodies.values()) else None
 
 
 def _snap_agents_to_nodes(map_, agents_rt):
@@ -66,7 +103,6 @@ def _agents_off_nodes(map_, agents_rt) -> List[str]:
 def solve_mapf(map_, agents,mapf_solver_config:dict) -> Tuple[dict, float]:
     mapf_solver_name = mapf_solver_config['mapf_solver_name'].lower()
     agent_radius = mapf_solver_config['agent_radius']
-    agent_velocity = mapf_solver_config['agent_velocity']
     time_limit = mapf_solver_config['time_limit']
     max_iterations = mapf_solver_config['max_iterations']
     heuristic_type = mapf_solver_config['heuristic_type']
@@ -95,7 +131,8 @@ def solve_mapf(map_, agents,mapf_solver_config:dict) -> Tuple[dict, float]:
                 "failure_reason": "start/goal not a roadmap node: " + "; ".join(off_nodes),
             }
             solution_info = check_solution_collision({}, agent_radius, solution_info)
-            return summarize_solution({}, solution_info, mapf_solver_config, map_)
+            return summarize_solution({}, solution_info, mapf_solver_config, map_,
+                                      _bodies_of(with_bodies(agents_rt, mapf_solver_config, mapf_solver_name)))
     else:
         # cdt/rrg/prm roadmaps may not include the exact start/goal as nodes; snap to the
         # nearest node so CBS/ICBS/LaCAM/CCBS have an on-node start/goal. No-op for
@@ -112,18 +149,19 @@ def solve_mapf(map_, agents,mapf_solver_config:dict) -> Tuple[dict, float]:
     if low_level_cap is not None:
         low_level_astar_max_iterations = min(low_level_astar_max_iterations, int(low_level_cap))
 
-    use_exact_collision_check = mapf_solver_config.get("use_exact_collision_check")
-    if use_exact_collision_check is not None and getattr(map_, "constraint_sweep", None) is not None:
-        map_.constraint_sweep.use_exact_collision_check = bool(use_exact_collision_check)
+    # The body goes in each agent's dict (agent dicts may carry their own); see config_agent.
+    agents_rt = with_bodies(agents_rt, mapf_solver_config, mapf_solver_name)
+    bodies = _bodies_of(agents_rt)
 
     if mapf_solver_name == 'cbs':
         env = Environment(
             map_,
             agents_rt,
             astar_max_iterations=low_level_astar_max_iterations,
-            radius=agent_radius,
-            use_constraint_sweep=True,
             heuristic_type=heuristic_type,
+            move_parked_agents=bool(mapf_solver_config.get("move_parked_agents", True)),
+            conflict_span=mapf_solver_config.get("conflict_span", "window"),        # agents with bodies: "window" | "step"
+            goal_conflicts=bool(mapf_solver_config.get("goal_conflicts", False)),   # agents with bodies
         )
         cbs = CBS(env,time_limit=time_limit,max_iterations=max_iterations,verbose=False)
         solution,solution_info = cbs.search()
@@ -132,17 +170,18 @@ def solve_mapf(map_, agents,mapf_solver_config:dict) -> Tuple[dict, float]:
             map_,
             agents_rt,
             astar_max_iterations=low_level_astar_max_iterations,
-            radius=agent_radius,
-            use_constraint_sweep=True,
             heuristic_type=heuristic_type,
+            move_parked_agents=bool(mapf_solver_config.get("move_parked_agents", True)),
+            conflict_span=mapf_solver_config.get("conflict_span", "window"),        # agents with bodies: "window" | "step"
+            goal_conflicts=bool(mapf_solver_config.get("goal_conflicts", False)),   # agents with bodies
         )
         icbs = ICBS(
             env,
             time_limit=time_limit,
             max_iterations=max_iterations,
             verbose=False,
-            icbs_mode=mapf_solver_config.get("icbs_mode", ""),
-            focal_w=float(mapf_solver_config.get("focal_w", 1.5)),
+            disjoint=bool(mapf_solver_config.get("icbs_disjoint", False)),          # point agents only
+            merge_bound=mapf_solver_config.get("icbs_merge_bound"),                 # point agents only; None: no meta-agents
         )
         solution, solution_info = icbs.search()
     elif mapf_solver_name == 'lacam':
@@ -163,21 +202,89 @@ def solve_mapf(map_, agents,mapf_solver_config:dict) -> Tuple[dict, float]:
         solution, solution_info = planner.get_solution_dict(solution_config)
     elif mapf_solver_name == 'sipp':
         dynamic_obstacles = dict()
-        sipp_planner = SippPlanner(map_,dynamic_obstacles,agents_rt,agent_radius,agent_velocity,heuristic_type=heuristic_type,time_limit=time_limit,max_iterations=max_iterations)
+        sipp_planner = SippPlanner(map_, agents_rt, dynamic_obstacles=dynamic_obstacles, heuristic_type=heuristic_type,
+                                   time_limit=time_limit, max_iterations=max_iterations,
+                                   exact_vertices=bool(mapf_solver_config.get("sipp_exact_vertices", False)))
         solution,solution_info = sipp_planner.compute_plan()
-    elif mapf_solver_name == 'ccbs':
-        env = CCBS_Environment(map_,{}, agents_rt, radius=agent_radius, velocity=agent_velocity, use_constraint_sweep=True,heuristic_type=heuristic_type)
-        ccbs = CCBS(env,time_limit=time_limit,max_iterations=max_iterations,verbose=False)
+    elif mapf_solver_name in ('ccbs', 'iccbs'):
+        # One solver with switches; "iccbs" is CCBS with cardinal conflicts first.
+        env = CCBS_Environment(map_, agents_rt)
+        ccbs = CCBS(
+            env,
+            time_limit=time_limit,
+            max_iterations=max_iterations,
+            verbose=False,
+            use_cardinal=bool(mapf_solver_config.get("ccbs_use_cardinal", mapf_solver_name == 'iccbs')),
+            disjoint=bool(mapf_solver_config.get("ccbs_disjoint", False)),
+            hlh=mapf_solver_config.get("ccbs_hlh"),                                 # None | "lp" | "greedy"; needs cardinal
+        )
         solution, solution_info = ccbs.search()
-    elif mapf_solver_name == 'iccbs':
-        env = CCBS_Environment(map_,{}, agents_rt, radius=agent_radius, velocity=agent_velocity, use_constraint_sweep=True,heuristic_type=heuristic_type)
-        iccbs = ICCBS(env,time_limit=time_limit,max_iterations=max_iterations,verbose=False)
-        solution, solution_info = iccbs.search()
     else:
         raise ValueError(f"Invalid algorithm: {mapf_solver_name}")
-    solution_info = check_solution_collision(solution,agent_radius,solution_info)
-    summary = summarize_solution(solution,solution_info,mapf_solver_config,map_)
+    solution_info = check_solution_collision(solution, agent_radius, solution_info, bodies, map_)
+    summary = summarize_solution(solution, solution_info, mapf_solver_config, map_, bodies)
     return summary
+
+
+def solve_mapd(map_, agents, tasks, non_task_endpoints, mapf_solver_config: dict, rng=None) -> dict:
+    """Life-long MAPD with Neural-ATTF (token passing; SIPP or grid low level) driven by ``Simulation``.
+
+    Inputs are in the roadmap frame (see ``util.mapd_agents_to_roadmap_frame`` / ``points_to_roadmap_frame``):
+    ``agents`` (``name``, ``start``, optionally ``yaw`` and their own ``"agent"``), ``tasks`` (dicts with
+    ``task_name``, ``start_time`` and ``waypoints``, as ``tasks_generator.convert_mapd_tasks`` makes them) and
+    the parking spots ``non_task_endpoints``. Config keys: the body as for ``solve_mapf`` (``agent`` /
+    ``agent_radius`` / ``agent_velocity`` / ``agent_clearance``), ``low_level`` ("sipp" | "grid"; default
+    "sipp"), ``heuristic_type`` (default "euclidean"), ``horizon`` (ticks, default 2000),
+    ``timestep_duration`` (default 1), ``delay_probability`` (default 0), ``seed`` (default 0; or pass
+    ``rng``, a ``random.Random``, for the simulation's delays) and ``neural_attf_options`` (more
+    ``NeuralATTF`` keyword arguments).
+
+    Returns a summary like ``solve_mapf``'s: ``schedule`` (the executed paths), costs, ``completed_tasks`` /
+    ``n_tasks``, ``completed_tasks_times``, ``n_replans``, SIPP effort, ``runtime`` (wall) and ``algo_time``
+    (planner), ``success`` (every task done, collision-free) and ``collision`` from the exact check."""
+    import random
+
+    agents = with_bodies(list(agents), mapf_solver_config, "neural_attf")
+    bodies = _bodies_of(agents)
+    dt = float(mapf_solver_config.get("timestep_duration", 1.0))
+    horizon = int(mapf_solver_config.get("horizon", 2000))
+    planner = NeuralATTF(
+        map_, agents, non_task_endpoints,
+        heuristic_type=mapf_solver_config.get("heuristic_type", "euclidean"),
+        low_level=mapf_solver_config.get("low_level", "sipp"),
+        timestep_duration=dt,
+        **mapf_solver_config.get("neural_attf_options", {}),
+    )
+    sim = Simulation(tasks=[], agents=agents, delay_probability=float(mapf_solver_config.get("delay_probability", 0.0)),
+                     rng=rng or random.Random(mapf_solver_config.get("seed", 0)), timestep_duration=dt)
+    st = time.perf_counter()
+    while planner.get_completed_tasks() < len(tasks) and sim.get_time() < horizon:
+        new_tasks = [t for t in tasks if int(t["start_time"]) == sim.get_time()]
+        if new_tasks:
+            planner.update_tasks(sim.get_time(), new_tasks)
+        sim.time_forward(planner)
+    solution = sim.get_actual_paths()
+    solution_info = {
+        "success": planner.get_completed_tasks() == len(tasks),
+        "runtime": time.perf_counter() - st,
+        "algo_time": sim.get_algo_time(),
+        "steps": sim.get_time(),
+        "horizon": horizon,
+        "completed_tasks": planner.get_completed_tasks(),
+        "n_tasks": len(tasks),
+        "completed_tasks_times": planner.get_completed_tasks_times(),
+        "n_replans": planner.get_n_replans(),
+        "low_level_iterations": planner.get_sipp_iterations(),
+        "low_level_calls": planner.get_sipp_calls(),
+        "times_agent_delayed": dict(sim.times_agent_delayed),
+    }
+    solution_info = check_solution_collision(solution, mapf_solver_config.get("agent_radius") or 0.0,
+                                             solution_info, bodies, map_, require_success=False)
+    if solution_info["collision"]:
+        solution_info["success"] = False
+    config = {"mapf_solver_name": "neural_attf", "agent_radius": 0.0, "agent_velocity": 0.0, "time_limit": None,
+              "max_iterations": None, "heuristic_type": "euclidean", **mapf_solver_config}
+    return summarize_solution(solution, solution_info, config, map_, bodies)
 
 
 def get_mapf_solver(mapf_solver_name:str) -> Tuple[CBS,Environment]:
@@ -192,10 +299,10 @@ def get_mapf_solver(mapf_solver_name:str) -> Tuple[CBS,Environment]:
         return LaCAM_random
     elif mapf_solver_name == "sipp":
         return SippPlanner
-    elif mapf_solver_name == "ccbs":
+    elif mapf_solver_name in ("ccbs", "iccbs"):
         return CCBS,CCBS_Environment
-    elif mapf_solver_name == "iccbs":
-        return ICCBS,CCBS_Environment
+    elif mapf_solver_name == "neural_attf":
+        return NeuralATTF, Simulation
     else:
         raise ValueError(f"Invalid algorithm: {mapf_solver_name}")
 
@@ -208,9 +315,9 @@ def computer_solution_cost(solution:dict):
     success = True if solution is not None and solution != {} and solution != False else False
     if success:
         for agent, path in solution.items():
-            path_array = np.array([list(p.values())[1:] for p in path]) # (N, 2)
+            path_array = np.array([_xyz(p) for p in path], dtype=float)  # (N, D): positions only, not yaw / pitch
             dist_travel = np.linalg.norm(path_array[1:] - path_array[:-1], axis=1) # (N-1,)
-            time_stamp = np.array([list(p.values())[0] for p in path]) # (N,)
+            time_stamp = np.array([p["t"] for p in path], dtype=float) # (N,)
             delta_time = np.diff(time_stamp) # (N-1,)
 
             wait_time = delta_time[dist_travel == 0]
@@ -243,17 +350,29 @@ def computer_solution_cost(solution:dict):
     all_cost_dict["success"] = success
     return cost_dict, all_cost_dict
 
-def check_solution_collision(solution,agent_radius,solution_info):
+def check_solution_collision(solution, agent_radius, solution_info, bodies=None, map_=None, require_success=True):
+    """``solution_info`` plus ``collision`` (and ``success`` False when there is one). Agents with bodies
+    (``bodies``: name -> ``Agent``) get the exact check (``check_collision_bodies``, with ``map_``'s sweep),
+    which uses the planners' own contact rule; point particles the disc check at ``agent_radius`` (none at
+    0). Only a successful solution is checked unless ``require_success`` is False."""
     solution_info_collision = solution_info.copy()
     solution_info_collision["collision"] = False
-    if agent_radius != 0 and solution_info["success"]:
+    if not solution or (require_success and not solution_info["success"]):
+        return solution_info_collision
+    if bodies:
+        collisions = check_collision_bodies(solution, bodies, map_, verbose=False)
+    elif agent_radius:
         collisions = check_collision(solution, agent_radius, verbose=False)
-        if collisions:
-            solution_info_collision["success"] = False
-            solution_info_collision["collision"] = True
+    else:
+        collisions = {}
+    if collisions:
+        solution_info_collision["success"] = False
+        solution_info_collision["collision"] = True
+        solution_info_collision["collisions"] = {f"{a}|{b}": float(t) if np.isscalar(t) else t
+                                                 for (a, b), t in collisions.items()}
     return solution_info_collision
 
-def summarize_solution(solution,solution_info,mapf_solver_config,map_):
+def summarize_solution(solution, solution_info, mapf_solver_config, map_, bodies=None):
     agent_cost, total_cost = computer_solution_cost(solution)
     summary = {}
     summary["schedule"] = solution
@@ -268,6 +387,8 @@ def summarize_solution(solution,solution_info,mapf_solver_config,map_):
     summary["heuristic_type"] = mapf_solver_config["heuristic_type"]
     if mapf_solver_config.get("low_level_astar_max_iterations") is not None:
         summary["low_level_astar_max_iterations"] = int(mapf_solver_config["low_level_astar_max_iterations"])
+    if bodies:                                   # each agent's body, for checking the schedule later
+        summary["agents"] = {name: body.to_dict() for name, body in bodies.items()}
     summary["num_nodes"] = len(map_.nodes)
     summary["num_edges"] = len(map_.edges)
     return summary
