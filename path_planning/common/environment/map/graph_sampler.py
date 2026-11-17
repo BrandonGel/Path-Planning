@@ -21,8 +21,9 @@ import pickle
 
 
 def _agent_fields(agents):
-    """``(shapes, max_speeds, max_rotations)`` lists of ``agents``."""
-    return [a.shape for a in agents], [a.max_speed for a in agents], [a.max_rotation for a in agents]
+    """``(shapes, max_speeds, max_rotations, clearances)`` lists of ``agents``."""
+    return ([a.shape for a in agents], [a.max_speed for a in agents], [a.max_rotation for a in agents],
+            [a.clearance for a in agents])
 
 
 class GraphSampler(GraphSamplerBase):
@@ -417,7 +418,9 @@ class GraphSampler(GraphSamplerBase):
         polytope sweep. A single move is a 2-point path; a wait a 1-point path with ``goal_hold`` (``inf``:
         it stays).
 
-        - ``agents``: one ``Agent`` (type) for all paths, or one per path; speed and turning come from it.
+        - ``agents``: one ``Agent`` (type) for all paths, or one per path; speed and turning come from it,
+          and its ``clearance`` expands its body radially (as does ``other``'s; with a clearance the
+          ``"minkowski"`` rule is not available and ``"radius"`` is used).
         - ``paths``: a list of ``(P, D)`` waypoint arrays.
         - ``t0``, ``goal_hold``, ``heading``, ``prev``, ``speed``: one value or one per path.
           ``heading``: a fixed attitude (an angle in 2D; a yaw or 3x3 rotation in 3D).
@@ -445,7 +448,8 @@ class GraphSampler(GraphSamplerBase):
         single_point = prev is not None and np.ndim(prev) == 1 and all(np.isscalar(x) for x in prev)
         prevs = [prev] * n if prev is None or single_point else list(prev)
         t0s, holds, heads, speeds = (_per_agent(x, n) for x in (t0, goal_hold, heading, speed))
-        movers = [a if sp is None else Agent(a.shape, sp, a.max_rotation, a.type) for a, sp in zip(agents, speeds)]
+        movers = [a if sp is None else Agent(a.shape, sp, a.max_rotation, a.type, a.clearance)
+                  for a, sp in zip(agents, speeds)]
         prevs = [None if q is None or a.max_rotation == 0 or tuple(map(float, q)) == tuple(p[0]) else
                  np.asarray(q, dtype=float) for q, a, p in zip(prevs, movers, paths)]
         # A path arriving from ``prev`` is swept with ``prev`` in front, started earlier by its travel time.
@@ -466,14 +470,14 @@ class GraphSampler(GraphSamplerBase):
         """``sweep_paths`` without ``prev``: one result per path, absolute times."""
         n = len(paths)
         backend, eps = self.collision_sweep, self.collision_sweep.STRICT_EPS
-        shapes, speeds, turns = _agent_fields(agents)
+        shapes, speeds, turns, buffers = _agent_fields(agents)
         grow = 0.0
         if isinstance(other, Agent):
             body = make_body(other.shape, self.dim)
-            if clearance == "minkowski" and body.ball_r <= 0:
+            if clearance == "minkowski" and body.ball_r <= 0 and not other.clearance and not any(buffers):
                 return body_roadmap_hits_minkowski(backend, paths, shapes, other.shape, speeds, t0s, turns,
                                                    holds, heads, eps, other_heading)
-            grow = body.radius
+            grow = body.radius + other.clearance
         elif other is not None:
             grow = float(other)
         ball_r = [make_body(sh, self.dim).ball_r for sh in shapes]
@@ -484,12 +488,12 @@ class GraphSampler(GraphSamplerBase):
             if not idx:
                 continue
             if is_ball:
-                res = _disc_sweep_paths(backend, take(paths), [ball_r[i] + grow for i in idx], take(speeds),
-                                        take(t0s), take(turns), take(holds))
+                res = _disc_sweep_paths(backend, take(paths), [ball_r[i] + buffers[i] + grow for i in idx],
+                                        take(speeds), take(t0s), take(turns), take(holds))
             else:
                 res = _assemble_hits(backend, len(idx), *body_roadmap_hits(
                     backend, take(paths), take(shapes), take(speeds), take(t0s), take(turns), take(holds),
-                    take(heads), eps, grow), True)
+                    take(heads), eps, [buffers[i] + grow for i in idx]), True)
             for i, r in zip(idx, res):
                 out[i] = r
         return out
@@ -502,9 +506,9 @@ class GraphSampler(GraphSamplerBase):
         as in ``sweep_paths``. Exact; no roadmap is needed."""
         paths = as_path_list(paths)
         agents = [agents] * len(paths) if isinstance(agents, Agent) else list(agents)
-        shapes, speeds, turns = _agent_fields(agents)
+        shapes, speeds, turns, buffers = _agent_fields(agents)
         return self.collision_sweep.agent_conflicts(paths, shapes, speeds, t0, turns, goal_hold, heading, pairs,
-                                                    first_only, as_arrays)
+                                                    first_only, as_arrays, buffers)
 
     def get_constraint_segment(self, p1a: Tuple[float, ...], p1b: Tuple[float, ...], p2a: Tuple[float, ...],
                                p2b: Tuple[float, ...], v=None, r: float = 0.5, agents=None, heading=None) -> bool:
@@ -527,7 +531,7 @@ class GraphSampler(GraphSamplerBase):
         waits = [a == b for a, b in moves]
         for i, (ag, w) in enumerate(zip(agents, waits)):
             if w and heads[i] is None and not ag.is_ball:
-                agents[i] = Agent(ag.radius, ag.max_speed, ag.max_rotation, ag.type)
+                agents[i] = Agent(ag.radius, ag.max_speed, ag.max_rotation, ag.type, ag.clearance)
         dur = [1.0 if ag.max_speed is None else float(np.linalg.norm(np.subtract(b, a))) / ag.max_speed
                for ag, (a, b), w in zip(agents, moves, waits) if not w]
         step = max(dur, default=1.0)

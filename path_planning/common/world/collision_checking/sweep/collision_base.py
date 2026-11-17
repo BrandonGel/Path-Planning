@@ -10,7 +10,7 @@ from __future__ import annotations
 import numpy as np
 
 from path_planning.common.world.collision_checking.sweep.disc_sweep import (
-    fold_directed_edges, sweep_paths, disc_agent_conflicts, as_path_list)
+    fold_directed_edges, sweep_paths, disc_agent_conflicts, as_path_list, per_agent)
 from path_planning.common.world.collision_checking.sweep.polytope_sweep import (
     body_agent_conflicts, make_body, shape_list)
 
@@ -95,14 +95,17 @@ class CollisionBase:
 
     @classmethod
     def agent_conflicts(cls, paths, shapes, velocity=None, t0=0.0, turning_speed=None, goal_hold=0.0,
-                        heading=None, pairs=None, first_only: bool = False, as_arrays: bool = False):
+                        heading=None, pairs=None, first_only: bool = False, as_arrays: bool = False,
+                        clearance=0.0):
         """When two agents' bodies overlap: ``{(i, j): [(t1, t2), ...]}`` with ``i < j``. ``first_only``:
         ``{(i, j): first contact time}``. ``as_arrays``: ``(i, j, t1, t2)`` arrays. ``pairs``: only check
         these agent pairs. No roadmap is needed; the dimension comes from the paths.
 
         ``shapes``: one or one per path, each a radius (disc / sphere) or a ``Shape`` (polygon / polyhedron).
-        ``heading``: one fixed attitude, or one per path (None: a move faces along itself). The other inputs
-        as in ``overlapping_interval_paths``; an agent exists from ``t0`` until it arrives, then for
+        ``heading``: one fixed attitude, or one per path (None: a move faces along itself).
+        ``clearance`` (one value or one per path): a buffer that expands each body radially; two agents
+        collide when closer than the sum of theirs. The other inputs as in
+        ``overlapping_interval_paths``; an agent exists from ``t0`` until it arrives, then for
         ``goal_hold``. All balls without a heading: the closed-form disc test (``disc_sweep``); otherwise
         the exact convex-piece test (``polytope_sweep``)."""
         paths = as_path_list(paths)
@@ -110,7 +113,8 @@ class CollisionBase:
             dim = np.asarray(paths[0]).shape[-1]
             ball_r = [make_body(s, dim).ball_r for s in shape_list(shapes, len(paths), dim)]
             if all(r > 0 for r in ball_r):
-                return disc_agent_conflicts(paths, ball_r, velocity, t0, turning_speed, goal_hold, pairs,
+                reach = [r + float(c) for r, c in zip(ball_r, per_agent(clearance, len(paths)))]
+                return disc_agent_conflicts(paths, reach, velocity, t0, turning_speed, goal_hold, pairs,
                                             first_only, as_arrays)
         return body_agent_conflicts(paths, shapes, velocity, t0, turning_speed, goal_hold, heading, pairs,
-                                    first_only, as_arrays, cls.STRICT_EPS)
+                                    first_only, as_arrays, cls.STRICT_EPS, clearance)
