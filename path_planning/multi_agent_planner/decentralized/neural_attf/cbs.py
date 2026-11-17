@@ -37,9 +37,6 @@ class Environment(EnvironmentBase):
         moving_obstacles: Optional[dict] = None,
         t: int = 0,
         astar_max_iterations: int = 10000,
-        radius: float = 0.0,
-        velocity: float = 0.0,
-        use_constraint_sweep: bool = True,
         heuristic_type: str = "euclidean",
         cost_map: CostMap = None,
         alpha: float = 0.001,
@@ -59,9 +56,6 @@ class Environment(EnvironmentBase):
             graph_map,
             agents,
             astar_max_iterations=astar_max_iterations,
-            radius=radius,
-            velocity=velocity,
-            use_constraint_sweep=use_constraint_sweep,
             heuristic_type=heuristic_type,
         )
         # Re-bind A* so its cached env references include our cost_map.
