@@ -12,8 +12,8 @@ from path_planning.common.environment.map.graph_sampler import GraphSampler
 from path_planning.multi_agent_planner.centralized.cbs.a_star import AStar
 from path_planning.multi_agent_planner.centralized.cbs.bodies import BodyConflicts
 from path_planning.multi_agent_planner.centralized.cbs.data_types import (   # noqa: F401  (the types are re-exported)
-    FREE, Conflict, Constraints, EdgeConstraint, HighLevelNode, Location, State, Step, VertexConstraint,
-    _make_ori, _turn_toward)
+    Conflict, Constraints, EdgeConstraint, HighLevelNode, Location, State, Step, VertexConstraint,
+    _make_ori, _turn_toward, start_heading)
 from path_planning.multi_agent_planner.centralized.cbs.routing import RoadmapCosts
 from path_planning.multi_agent_planner.data_type import HEURISTIC_TYPE
 
@@ -41,9 +41,10 @@ class Environment(BodyConflicts, RoadmapCosts):
       per time step: turning in place through an angle ``a`` takes ``ceil(a / max_rotation)`` steps, each
       at the same position with the heading ``max_rotation`` closer (15 degrees per step: 6 steps for a
       90 degree turn). The agent may stop part-way and wait. An agent moves only along the edge it faces, and turning in place to another edge's direction
-      takes one step, during which it is checked as its bounding ball. ``agents[i]["yaw"]`` (and
-      ``"pitch"`` in 3D, default 0) is the start heading in degrees; without it the agent leaves in any
-      direction. The plan gets ``yaw`` (and ``pitch`` in 3D) per step.
+      takes one step, during which it is checked as its bounding ball. The plan gets ``yaw`` (and ``pitch``
+      in 3D) per step.
+    - Start heading (every body): ``agents[i]["yaw"]`` (and ``"pitch"`` in 3D, default 0) in degrees when
+      given, else 0 (``(0, 0)`` in 3D). An agent that has to turn turns from it before its first move.
     - ``move_parked_agents`` (default True): an agent does not end its plan at its goal while a constraint
       still forbids it being or staying there; it moves off and comes back. This is the correct rule, and
       what makes point-agent searches optimal. False: its plan ends the first time it reaches the goal,
@@ -86,7 +87,7 @@ class Environment(BodyConflicts, RoadmapCosts):
         self._turn_rates = {name: self._turn_rate_of(body) for name, body in bodies.items()}   # degrees per step; None: instant
         if self.has_bodies:
             self.graph_map.set_collision_sweep()
-        self._start_ori = {}                 # agent -> its given start heading (make_agent_dict)
+        self._start_ori = {}                 # agent with a body -> its start heading (make_agent_dict)
         self._regions = {}                   # (parked step, other body) -> (vertices, edges) it keeps out of
 
         # Roadmap distances (RoadmapCosts).
@@ -107,16 +108,16 @@ class Environment(BodyConflicts, RoadmapCosts):
 
     def get_neighbors(self, state):
         """The states one step after ``state`` for ``current_agent``: wait; move along a roadmap edge (an
-        agent with a heading only along the edge it faces, any edge while ``FREE``); turn in place towards
+        agent with a heading only along the edge it faces); turn in place towards
         another edge, by at most its turning rate (``turn_rate``) per step."""
         t, ori = state.time + 1, state.ori
         steps = [State(t, state.location, ori)]
         turns = {}                                               # an ordered set of the headings one turn step away
-        rate = self.turn_rate(self.current_agent) if ori is not None and ori != FREE else None
+        rate = self.turn_rate(self.current_agent) if ori is not None else None
         for _, location, facing in self._moves_from(state.location.point):
             if ori is None:
                 steps.append(State(t, location))
-            elif ori == FREE or ori == facing:
+            elif ori == facing:
                 steps.append(State(t, location, facing))
             else:
                 turns.setdefault(_turn_toward(ori, facing, rate))
@@ -253,10 +254,10 @@ class Environment(BodyConflicts, RoadmapCosts):
         self._start_ori = {}
         for agent in self.agents:
             name = agent['name']
-            if agent.get('yaw') is not None and self.agent_type(name) is not None:
-                self._start_ori[name] = _make_ori(agent['yaw'], agent.get('pitch', 0.0) if len(agent['start']) == 3 else None)
-            # An agent that has to turn carries its heading in its state: the given one, or free to leave any way.
-            ori = self._start_ori.get(name, FREE) if self.has_orientation(name) else None
+            if self.agent_type(name) is not None:            # a body starts with the given heading, else 0
+                self._start_ori[name] = start_heading(agent)
+            # An agent that has to turn carries its heading in its state.
+            ori = self._start_ori[name] if self.has_orientation(name) else None
             self.agent_dict[name] = {'start': State(t, Location(agent['start']), ori), 'goal': State(t, Location(agent['goal']))}
 
     def compute_solution(self):

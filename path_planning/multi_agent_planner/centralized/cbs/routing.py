@@ -4,7 +4,7 @@ import heapq
 from math import fabs
 
 from path_planning.multi_agent_planner.centralized.cbs.data_types import (
-    FREE, Location, State, _ori_between, _turn_steps)
+    Location, State, _ori_between, _turn_steps)
 from path_planning.multi_agent_planner.data_type import HEURISTIC_TYPE
 
 
@@ -136,7 +136,7 @@ class RoadmapCosts:
             return 0.0
         rate = self.turn_rate(agent_name)
         dist = self._turn_distance_map(goal, rate)
-        costs = [dist[(u, facing)] + (0 if ori == FREE else _turn_steps(ori, facing, rate))
+        costs = [dist[(u, facing)] + _turn_steps(ori, facing, rate)
                  for _, facing, _ in self._roadmap_links()[0][u] if (u, facing) in dist]
         return min(costs, default=None)
 

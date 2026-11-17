@@ -5,7 +5,7 @@ import time
 from itertools import count
 
 from path_planning.multi_agent_planner.centralized.cbs.data_types import (
-    FREE, Constraints, EdgeConstraint, Location, State, VertexConstraint, _turn_toward)
+    Constraints, EdgeConstraint, Location, State, VertexConstraint, _turn_toward)
 
 
 def _balls_collide(p, q, u, v, reach: float) -> bool:
@@ -107,7 +107,7 @@ class JointSearch:
                     opts.append((locs[i], False, 1.0))
                 turns = {}                                       # an ordered set of the headings one turn step away
                 for q, _, facing in self._moves_from(p):
-                    if ori is None or ori == FREE or ori == facing:      # it moves only the way it faces
+                    if ori is None or ori == facing:                     # it moves only the way it faces
                         if allowed(cons[i], t, p, q):
                             opts.append(((q, None if ori is None else facing), False,
                                          float(self.graph_map.get_distance(p, q))))

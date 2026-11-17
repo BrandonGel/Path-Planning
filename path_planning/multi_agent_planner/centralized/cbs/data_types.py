@@ -26,19 +26,21 @@ class Location(object):
         return Location(tuple(self.point + other.point))
 
 #: ``State.ori`` of an agent that has a heading but has not taken one yet (it may leave in any direction).
-FREE = "free"
-
-
-def _is_set(ori) -> bool:
-    """Whether ``ori`` is an actual heading (not None: no heading; not ``FREE``: none taken yet)."""
-    return ori is not None and ori != FREE
-
-
 def _make_ori(yaw, pitch=None):
     """A ``State.ori`` from degrees: the yaw in ``[0, 360)``, or ``(yaw, pitch)`` in 3D. Every heading is
     built here, so headings from edges and from the agents' start values compare equal."""
     yaw = round(float(yaw) % 360.0, 6) % 360.0
     return yaw if pitch is None else (yaw, round(float(pitch), 6))
+
+
+def start_heading(agent: dict):
+    """An agent dict's start heading as a ``State.ori``: its ``yaw`` (and ``pitch`` in 3D, default 0) in
+    degrees when given, else 0 (``(0, 0)`` in 3D)."""
+    three_d = len(agent["start"]) == 3
+    yaw = agent.get("yaw")
+    if yaw is None:
+        return _make_ori(0.0, 0.0 if three_d else None)
+    return _make_ori(yaw, (agent.get("pitch") or 0.0) if three_d else None)
 
 
 @lru_cache(maxsize=1 << 18)
@@ -116,7 +118,7 @@ Step = namedtuple("Step", "agent body a b heading turning oriented")
 
 class State(object):
     """``ori``: the agent's heading, in degrees in 2D (``[0, 360)``, counterclockwise from +x) and
-    ``(yaw, pitch)`` degrees in 3D; ``FREE`` before it is set; None for an agent without a heading."""
+    ``(yaw, pitch)`` degrees in 3D; None for an agent without a heading."""
     def __init__(self, time, location, ori=None):
         self.time = time
         self.location = location

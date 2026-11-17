@@ -7,7 +7,7 @@ import numpy as np
 
 from path_planning.agent import Agent
 from path_planning.multi_agent_planner.centralized.cbs.data_types import (
-    Conflict, Location, Step, _bounding_ball, _heading_of, _is_set, _ori_between)
+    Conflict, Location, Step, _bounding_ball, _heading_of, _ori_between)
 from path_planning.multi_agent_planner.sweep_cache import shared_sweep_cache
 
 
@@ -56,18 +56,15 @@ class BodyConflicts:
 
         - An agent that has to turn: its planned heading.
         - One that turns instantly: the direction of the move it last made.
-        - Before its first move: its start heading (``agents[i]["yaw"]``) when given, else the direction of
-          that first move; 0 for an agent that never moves and was given none."""
+        - Before its first move: its start heading (``agents[i]["yaw"]`` when given, else 0)."""
         if self.agent_type(name) is None:
             return [None] * len(points)
         moves = [_ori_between(points[k - 1], points[k]) if points[k] != points[k - 1] else None
                  for k in range(1, len(points))]
-        last = self._start_ori.get(name)
-        if last is None:
-            last = next((m for m in moves if m is not None), 0.0 if len(points[0]) == 2 else (0.0, 0.0))
+        last = self._start_ori[name]
         shown = []
         for k, ori in enumerate(oris):
-            if _is_set(ori):
+            if ori is not None:
                 last = ori
             elif ori is None and k and moves[k - 1] is not None:      # an instant turn, on leaving
                 last = moves[k - 1]

@@ -6,7 +6,7 @@ description: This file implements the Conflict-based search algorithm for multi-
 """
 
 from path_planning.multi_agent_planner.centralized.cbs.cbs import (
-    Environment, Constraints, HighLevelNode, CBS, Conflict, State, Location, VertexConstraint, EdgeConstraint, FREE)
+    Environment, Constraints, HighLevelNode, CBS, Conflict, State, Location, VertexConstraint, EdgeConstraint)
 from path_planning.multi_agent_planner.centralized.icbs.meta_agents import JointSearch
 import heapq
 import time
