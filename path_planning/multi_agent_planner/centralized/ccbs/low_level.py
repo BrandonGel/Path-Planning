@@ -88,9 +88,7 @@ class SIPP:
         the span to open when it may). Returns the nodes found."""
         env, tick, push, pop = self.env, count(), heapq.heappush, heapq.heappop
         succ, h = env.successors(agent), env.time_to(agent, target)
-        unsafe, headed, facing, by_source = con.unsafe, con.headed, env.facing, {}
-        for (u, v), w in con.windows.items():                   # forbidden departure windows by source vertex
-            by_source.setdefault(u, {})[v] = w
+        unsafe, headed, facing = con.unsafe, con.unsafe_facing, env.facing    # (headed: vertices with heading bans)
         if span is None:
             t1, t2, wanted = 0.0, INF, 1
         else:
@@ -131,7 +129,7 @@ class SIPP:
             if len(best) > self.max_expansions:
                 self.timed_out = True
                 return []
-            leaving = by_source.get(here)
+            leaving = con.windows.get(here)             # forbidden departure windows from here
             for v, dur in succ[here]:
                 h_v = h[v]
                 if h_v == INF:
@@ -171,12 +169,12 @@ class SIPP:
         """A landmark: from the nodes ``ends`` (at ``a``, inside the landmark's window), start ``a -> b``
         before ``t2``. Returns the arrival nodes at ``b``, the earliest per safe interval of ``b``."""
         dur = self.env.duration(agent, self.env.length[(a, b)])
-        f_b = self.env.facing[(a, b)] if b in con.headed else None
+        f_b = self.env.facing[(a, b)] if b in con.unsafe_facing else None
         arrivals = {}
         for end in ends:
             for lo, hi in con.safe_intervals(b, f_b):
                 leave = max(end.g, lo - dur)
-                for w1, w2 in con.windows.get((a, b), ()):
+                for w1, w2 in con.windows.get(a, {}).get(b, ()):
                     if w1 - EPS < leave < w2 - EPS:
                         leave = w2
                 if leave > end.hi + EPS or leave >= t2 - EPS or leave + dur > hi + EPS:

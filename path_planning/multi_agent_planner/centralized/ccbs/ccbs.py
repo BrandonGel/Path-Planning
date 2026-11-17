@@ -41,7 +41,7 @@ class Environment(RoadmapCosts, ContinuousConflicts):
         missing = [a["name"] for a in agents if a.get("agent") is None]
         if missing:
             raise ValueError(f'CCBS: every agent dict needs an "agent" (an Agent); missing for {missing}')
-        self.graph_map, self.agents, self.precision = graph_map, agents, float(precision)
+        self.graph_map, self.precision = graph_map, float(precision)
         # Turns are instant here, so the bodies carry no turning rate.
         self.bodies = {a["name"]: Agent(a["agent"].shape, a["agent"].max_speed, None, a["agent"].type, a["agent"].clearance)
                        for a in agents}
@@ -135,7 +135,7 @@ class CCBS:
         started = time.time()
         self._stop_at = started + self.time_limit
         self._ids, self._generated, self._capped = count(1), 0, 0
-        self._branched = {"cardinal": 0, "semi_cardinal": 0, "non_cardinal": 0}
+        self._branched = dict.fromkeys(self.KINDS, 0)
         expanded_before, iterations, solved, open_list = sipp.expanded, 0, None, []
 
         root = CTNode()
@@ -159,13 +159,13 @@ class CCBS:
             replans = self._replans(node, conflict)
             if time.time() >= self._stop_at:
                 break
-            (a1, (c1, path1, cost1)), (a2, (c2, path2, cost2)) = replans.items()
             positive = {}                                # agent whose child also gets a landmark -> the landmark
             if self.disjoint:
-                landmark = self._landmark(node, conflict, replans)
+                landmark = self._landmark(node, replans)
                 if landmark is not None:                 # the child that constrains the other agent carries it
+                    a1, a2 = replans
                     positive[a2 if landmark.agent == a1 else a1] = landmark
-            for agent, constraint, path, cost in ((a1, c1, path1, cost1), (a2, c2, path2, cost2)):
+            for agent, (constraint, path, cost, _) in replans.items():
                 if path is None:
                     continue
                 child = CTNode(node, constraint, positive.get(agent))
@@ -173,9 +173,8 @@ class CCBS:
                 child.cost = node.cost + cost - node.cost_of(agent)
                 if not self._consistent(child):
                     continue
-                child.cardinal = [c for c in node.cardinal if agent not in (c.agent_1, c.agent_2)]
-                child.semi_cardinal = [c for c in node.semi_cardinal if agent not in (c.agent_1, c.agent_2)]
-                child.non_cardinal = [c for c in node.non_cardinal if agent not in (c.agent_1, c.agent_2)]
+                for kind in self.KINDS:                  # the other agents' conflicts carry over
+                    setattr(child, kind, [c for c in getattr(node, kind) if agent not in (c.agent_1, c.agent_2)])
                 if self._add_conflicts(child, env.find_conflicts(child.all_paths(), only=agent)):
                     self._push(open_list, child)
         if self.verbose:
@@ -197,12 +196,12 @@ class CCBS:
     # ------------------------------------------------------------------ conflicts
     def _replans(self, node, conflict) -> dict:
         """For each agent of ``conflict``: ``(its constraint, its new path under its constraints in
-        ``node`` plus that one, the path's cost)``; the path is None when there is none. Kept on the
-        conflict and reused while the agent's constraints are the ones it was planned under."""
+        ``node`` plus that one, the path's cost, how many constraints it had)``; the path is None when
+        there is none. Kept on the conflict and reused while the agent's constraints are the ones it was
+        planned under."""
         moves = {conflict.agent_1: (conflict.move_1, conflict.agent_2, conflict.move_2),
                  conflict.agent_2: (conflict.move_2, conflict.agent_1, conflict.move_1)}
-        kept = conflict.replans or {}
-        result, fresh = {}, {}
+        kept, fresh = conflict.replans or {}, {}
         for agent, (move, other, other_move) in moves.items():
             held = node.constraints_of(agent)
             if agent in kept and kept[agent][3] == len(held):
@@ -211,9 +210,8 @@ class CCBS:
                 constraint = self.env.constraint_for(agent, move, other, other_move, conflict.t)
                 path, cost = self._plan(agent, held + [constraint])
                 fresh[agent] = (constraint, path, cost, len(held))
-            result[agent] = fresh[agent][:3]
         conflict.replans = fresh
-        return result
+        return fresh
 
     def _add_conflicts(self, node, conflicts) -> bool:
         """File ``conflicts`` under the node's lists (by kind with ``use_cardinal``). False: one of them
@@ -225,7 +223,7 @@ class CCBS:
             replans = self._replans(node, conflict)
             if time.time() >= self._stop_at:
                 return True                              # out of time: the search loop stops next
-            rises = [None if path is None else cost - node.cost_of(agent) for agent, (_, path, cost) in replans.items()]
+            rises = [None if path is None else cost - node.cost_of(agent) for agent, (_, path, cost, _) in replans.items()]
             if rises[0] is None and rises[1] is None:
                 return False
             possible = [r for r in rises if r is not None]
@@ -238,11 +236,13 @@ class CCBS:
                 node.non_cardinal.append(conflict)
         return True
 
-    @staticmethod
-    def _pick(node):
+    KINDS = ("cardinal", "semi_cardinal", "non_cardinal")
+
+    @classmethod
+    def _pick(cls, node):
         """The conflict to branch on: a cardinal one if any, else semi-cardinal, else any; among those the
         largest ``overcost``, then the latest (as the reference implementation does)."""
-        for kind in ("cardinal", "semi_cardinal", "non_cardinal"):
+        for kind in cls.KINDS:
             conflicts = getattr(node, kind)
             if conflicts:
                 return max(conflicts, key=lambda c: (c.overcost, c.t)), kind
@@ -278,12 +278,12 @@ class CCBS:
         return known
 
     # ------------------------------------------------------------------ disjoint splitting
-    def _landmark(self, node, conflict, replans):
+    def _landmark(self, node, replans):
         """The positive constraint for this split, or None: one agent has to start its move inside its
         unsafe window (it does so now, so it is not replanned). Chosen as in the reference implementation:
         agent 1 when agent 2 already has more landmarks, else agent 2, else agent 1; never for a wait, for
         an agent that could not give way, or a window nested with one of its landmarks."""
-        (a1, (c1, path1, _)), (a2, (c2, path2, _)) = replans.items()
+        (a1, (c1, path1, *_)), (a2, (c2, path2, *_)) = replans.items()
         held = {a: [c for c in node.constraints_of(a) if c.positive] for a in (a1, a2)}
 
         def usable(agent, constraint, path):

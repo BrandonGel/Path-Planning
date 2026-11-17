@@ -7,10 +7,12 @@ from itertools import combinations
 
 import numpy as np
 
+from path_planning.common.world.collision_checking.sweep.disc_sweep import _ball_pair_windows
 from path_planning.multi_agent_planner.centralized.cbs.data_types import _heading_of
 from path_planning.multi_agent_planner.centralized.ccbs.data_types import EPS, INF, Conflict, Constraint, Move
 
 _UNKNOWN = object()      # not in the pair cache yet
+_PAIR_A, _PAIR_B = np.array([0], dtype=np.int64), np.array([1], dtype=np.int64)     # one pair: pieces 0 and 1
 
 
 class ContinuousConflicts:
@@ -18,17 +20,20 @@ class ContinuousConflicts:
     ``start_ori``, ``endpoints``, ``precision``, ``cache``, ``_moves`` and ``_pairs``."""
 
     STRICT_EPS = 1e-9        # as the map's collision tests: bodies closer than their reach less this collide
-    use_closed_form = True   # two balls: first contact in closed form instead of the map's disc test
 
     # ------------------------------------------------------------------ a path as timed moves
     def moves_of(self, agent, path) -> list:
         """``path`` as ``Move``s: its moves and waits, then the stay at its last vertex for good. A body
         that is not a ball keeps, while waiting, the heading of its last move (before its first move: its
         start heading, given or 0). Remembered per path."""
+        return self._moves_entry(agent, path)[0]
+
+    def _moves_entry(self, agent, path):
+        """``(moves_of(agent, path), the moves as arrays: start point, velocity, start and end time)``."""
         path = path if isinstance(path, tuple) else tuple(map(tuple, path))
         known = self._moves.get((agent, path))
         if known is not None:
-            return known[0]
+            return known
         facing = None if self.bodies[agent].is_ball else self.start_ori[agent]
         moves = []
         for (u, t1), (v, t2) in zip(path, path[1:]):
@@ -47,13 +52,8 @@ class ContinuousConflicts:
         velocity = np.where(a == b, 0.0, (b - a) / np.maximum(span, 1e-12))
         if len(self._moves) > 200_000:
             self._moves.clear()
-        self._moves[(agent, path)] = (moves, (a, velocity, t1, t2))
-        return moves
-
-    def _move_arrays(self, agent, path):
-        path = path if isinstance(path, tuple) else tuple(map(tuple, path))
-        self.moves_of(agent, path)
-        return self._moves[(agent, path)][1]
+        entry = self._moves[(agent, path)] = (moves, (a, velocity, t1, t2))
+        return entry
 
     def _piece(self, agent, move: Move, t1=None):
         """``move`` as an ``agent_conflicts`` piece ``(body, path, t0, hold, heading)``, started at ``t1``
@@ -108,8 +108,9 @@ class ContinuousConflicts:
         involved = sorted({k for pair in pairs for k in pair})
         moves, arrays = [], []
         for k in involved:
-            moves.extend(self.moves_of(names[k], paths[names[k]]))
-            arrays.append(self._move_arrays(names[k], paths[names[k]]))
+            agent_moves, agent_arrays = self._moves_entry(names[k], paths[names[k]])
+            moves.extend(agent_moves)
+            arrays.append(agent_arrays)
         counts = [len(arr[0]) for arr in arrays]
         owner = np.repeat(involved, counts)
         start, velocity, t1, t2 = (np.concatenate(part) for part in zip(*arrays))
@@ -137,7 +138,7 @@ class ContinuousConflicts:
         at[moving] = np.clip(-np.einsum("ij,ij->i", w[moving], v[moving]) / vv[moving], 0.0, (hi - lo)[moving])
         gap = w + v * at[:, None]
         close = np.einsum("ij,ij->i", gap, gap) < (reach[i] + reach[j] + 1e-6) ** 2
-        i, j, lo, hi, w, v, vv = i[close], j[close], lo[close], hi[close], w[close], v[close], vv[close]
+        i, j = i[close], j[close]
         if not len(i):
             return {}
         first = {}
@@ -149,24 +150,15 @@ class ContinuousConflicts:
             if key not in first or t < first[key][0]:
                 first[key] = (t, moves[p], moves[q])
 
-        # Two balls: the overlap window in closed form, as the map's disc test computes it (each radius
-        # less STRICT_EPS / 2, and only a window longer than 1e-12 counts, so touching is not contact).
-        ball = np.array([self.use_closed_form and self.bodies[name].is_ball for name in names])
+        # Two balls: the overlap window in closed form, with the map's own disc test (each radius less
+        # STRICT_EPS / 2, and only a window longer than 1e-12 counts, so touching is not contact).
+        ball = np.array([self.bodies[name].is_ball for name in names])
         balls = ball[owner[i]] & ball[owner[j]]
         if balls.any():
-            R = reach[i[balls]] + reach[j[balls]] - self.STRICT_EPS
-            wb, vb, aa, T = w[balls], v[balls], vv[balls], (hi - lo)[balls]
-            bb = 2.0 * np.einsum("ij,ij->i", wb, vb)
-            cc = np.einsum("ij,ij->i", wb, wb) - R * R
-            disc = bb * bb - 4.0 * aa * cc
-            still = aa == 0.0
-            with np.errstate(divide="ignore", invalid="ignore"):
-                q = np.sqrt(np.maximum(disc, 0.0))
-                start = np.where(still, 0.0, np.maximum((-bb - q) / (2.0 * aa), 0.0))
-                end = np.where(still, T, np.minimum((-bb + q) / (2.0 * aa), T))
-            hit = np.where(still, cc < 0.0, disc > 0.0) & (end - start > 1e-12)
-            for p, q_, t in zip(i[balls][hit].tolist(), j[balls][hit].tolist(), (lo[balls] + start)[hit].tolist()):
-                keep(p, q_, t)
+            bi, bj = i[balls], j[balls]
+            hit, contact, _ = _ball_pair_windows(bi, bj, t1, t2, start, velocity, reach - 0.5 * self.STRICT_EPS)
+            for p, q, t in zip(bi[hit].tolist(), bj[hit].tolist(), contact[hit].tolist()):
+                keep(p, q, t)
             i, j = i[~balls], j[~balls]
             if not len(i):
                 return first
@@ -217,7 +209,7 @@ class ContinuousConflicts:
             while hi - lo > self.precision:
                 mid = 0.5 * (lo + hi)
                 if balls:
-                    hit = self._balls_meet(move, mid, other_move, ahead, mine.reach + theirs.reach)
+                    hit = self._balls_meet(agent, move, mid, other, other_move, ahead)
                 else:
                     hit = len(self._overlaps([self._piece(agent, move, mid), fixed])[0]) > 0
                 lo, hi = (mid, hi) if hit else (lo, mid)
@@ -226,18 +218,12 @@ class ContinuousConflicts:
         delay = max(self.cache.get_or_compute(key, first_safe_start), self.precision)
         return Constraint(agent, move.a, move.b, move.t1, move.t1 + delay)
 
-    def _balls_meet(self, m1: Move, s1: float, m2: Move, s2: float, reach: float) -> bool:
-        """Whether two balls with radii summing to ``reach`` overlap when ``m1`` starts at ``s1`` and ``m2``
-        at ``s2`` (each keeping its duration; a ball is gone once its move ends)."""
-        d1, d2 = m1.t2 - m1.t1, m2.t2 - m2.t1
-        lo, hi = max(s1, s2), min(s1 + d1, s2 + d2)
-        if hi - lo <= EPS:
-            return False
-        a1, a2 = self.xyz[m1.a], self.xyz[m2.a]
-        v1 = (self.xyz[m1.b] - a1) / d1 if not m1.is_wait else 0.0 * a1
-        v2 = (self.xyz[m2.b] - a2) / d2 if not m2.is_wait else 0.0 * a2
-        w, v = (a2 + v2 * (lo - s2)) - (a1 + v1 * (lo - s1)), v2 - v1
-        vv = float(v @ v)
-        at = 0.0 if vv < 1e-18 else min(max(-float(w @ v) / vv, 0.0), hi - lo)
-        gap = w + v * at
-        return float(gap @ gap) < (reach - 1e-9) ** 2
+    def _balls_meet(self, agent, m1: Move, s1: float, other, m2: Move, s2: float) -> bool:
+        """Whether the balls of ``agent`` and ``other`` overlap when ``m1`` starts at ``s1`` and ``m2`` at
+        ``s2`` (each keeping its duration; a ball is gone once its move ends), by the map's disc test."""
+        x0 = self.xyz[[m1.a, m2.a]]
+        span = np.array([m1.t2 - m1.t1, m2.t2 - m2.t1])
+        velocity = np.where(span[:, None] > 0.0, (self.xyz[[m1.b, m2.b]] - x0) / np.maximum(span, 1e-300)[:, None], 0.0)
+        rad = np.array([self.bodies[agent].reach, self.bodies[other].reach]) - 0.5 * self.STRICT_EPS
+        w0 = np.array([s1, s2])
+        return bool(_ball_pair_windows(_PAIR_A, _PAIR_B, w0, w0 + span, x0, velocity, rad)[0][0])

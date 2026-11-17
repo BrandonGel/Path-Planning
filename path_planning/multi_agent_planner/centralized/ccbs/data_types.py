@@ -64,30 +64,28 @@ class Constraints:
     """One agent's constraints, as the low-level search reads them:
 
     - ``unsafe[v]``: when it may not be at vertex ``v`` whatever its heading (sorted, disjoint);
-    - ``unsafe_facing[(v, facing)]``: when it may not be at ``v`` facing that way (sorted, disjoint);
-      ``headed``: the vertices that have any;
-    - ``windows[(a, b)]``: when it may not start the move ``a -> b`` (sorted, disjoint);
+    - ``unsafe_facing[v][facing]``: when it may not be at ``v`` facing that way (sorted, disjoint);
+    - ``windows[a][b]``: when it may not start the move ``a -> b`` (sorted, disjoint);
     - ``landmarks``: the moves it has to make, as ``(t1, t2, a, b)`` ordered by ``t1``."""
 
     def __init__(self, constraints=()):
-        self.unsafe, self.unsafe_facing, self.headed, self.windows, self.landmarks = {}, {}, set(), {}, []
+        self.unsafe, self.unsafe_facing, self.windows, self.landmarks = {}, {}, {}, []
         for c in constraints:
             if c.positive:
                 insort(self.landmarks, (c.t1, c.t2, c.a, c.b))
             elif c.is_wait and c.facing is not None:
-                merge_interval(self.unsafe_facing.setdefault((c.a, c.facing), []), c.t1, c.t2)
-                self.headed.add(c.a)
+                merge_interval(self.unsafe_facing.setdefault(c.a, {}).setdefault(c.facing, []), c.t1, c.t2)
             elif c.is_wait:
                 merge_interval(self.unsafe.setdefault(c.a, []), c.t1, c.t2)
             else:
-                merge_interval(self.windows.setdefault((c.a, c.b), []), c.t1, c.t2)
+                merge_interval(self.windows.setdefault(c.a, {}).setdefault(c.b, []), c.t1, c.t2)
 
     def safe_intervals(self, v, facing=None) -> list:
         """When the agent may be at ``v`` (facing ``facing``, when given): the gaps between its unsafe
         intervals over ``[0, inf)``."""
         unsafe = self.unsafe.get(v, ())
-        if facing is not None and v in self.headed:
-            headed = self.unsafe_facing.get((v, facing))
+        if facing is not None and v in self.unsafe_facing:
+            headed = self.unsafe_facing[v].get(facing)
             if headed:
                 unsafe = sorted(list(unsafe) + headed)
         safe, start = [], 0.0
