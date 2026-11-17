@@ -14,12 +14,27 @@ from path_planning.multi_agent_planner.decentralized.neural_attf.simulation impo
 from path_planning.utils.checker import _xyz, check_collision, check_collision_bodies
 from path_planning.utils.util import agents_yaml_to_roadmap_frame
 
+#: The solvers ``solve_mapf`` runs (``neural_attf`` is a MAPD planner: see ``solve_mapd``).
+MAPF_SOLVERS = ("cbs", "icbs", "ccbs", "sipp", "lacam", "lacam_random")
 #: Solvers that take ``Agent`` bodies from the agent dicts.
 BODY_SOLVERS = ("cbs", "icbs", "ccbs", "sipp", "neural_attf")
 #: Solvers restricted to point particles (agent_radius 0, no ``"agent"``): LaCAM.
 POINT_SOLVERS = ("lacam", "lacam_random")
 #: Of the body solvers, the ones that plan in continuous time: their bodies also carry the speed.
 TIMED_SOLVERS = ("ccbs", "sipp", "neural_attf")
+
+
+def solver_supports(mapf_solver_name: str, agent_radius: float, agent_velocity: float, road_map_type: str) -> bool:
+    """Whether ``mapf_solver_name`` can run this setting, so batch scripts can skip the ones it cannot:
+    LaCAM plans point particles on a grid in unit steps; CBS / ICBS plan in unit steps (no velocity);
+    CCBS needs a body."""
+    if mapf_solver_name in POINT_SOLVERS:
+        return agent_radius == 0.0 and agent_velocity == 0.0 and road_map_type == "grid"
+    if mapf_solver_name in ("cbs", "icbs"):
+        return agent_velocity == 0.0
+    if mapf_solver_name == "ccbs":
+        return agent_radius > 0.0
+    return True
 
 
 def config_agent(mapf_solver_config: dict, mapf_solver_name: str):

@@ -52,10 +52,11 @@ from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import dijkstra as _csgraph_dijkstra
 
 from path_planning.cluster.kmeans.graph_kmeans import (
-    build_symmetric_adjacency,
+    has_roadmap,
     multi_source_dijkstra,
+    roadmap_adjacency,
+    symmetric_roadmap_edges,
 )
-from path_planning.common.environment.node import Node
 
 logger = logging.getLogger(__name__)
 
@@ -163,7 +164,7 @@ class GraphEM:
             raise ValueError(f"time_limit must be > 0, got {time_limit}")
         self.time_limit = None if time_limit is None else float(time_limit)
         self.timed_out_ = False
-        if not getattr(graph_map, "nodes", None) or not getattr(graph_map, "road_map", None):
+        if not has_roadmap(graph_map):
             raise ValueError(
                 "graph_map has no roadmap; generate one first "
                 "(e.g. generateRandomNodes + generate_roadmap)"
@@ -177,14 +178,14 @@ class GraphEM:
         self.min_sigma = (
             float(min_sigma)
             if min_sigma is not None
-            else float(getattr(graph_map, "resolution", 1.0))
+            else float(graph_map.resolution)
         )
         if self.min_sigma <= 0.0:
             raise ValueError(f"min_sigma must be > 0, got {self.min_sigma}")
         self.dup_radius = (
             float(dup_radius)
             if dup_radius is not None
-            else float(getattr(graph_map, "resolution", 1.0))
+            else float(graph_map.resolution)
         )
         if self.dup_radius < 0.0:
             raise ValueError(f"dup_radius must be >= 0, got {self.dup_radius}")
@@ -198,19 +199,11 @@ class GraphEM:
         self.patience = None if patience is None else int(patience)
 
         self._points = np.asarray([n.current for n in graph_map.nodes], dtype=float)
-        self._adj = build_symmetric_adjacency(
-            self._points,
-            graph_map.road_map,
-            getattr(graph_map, "road_map_edge_weights", None),
-        )
+        self._adj = roadmap_adjacency(graph_map)
         # CSR mirror of the (symmetric) adjacency for scipy's batched C
         # Dijkstra; distances are identical to the Python implementation.
-        rows, cols, vals = [], [], []
-        for u, nbrs in enumerate(self._adj):
-            for v, w in nbrs:
-                rows.append(u); cols.append(v); vals.append(w)
-        self._csr = csr_matrix((vals, (rows, cols)),
-                               shape=(len(self._points), len(self._points)))
+        n, rows, cols, vals = symmetric_roadmap_edges(graph_map)
+        self._csr = csr_matrix((vals, (rows, cols)), shape=(n, n))
         self._kd_tree = None
 
         n = len(self._points)
@@ -350,17 +343,13 @@ class GraphEM:
                 raise IndexError(f"endpoint node index {idx} out of range")
             return idx
         coord = tuple(endpoint)
-        node = Node(coord, None, 0, 0)
         idx = self.map.pos_index_dict.get(coord)
         if idx is not None:
             return int(idx)
         if self._kd_tree is None:
-            tree = getattr(self.map, "sample_kd_tree", None)
-            if tree is None:
-                from scipy.spatial import cKDTree
+            from scipy.spatial import cKDTree
 
-                tree = cKDTree(self._points)
-            self._kd_tree = tree
+            self._kd_tree = cKDTree(self._points)
         _, nn = self._kd_tree.query(np.asarray(coord, dtype=float))
         return int(nn)
 

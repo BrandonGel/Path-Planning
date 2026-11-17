@@ -214,35 +214,25 @@ class NodeSampler:
     def load_state_dict(self, state: dict) -> List[Node]:
         """Restore a ``state_dict`` snapshot: replaces every node and kind
         index (the Halton sequence restarts) and overlays the stored
-        ``sampling_dist_dict``. Unknown kinds are ignored; a missing
-        ``clearance`` is re-read from the map's ``inflated_esdf``."""
+        ``sampling_dist_dict``. Unknown kinds are ignored."""
         self.reset()
-        self.set_sampling_dist_dict(state.get("sampling_dist_dict"))
-        pos_index_dict = None
-        if "pos_index_dict" in state:
-            # Node i is the key whose value is i; the indices must be exactly 0..N-1.
-            pos_index_dict = dict(state["pos_index_dict"])
-            n = len(pos_index_dict)
-            values = np.fromiter(pos_index_dict.values(), dtype=np.int64, count=n)
-            if not (np.array_equal(np.sort(values), np.arange(n))):
-                raise ValueError("load_state_dict: pos_index_dict indices are not a contiguous 0..N-1 range")
-            keys = np.array(list(pos_index_dict), dtype=np.float64).reshape(n, self.dim)
-            pts = np.empty_like(keys)
-            pts[values] = keys                      # row i <- the key whose index is i (no Python-level sort)
-        else:                                       # earlier snapshots stored the array itself
-            pts = np.asarray(state["positions"], dtype=np.float64).reshape(-1, self.dim)
-        clearance = state.get("clearance")
-        if clearance is None or len(clearance) != len(pts):
-            cells = self.path_world_to_map(pts) if len(pts) else np.zeros((0, self.dim), dtype=np.int64)
-            clearance = self.inflated_esdf[tuple(cells.T)] if len(pts) else np.zeros(0)
+        self.set_sampling_dist_dict(state["sampling_dist_dict"])
+        # Node i is the key whose value is i; the indices must be exactly 0..N-1.
+        pos_index_dict = dict(state["pos_index_dict"])
+        n = len(pos_index_dict)
+        values = np.fromiter(pos_index_dict.values(), dtype=np.int64, count=n)
+        if not (np.array_equal(np.sort(values), np.arange(n))):
+            raise ValueError("load_state_dict: pos_index_dict indices are not a contiguous 0..N-1 range")
+        keys = np.array(list(pos_index_dict), dtype=np.float64).reshape(n, self.dim)
+        pts = np.empty_like(keys)
+        pts[values] = keys                          # row i <- the key whose index is i (no Python-level sort)
+        clearance = state["clearance"]
+        if len(clearance) != n:
+            raise ValueError(f"load_state_dict: {len(clearance)} clearances for {n} nodes")
         self._nodes = [Node(p, None, 0, 0, float(c)) for p, c in zip(convert_np_to_tuple(pts), clearance)]
         self._set_pos_points(pts)
-        if pos_index_dict is not None:              # validated above: it is exactly the index we would rebuild
-            self._pos_index_dict = pos_index_dict
-        else:
-            for i, node in enumerate(self._nodes):
-                self._pos_index_dict.setdefault(tuple(node.current), i)
-        for kind, idx in state.get("kinds", {}).items():
+        self._pos_index_dict = pos_index_dict       # validated above: it is exactly the index we would rebuild
+        for kind, idx in state["kinds"].items():
             if kind in self._points_index_dict:
                 self._points_index_dict[kind].update(
                     {self._nodes[int(i)]: int(i) for i in np.asarray(idx, dtype=np.int64) if 0 <= i < len(self._nodes)})
@@ -255,8 +245,6 @@ class NodeSampler:
         repeated position) and every kind index is re-keyed by position; a
         node whose position is gone is dropped from the kind indices."""
         nodes = list(nodes)
-        if any(not hasattr(node, "max_clearance") for node in nodes):     # Node objects from an older pickle
-            nodes = self.make_points([node.current for node in nodes])    # same positions, clearance from the map
         self._nodes = nodes
         self._set_pos_points([node.current for node in nodes])
         self._pos_index_dict = {}

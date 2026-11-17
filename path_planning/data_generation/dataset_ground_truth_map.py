@@ -12,21 +12,17 @@ author: Brandon Ho
 original author: Victor Retamal
 """
 
-import os
 from pathlib import Path
 import yaml
 import numpy as np
-from typing import Any, Dict, List, Tuple, Optional
-from path_planning.multi_agent_planner.mapf_solver import solve_mapf
-from path_planning.common.environment.map.graph_sampler import GraphSampler
+from typing import Dict, List, Tuple, Optional
+from path_planning.common.environment.map.graph_sampler import GraphSampler, validate_roadmap_type
 from path_planning.utils.util import set_global_seed
 import math
 import time
 from tqdm import tqdm
 from multiprocessing import Pool, cpu_count
-import shutil
 import copy
-import math
 from itertools import product
 from path_planning.utils.util import (
     _to_native_yaml,
@@ -34,10 +30,21 @@ from path_planning.utils.util import (
     obstacles_world_to_grid,
     get_obstacle_kernel
 )
-from path_planning.data_generation.dataset_util import *
-from path_planning.common.environment.map.graph_sampler import validate_roadmap_type
+from path_planning.data_generation.dataset_util import (
+    generate_base_case_path,
+    generate_input_perm_yaml_path,
+    generate_perm_base_path,
+    get_graph_file_path,
+    get_graph_runtime_file_path,
+    get_input_file_path,
+    standardize_spawning_mechanism_config,
+    write_runtime_yaml,
+)
 
 KEYS = ["bounds", "resolution", "time_limit", "max_iterations", "road_map_type", "use_discrete_space", "sample_num", "num_neighbors", "min_edge_len", "max_edge_len", "agent_radius", "nb_obstacles", "nb_agents", "obs_size"]
+# What a case's input.yaml must hold (gen_input writes them; create_map reads them).
+INPUT_KEYS = ("map", "agents", "road_map_type", "use_discrete_space", "sample_num", "num_neighbors", "min_edge_len",
+              "max_edge_len", "agent_radius", "resolution", "obs_size", "generate_boundary_nodes", "sampling_dist_dict")
 # Keys that define the case itself (obstacle / agent sampling). An existing
 # case is NEVER regenerated implicitly (cases may be hand-built or copied, and
 # regenerating replaces their obstacles); a mismatch only prints a warning.
@@ -50,25 +57,21 @@ CASE_KEYS = ("bounds", "resolution", "nb_obstacles", "nb_agents", "obs_size")
 MAP_BUILD_KEYS = (
     "agent_radius", "road_map_type", "use_discrete_space", "sample_num",
     "num_neighbors", "min_edge_len", "max_edge_len", "generate_boundary_nodes",
-    "boundary_node_spacing", "sampling_dist_dict",
+    "sampling_dist_dict",
 )
 
 
-def _read_build_config(graph_file: Path):
-    """Build settings recorded in ``<pickle stem>_runtime.yaml`` next to ``graph_file``
-    (see create_map), or None when the sidecar or the record is missing (legacy pickle)."""
+def _read_build_config(graph_file: Path) -> dict:
+    """The build settings ``create_map`` recorded in ``<pickle stem>_runtime.yaml`` next to ``graph_file``."""
     runtime_file = get_graph_runtime_file_path(graph_file.parent, graph_file.name)
-    if not runtime_file.exists():
-        return None
-    try:
+    record = None
+    if runtime_file.exists():
         with open(runtime_file, "r") as f:
-            data = yaml.safe_load(f)
-    except Exception:
-        return None
-    if not isinstance(data, dict):
-        return None
-    build_config = data.get("build_config")
-    return build_config if isinstance(build_config, dict) else None
+            record = (yaml.safe_load(f) or {}).get("build_config")
+    if record is None:
+        raise ValueError(f"{graph_file}: no build record in {runtime_file.name} (written by older code); "
+                         "delete the pickle to rebuild the map")
+    return record
 
 
 def _make_position_sampler(mean_cells, std_cells, dimensions, uniform_fallback, max_attempts, stats, key):
@@ -139,49 +142,26 @@ class InputFile:
         self.case_id = case_id
         self.inpt = self.check_input_file()
         
-    def check_keys_inside_input(self, inpt: Dict):
-        for key in KEYS:
-            if key in inpt:
-                return False
-            for subkey in inpt.keys():
-                if type(inpt[subkey]) == dict and key in inpt[subkey]:  
-                    return False
-        print(f"Key {key} not found in input file {self.input_file}")
-        return key
-        
+
     def check_input_file(self):
+        """The case's ``input.yaml`` content, or False when the file does not exist yet. A file that is
+        there but incomplete raises: an existing case (it may be hand-built) is never replaced silently."""
         if not self.input_file.exists():
             return False
         with open(self.input_file, "r") as f:
             inpt = yaml.load(f, Loader=yaml.FullLoader)
-        if inpt is None:
-            print(f"Failed to load input for case {self.case_id}")
-            return False
-        key = self.check_keys_inside_input(inpt)    
-        if key:
-            print(f"Key {key} not found in input file {self.input_file}")
-            return False
+        missing = [k for k in INPUT_KEYS if k not in inpt] if isinstance(inpt, dict) else list(INPUT_KEYS)
+        if missing:
+            raise ValueError(f"{self.input_file}: missing {missing}; fix the file, or delete it (or use the "
+                             "generate-new-graph option) to generate a new case")
         return inpt
 
     def get_input_content(self):
         return self.inpt
 
-    def check_difference_between_input(self, config: Dict) -> bool:
-        keys = ["bounds", "resolution", "road_map_type", "use_discrete_space", "sample_num", "num_neighbors", "min_edge_len", "max_edge_len", "agent_radius", "nb_obstacles", "nb_agents", "obs_size"]
-        inpt = self.get_input_content()
-        if not inpt:
-            return True
-
-        for key in keys:
-            if inpt.get(key, None) is not None and config.get(key, None) is not None and inpt[key] != config[key]:
-                return True
-        return False
-
     def gen_input(self,**kwargs):
-        key = self.check_keys_inside_input(kwargs)
-        if key:
-            print(f"Key {key} not found in kwargs")
-            assert False, f"Key {key} not found in kwargs"
+        missing = [key for key in KEYS if key not in kwargs]
+        assert not missing, f"Keys {missing} not found in the config"
         bounds = kwargs.get("bounds", [[0, 32.0], [0, 32.0]])
         resolution = kwargs.get("resolution", 1.0)
         time_limit = kwargs.get("time_limit", 60)
@@ -195,12 +175,12 @@ class InputFile:
         agent_radius = kwargs.get("agent_radius", 0.0)
         nb_obstacles = kwargs.get("nb_obstacles", 0.1)
         nb_agents = kwargs.get("nb_agents", 4)
-        obs_size = kwargs.get("obs_size", 0.5) # size of the obstacle in pixels
+        obs_size = kwargs.get("obs_size", 0.5) # side length of an obstacle, world units
         generate_boundary_nodes = kwargs.get("generate_boundary_nodes", False)
-        boundary_node_spacing = kwargs.get("boundary_node_spacing", None)
         sampling_dist_dict = kwargs.get("sampling_dist_dict", {})
         spawning_mechanism_cfg = standardize_spawning_mechanism_config(kwargs.get("gen", None))  # start/goal placement (config/gen.yaml)
-        map_ = GraphSampler(bounds=bounds, resolution=resolution, start=[], goal=[], sampling_dist_dict=sampling_dist_dict)
+        map_ = GraphSampler(bounds=bounds, resolution=resolution, start=[], goal=[], use_discrete_space=True,
+                            use_collision_sweep=False)
         dimensions = list(map_.shape)
         input_dict = {
             "map": {
@@ -223,7 +203,6 @@ class InputFile:
             "resolution": resolution,
             "obs_size": obs_size,
             "generate_boundary_nodes": generate_boundary_nodes,
-            "boundary_node_spacing": boundary_node_spacing,
             "sampling_dist_dict": sampling_dist_dict,
         }
         total_cells = int(math.prod(dimensions))
@@ -290,7 +269,6 @@ class InputFile:
                 occupied_positions.add(pos)
                 obstacles_grid.append(pos)
 
-        map_ = GraphSampler(bounds=bounds, resolution=resolution,start=[],goal=[],use_discrete_space=True)
         map_.set_obstacles(obstacles=obstacles_grid)
         map_.inflate_obstacles(radius=agent_radius)
         occupied_positions.update(map_.get_inflated_obstacles())   
@@ -306,29 +284,22 @@ class InputFile:
         else:
             start_sampler = goal_sampler = get_random_position
 
+        def occupy(pos):
+            """Take ``pos`` and, for an agent with a radius, the cells within its diameter."""
+            occupied_positions.add(pos)
+            if agent_radius > 0 and num_cells_to_inflate > 0:
+                offset_range = range(-num_cells_to_inflate, num_cells_to_inflate + 1)
+                for offset in product(*(offset_range for _ in range(num_dims))):
+                    occupied_positions.add(tuple(pos[j] + offset[j] for j in range(num_dims)))
+
         # Place agents
         for agent_id in range(nb_agents):
-            # Get start position
             start_pos = start_sampler(occupied_positions)
-            if start_pos is None:
-                assert False, f"Failed to place agent {agent_id} start position"
-            occupied_positions.add(start_pos)
-            if agent_radius > 0 and num_cells_to_inflate > 0:
-                offset_range = range(-num_cells_to_inflate, num_cells_to_inflate + 1)
-                for offset in product(*(offset_range for _ in range(num_dims))):
-                    inflated_obs_pos = tuple(start_pos[j] + offset[j] for j in range(num_dims))
-                    occupied_positions.add(inflated_obs_pos)
-
-            # Get goal position (can overlap with other goals but not starts/obstacles)
-            goal_pos = goal_sampler(occupied_positions)
-            if goal_pos is None:
-                assert False, f"Failed to place agent {agent_id} goal position"
-            occupied_positions.add(goal_pos)
-            if agent_radius > 0 and num_cells_to_inflate > 0:
-                offset_range = range(-num_cells_to_inflate, num_cells_to_inflate + 1)
-                for offset in product(*(offset_range for _ in range(num_dims))):
-                    inflated_obs_pos = tuple(goal_pos[j] + offset[j] for j in range(num_dims))
-                    occupied_positions.add(inflated_obs_pos)
+            assert start_pos is not None, f"Failed to place agent {agent_id} start position"
+            occupy(start_pos)
+            goal_pos = goal_sampler(occupied_positions)        # not on a start, a goal or an obstacle
+            assert goal_pos is not None, f"Failed to place agent {agent_id} goal position"
+            occupy(goal_pos)
 
             # Publish starts/goals in world coordinates for YAML; sampling used grid cells above.
             start_grid = tuple(int(start_pos[j]) for j in range(num_dims))
@@ -372,7 +343,7 @@ def create_map(param: Dict, generate_new_graph: bool = False,graph_file: Path =N
         # (<stem>_runtime.yaml) so its cost can be compared with the GNN reconstruction.
         t_start = time.perf_counter()
         obstacles_world = np.array(param["map"]["obstacles"])
-        obs_size = param.get("obs_size", param.get("map", {}).get("obs_size", 0.5))
+        obs_size = param["obs_size"]
         agents = param["agents"]
         road_map_type = param["road_map_type"]
         if road_map_type == 'grid':
@@ -407,14 +378,13 @@ def create_map(param: Dict, generate_new_graph: bool = False,graph_file: Path =N
         map_.set_goal(goal)
         t_setup = time.perf_counter()
 
-        generate_boundary_nodes = param.get("generate_boundary_nodes", False)
-        boundary_node_spacing = param.get("boundary_node_spacing", None)
+        generate_boundary_nodes = param["generate_boundary_nodes"]
         if road_map_type == 'grid':
-            nodes = map_.generateRandomNodes(generate_grid_nodes=True, generate_boundary_nodes=generate_boundary_nodes, boundary_node_spacing=boundary_node_spacing)
+            map_.generateRandomNodes(generate_grid_nodes=True, generate_boundary_nodes=generate_boundary_nodes)
         else:
-            nodes = map_.generateRandomNodes(generate_boundary_nodes=generate_boundary_nodes, roadmap_type=road_map_type, boundary_node_spacing=boundary_node_spacing)
+            map_.generateRandomNodes(generate_boundary_nodes=generate_boundary_nodes, roadmap_type=road_map_type)
         t_sample = time.perf_counter()
-        map_.generate_map(road_map_type,nodes)
+        map_.generate_roadmap(road_map_type)
         t_build = time.perf_counter()
         map_.save_graph_sampler(graph_file)
         t_save = time.perf_counter()
@@ -431,7 +401,7 @@ def create_map(param: Dict, generate_new_graph: bool = False,graph_file: Path =N
                 },
                 "num_nodes": len(map_.nodes),
                 "num_edges": len(map_.edges),
-                "build_config": {k: param.get(k) for k in MAP_BUILD_KEYS},
+                "build_config": {k: param[k] for k in MAP_BUILD_KEYS},
             },
         )
         if verbose:
@@ -451,28 +421,12 @@ def generate_permutation(inpt: Dict, config: Dict, case_path: Path, generate_new
     # do not create duplicates across runs.
     perm_base = generate_perm_base_path(case_path)
     existing_count = 0
-    existing_perm_ids = []
-    if perm_base.exists():
-        for p in perm_base.iterdir():
-            if p.is_dir() and (p / "input.yaml").exists():
-                existing_count += 1
-                try:
-                    existing_perm_ids.append(int(p.name.split("_")[-1]))
-                except Exception:
-                    pass
-                if not generate_new_graph:
-                    try:
-                        with open(p / "input.yaml", "r") as f:
-                            existing_data = yaml.safe_load(f)
-                    except Exception:
-                        existing_data = None
-                    if isinstance(existing_data, dict) and "start_goal_index" in existing_data:
-                        try:
-                            perm_tuple = tuple(int(v) for v in existing_data["start_goal_index"])
-                            unique_permutations.add(perm_tuple)
-                        except TypeError:
-                            # If the stored value is not iterable/int-castable, just skip it.
-                            pass
+    for p in perm_base.iterdir():
+        if p.is_dir() and (p / "input.yaml").exists():
+            existing_count += 1
+            if not generate_new_graph:
+                with open(p / "input.yaml", "r") as f:
+                    unique_permutations.add(tuple(int(v) for v in yaml.safe_load(f)["start_goal_index"]))
 
     # Solver scans up to nb_permutations_tries when solve_till_success=True, so
     # permutation generation must materialize the same ID range.
@@ -482,7 +436,6 @@ def generate_permutation(inpt: Dict, config: Dict, case_path: Path, generate_new
     # from perm_0 (do not use old existing_count to limit generation).
     if generate_new_graph:
         existing_count = 0
-        existing_perm_ids = []
         unique_permutations = set()
 
     # If we already have enough permutations and the graph is unchanged, do nothing.
@@ -504,7 +457,6 @@ def generate_permutation(inpt: Dict, config: Dict, case_path: Path, generate_new
     # Track how many new files have been written in this call (independent of
     # how many entries were pre-loaded into unique_permutations from disk).
     new_perm_count = 0
-    generated_perm_ids = []
     for ii in range(num_tries):
         if new_perm_count >= remaining:
             break
@@ -525,16 +477,11 @@ def generate_permutation(inpt: Dict, config: Dict, case_path: Path, generate_new
         agents_shuffled = shuffle_agents_goals(inpt, start_goal_index)
         inpt_copy = copy.deepcopy(inpt)
         inpt_copy["agents"] = agents_shuffled
-        # Persist the permutation so future runs can avoid duplicates.
-        try:
-            inpt_copy["start_goal_index"] = start_goal_index.tolist()
-        except AttributeError:
-            inpt_copy["start_goal_index"] = list(start_goal_index)
+        inpt_copy["start_goal_index"] = start_goal_index.tolist()   # stored, so later runs avoid duplicates
 
         # Use new_perm_count (not len(unique_permutations)) so pre-loaded existing
         # entries do not offset the id. perm_ids are contiguous from start_perm_id.
         perm_id = start_perm_id + new_perm_count - 1
-        generated_perm_ids.append(int(perm_id))
         _,perm_file = generate_input_perm_yaml_path(case_path, perm_id)
         with open(perm_file, "w") as f:
             yaml.safe_dump(_to_native_yaml(inpt_copy), f)
@@ -554,7 +501,7 @@ def process_single_case_map_generation(args: Tuple) -> Optional[int]:
     Returns:
         case_id on success, None on failure
     """
-    case_id, path, config,generate_new_graph,graph_file,verbose = args
+    case_id, path, config, generate_new_graph, verbose = args
     set_global_seed(config.get("seed", 42) + case_id)
     road_map_type = config.get("road_map_type", "grid")
     case_path,map_path = generate_base_case_path(path, case_id, road_map_type)
@@ -562,8 +509,7 @@ def process_single_case_map_generation(args: Tuple) -> Optional[int]:
     input_file = get_input_file_path(case_path)
     input_class = InputFile(input_file, case_id)
     inpt = input_class.get_input_content()
-    if graph_file is None:
-        graph_file = get_graph_file_path(map_path)
+    graph_file = get_graph_file_path(map_path)
     # Regenerate the case only when explicitly asked or when input.yaml is
     # missing/invalid. A missing graph pickle alone is NOT a reason: a valid
     # existing input.yaml (e.g. a hand-built case) must be kept, and
@@ -593,17 +539,14 @@ def process_single_case_map_generation(args: Tuple) -> Optional[int]:
             # the settings of whichever type was built last, so a mismatch here is
             # expected whenever scripts loop over several types. Rebuild only if
             # THIS type's pickle was built with different settings (recorded in
-            # its runtime sidecar); a legacy pickle without that record is rebuilt.
-            built_with = _read_build_config(Path(graph_file))
-            if Path(graph_file).exists() and built_with is not None:
+            # its runtime sidecar).
+            stale = {}  # no pickle yet: create_map builds it anyway
+            if Path(graph_file).exists():
+                built_with = _read_build_config(Path(graph_file))
                 stale = {
                     k: (built_with.get(k), config[k]) for k in MAP_BUILD_KEYS
                     if k in config and (built_with.get(k) or None) != (config[k] or None)
                 }
-            elif Path(graph_file).exists():
-                stale = build_diff  # legacy pickle without a build record
-            else:
-                stale = {}  # no pickle yet: create_map builds it anyway
             if stale:
                 print(f"case_{case_id}: map-build settings changed {stale} (existing -> requested); rebuilding the {road_map_type} graph")
                 rebuild_graph = True
@@ -639,7 +582,7 @@ def process_single_case_map_generation(args: Tuple) -> Optional[int]:
 
     return case_id
 
-def create_maps(path: Path, num_cases: int, config: Dict, num_workers: int = cpu_count(), generate_new_graph: bool = False, verbose: bool = True,graph_files: list = None) -> None:
+def create_maps(path: Path, num_cases: int, config: Dict, num_workers: int = cpu_count(), generate_new_graph: bool = False, verbose: bool = True) -> None:
     """
     Generate maps and permutations for all cases (no solving).
     Saves input.yaml, graph_sampler.pkl, and case-level agents per case
@@ -648,10 +591,7 @@ def create_maps(path: Path, num_cases: int, config: Dict, num_workers: int = cpu
     path = Path(path)
     path.mkdir(parents=True, exist_ok=True)
 
-    if graph_files and len(graph_files) != num_cases:
-        case_tasks = [(i, path, config, generate_new_graph,graph_files[i],verbose) for i in range(num_cases)]
-    else:
-        case_tasks = [(i, path, config, generate_new_graph,None,verbose) for i in range(num_cases)]
+    case_tasks = [(i, path, config, generate_new_graph, verbose) for i in range(num_cases)]
     if verbose:
         nb_permutations = config["nb_permutations"]
         print(f"Generating maps for {num_cases} cases with {num_workers} workers for {nb_permutations} permutations per case")

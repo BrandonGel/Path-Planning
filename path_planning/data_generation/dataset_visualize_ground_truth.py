@@ -6,11 +6,19 @@ import yaml
 import numpy as np
 from pathlib import Path
 import matplotlib.pyplot as plt
+from path_planning.agent import Agent
 from path_planning.common.visualizer.visualizer_2d import Visualizer2D
-from path_planning.common.environment.map.graph_sampler import GraphSampler
-from python_motion_planning.common import TYPES
 from path_planning.data_generation.dataset_label import get_trajectory_map
-from path_planning.data_generation.dataset_util import *
+from path_planning.data_generation.dataset_util import (
+    generate_mapf_path,
+    generate_roadmap_path,
+    get_heatmap_visualization_file,
+    get_input_file_path,
+    get_path_animation_file,
+    get_path_visualization_file,
+    get_solution_file_path,
+    get_solution_name_suffix,
+)
 from multiprocessing import Pool, cpu_count
 from tqdm import tqdm
 from path_planning.utils.util import (
@@ -32,8 +40,9 @@ def load_and_visualize_case(perm_path: Path,graph_file: Path = None,mapf_solver_
     """
     # Load input data
     input_file = get_input_file_path(perm_path)
-    map_ = read_graph_sampler_from_yaml(input_file, graph_file=graph_file)
+    map_ = read_graph_sampler_from_yaml(input_file, graph_file=graph_file, args={"use_collision_sweep": False})
     agents = read_agents_from_yaml(input_file)
+    road_map = map_.road_map                    # read once: the property rebuilds every list per access
     
     # Load solution data
     mapf_path = generate_mapf_path(perm_path, mapf_solver_name)
@@ -69,14 +78,10 @@ def load_and_visualize_case(perm_path: Path,graph_file: Path = None,mapf_solver_
         schedule = solution_data["schedule"]
         for agent_name, trajectory in schedule.items():
             path = np.array([[point['x'], point['y']] for point in trajectory])
-            # Discrete schedules hold grid indices: exactly ONE map_to_world
-            # conversion (inside plot_path, which maps indices to cell
-            # centers). Converting here AND in plot_path shifted every path
-            # +resolution cell up-right.
-            vis.plot_path(path, map_frame=map_.use_discrete_space)
+            vis.plot_path(path, map_frame=False)      # schedules and nodes are world coordinates
 
-        if hasattr(map_, "nodes") and hasattr(map_, "road_map") and map_.nodes and map_.road_map is not None:
-            vis.plot_road_map(map_, map_.nodes, map_.road_map, map_frame=map_.use_discrete_space)
+        if map_.nodes:
+            vis.plot_road_map(map_, map_.nodes, road_map, map_frame=False)
         
         plt.title(f"{perm_path.name} - Static Paths")
         vis.savefig(get_path_visualization_file(roadmap_path,solution_name_suffix,agent_velocity))
@@ -88,8 +93,8 @@ def load_and_visualize_case(perm_path: Path,graph_file: Path = None,mapf_solver_
         density_map = perm_trajectory_map.sum(axis=(0,1))
         visualizer = Visualizer2D(figname = f"{solution_file.name} - Density Map", figsize=(8, 8))
         visualizer.plot_grid_map(map_)
-        if hasattr(map_, "nodes") and hasattr(map_, "road_map") and map_.nodes and map_.road_map is not None:
-            visualizer.plot_road_map(map_, map_.nodes, map_.road_map, map_frame=map_.use_discrete_space)
+        if map_.nodes:
+            visualizer.plot_road_map(map_, map_.nodes, road_map, map_frame=False)
         visualizer.plot_density_map(density_map)
         visualizer.savefig(get_heatmap_visualization_file(roadmap_path,solution_name_suffix,agent_velocity))
         if verbose:
@@ -106,8 +111,11 @@ def load_and_visualize_case(perm_path: Path,graph_file: Path = None,mapf_solver_
         
         # Create animation
         path_animation_file = get_path_animation_file(roadmap_path,solution_name_suffix,agent_velocity)
-        if hasattr(map_, "nodes") and hasattr(map_, "road_map") and map_.nodes and map_.road_map is not None:
-            vis.animate(path_animation_file, map_, schedule, road_map=map_.road_map, map_frame=map_.use_discrete_space)
+        if map_.nodes:
+            # Agents are drawn as circles: the bounding radius of the largest recorded body, else agent_radius.
+            bodies = solution_data.get("agents") or {}
+            radius = max((Agent.from_dict(b).radius for b in bodies.values()), default=solution_data["agent_radius"])
+            vis.animate(path_animation_file, map_, schedule, road_map=road_map, map_frame=False, radius=radius)
         if verbose:
             print(f"Animation saved to: {path_animation_file}")
 
@@ -150,63 +158,3 @@ def visualize_gt(tasks, num_workers: int = cpu_count()):
     print("\n" + "="*60)
     print(f"Visualization complete: {successful} tasks succeeded, {failed} tasks failed")
     print("="*60)
-
-def load_and_visualize_solver_case(
-        solver_path: Path,
-        map_,
-        show_static: bool = True,
-        show_animation: bool = False,
-        show: bool = False,
-        map_frame: bool = False,
-    ):
-    """
-    Load and visualize a single solver result (valid solution only).
-    Used for run_visualize_solvers.py: solution lives in perm_{id}/{solver}/solution_radius*_velocity*.yaml.
-
-    Args:
-        solver_path: Path to the solver directory (contains input.yaml and solution_radius*_velocity*.yaml)
-        map_: GraphSampler instance (e.g. from create_map(..., load_graph_sampler=True))
-        show_static: Whether to plot static paths and save paths.png
-        show_animation: Whether to save an animation GIF
-        show: Whether to show the matplotlib figure
-        map_frame: Whether to use the map frame
-    """
-    sol_files = list(solver_path.glob("solution*_velocity*.yaml"))
-    if not sol_files:
-        raise FileNotFoundError(f"No solution_radius*_velocity*.yaml in {solver_path}")
-    with open(sol_files[0], "r") as f:
-        solution_data = yaml.safe_load(f)
-    if not solution_data.get("success", False):
-        raise ValueError(f"Solution not successful: {solver_path}")
-
-    schedule = solution_data.get("schedule", {})
-    if not schedule:
-        raise ValueError(f"Empty schedule: {solver_path}")
-
-    label = f"{solver_path.parent.parent.name}/{solver_path.name}"
-
-    if show_static:
-        plt.close("all")
-        vis = Visualizer2D(figname=f"{label} - Static Paths", figsize=(8, 8))
-        vis.plot_grid_map(map_)
-        if hasattr(map_, "nodes") and hasattr(map_, "road_map") and map_.nodes and map_.road_map is not None:
-            vis.plot_road_map(map_, map_.nodes, map_.road_map, map_frame=map_frame)
-        for agent_name, trajectory in schedule.items():
-            path = np.array([[p["x"], p["y"]] for p in trajectory])
-            vis.plot_path(path, map_frame=map_frame)
-        plt.title(f"{label} - Static Paths")
-        path_img_file = get_path_visualization_file(solver_path)
-        vis.savefig(path_img_file)
-        if show:
-            vis.show()
-        vis.close()
-
-    if show_animation and hasattr(map_, "road_map") and map_.road_map is not None:
-        plt.close("all")
-        agent_radius = solution_data["agent_radius"]
-        agent_velocity = solution_data["agent_velocity"]
-        vis = Visualizer2D(figsize=(8, 8))
-        combined_schedule = {"schedule": schedule}
-        path_animation_file = get_path_animation_file(solver_path)
-        vis.animate(path_animation_file, map_, combined_schedule, road_map=map_.road_map, map_frame=map_frame,radius=agent_radius,velocity=agent_velocity)
-        vis.close()
