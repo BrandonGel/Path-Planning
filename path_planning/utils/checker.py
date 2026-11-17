@@ -13,7 +13,7 @@ def check_time_anomaly(solution,verbose: bool = True):
         t_diff = np.diff(path[:,0], axis=0)
         if np.any(t_diff < 0):
             t_ind = np.where(t_diff < 0)[0][0]
-            print(f"Agent {agent} has negative time difference at t={path[t_ind]['t']:.3f}")
+            print(f"Agent {agent} has negative time difference at t={path[t_ind, 0]:.3f}")
             no_anomaly = False
     if no_anomaly and verbose:
         print("No time anomaly detected")

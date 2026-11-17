@@ -15,11 +15,11 @@ from path_planning.utils.checker import _xyz, check_collision, check_collision_b
 from path_planning.utils.util import agents_yaml_to_roadmap_frame
 
 #: Solvers that take ``Agent`` bodies from the agent dicts.
-BODY_SOLVERS = ("cbs", "icbs", "ccbs", "iccbs", "sipp", "neural_attf")
+BODY_SOLVERS = ("cbs", "icbs", "ccbs", "sipp", "neural_attf")
 #: Solvers restricted to point particles (agent_radius 0, no ``"agent"``): LaCAM.
 POINT_SOLVERS = ("lacam", "lacam_random")
 #: Of the body solvers, the ones that plan in continuous time: their bodies also carry the speed.
-TIMED_SOLVERS = ("ccbs", "iccbs", "sipp", "neural_attf")
+TIMED_SOLVERS = ("ccbs", "sipp", "neural_attf")
 
 
 def config_agent(mapf_solver_config: dict, mapf_solver_name: str):
@@ -212,15 +212,15 @@ def solve_mapf(map_, agents,mapf_solver_config:dict) -> Tuple[dict, float]:
                                    time_limit=time_limit, max_iterations=max_iterations,
                                    exact_vertices=bool(mapf_solver_config.get("sipp_exact_vertices", False)))
         solution,solution_info = sipp_planner.compute_plan()
-    elif mapf_solver_name in ('ccbs', 'iccbs'):
-        # One solver with switches; "iccbs" is CCBS with cardinal conflicts first.
+    elif mapf_solver_name == 'ccbs':
+        # One solver with switches: ccbs_use_cardinal (cardinal conflicts first), ccbs_disjoint, ccbs_hlh.
         env = CCBS_Environment(map_, agents_rt)
         ccbs = CCBS(
             env,
             time_limit=time_limit,
             max_iterations=max_iterations,
             verbose=False,
-            use_cardinal=bool(mapf_solver_config.get("ccbs_use_cardinal", mapf_solver_name == 'iccbs')),
+            use_cardinal=bool(mapf_solver_config.get("ccbs_use_cardinal", False)),
             disjoint=bool(mapf_solver_config.get("ccbs_disjoint", False)),
             hlh=mapf_solver_config.get("ccbs_hlh"),                                 # None | "lp" | "greedy"; needs cardinal
         )
@@ -305,7 +305,7 @@ def get_mapf_solver(mapf_solver_name:str) -> Tuple[CBS,Environment]:
         return LaCAM_random
     elif mapf_solver_name == "sipp":
         return SippPlanner
-    elif mapf_solver_name in ("ccbs", "iccbs"):
+    elif mapf_solver_name == "ccbs":
         return CCBS,CCBS_Environment
     elif mapf_solver_name == "neural_attf":
         return NeuralATTF, Simulation
