@@ -11,18 +11,13 @@ from pathlib import Path
 
 import numpy as np
 
-try:
-    from path_planning.data_generation.dataset_ground_truth_map import InputFile
-    from path_planning.data_generation.dataset_util import (
-        standardize_spawning_mechanism_config,
-        read_gen_config_from_yaml,
-    )
-    from path_planning.utils.util import set_global_seed, obstacles_world_to_grid
-    from path_planning.common.environment.map.graph_sampler import GraphSampler
-
-    _HAS_SAMPLER = True
-except ModuleNotFoundError:
-    _HAS_SAMPLER = False
+from path_planning.data_generation.dataset_ground_truth_map import InputFile
+from path_planning.data_generation.dataset_util import (
+    standardize_spawning_mechanism_config,
+    read_gen_config_from_yaml,
+)
+from path_planning.utils.util import set_global_seed, obstacles_world_to_grid
+from path_planning.common.environment.map.graph_sampler import GraphSampler
 
 
 BASE = dict(
@@ -64,7 +59,6 @@ def _cells(inpt):
 GAUSS = {"type": "gaussian", "gaussian": {"std_scale": 0.05, "max_attempts": 100, "separate_means": True}}
 
 
-@unittest.skipUnless(_HAS_SAMPLER, "GraphSampler not available in this environment")
 class TestUniformRegression(unittest.TestCase):
     def test_bitwise_identical_to_historical_generator(self):
         for seed, golden in GOLDEN.items():
@@ -74,7 +68,6 @@ class TestUniformRegression(unittest.TestCase):
                 self.assertNotIn("gen", inpt)
 
 
-@unittest.skipUnless(_HAS_SAMPLER, "GraphSampler not available in this environment")
 class TestGaussian(unittest.TestCase):
     def test_obstacles_identical_to_uniform_for_same_seed(self):
         for seed in range(1, 6):
@@ -147,7 +140,3 @@ class TestGenConfig(unittest.TestCase):
             self.assertEqual((cfg["type"], cfg["std_scale"], cfg["max_attempts"]), ("gaussian", 0.2, 100))
             p.write_text("")
             self.assertEqual(read_gen_config_from_yaml(p)["type"], "uniform")
-
-
-if __name__ == "__main__":
-    unittest.main()

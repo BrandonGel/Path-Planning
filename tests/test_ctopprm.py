@@ -7,50 +7,20 @@ import unittest
 
 import numpy as np
 
-from path_planning.common.environment.map.graph_sampler import GraphSampler
 from path_planning.cluster.CTopPRMpy.ctopprm import CTopPRM
 from path_planning.cluster.CTopPRMpy.shortening import path_length, polyline_free_sampled
-from path_planning.utils.util import obstacles_world_to_grid, set_global_seed
-
-
-def _build_block_map(starts, goals, sample_num=400):
-    """20x20 continuous map with a central 4x8 vertical block.
-
-    The block guarantees exactly two homotopy classes between endpoints
-    placed left and right of it at its mid-height.
-    """
-    obstacles_world = np.array(
-        [(x + 0.5, y + 0.5) for x in range(8, 12) for y in range(6, 14)]
-    )
-    map_ = GraphSampler(
-        bounds=[[0.0, 20.0], [0.0, 20.0]],
-        resolution=1.0,
-        start=list(starts),
-        goal=list(goals),
-        use_discrete_space=False,
-    )
-    map_.set_obstacles(obstacles_world_to_grid(map_, obstacles_world, 1.0))
-    map_.update_esdf()
-    map_.set_start(list(starts))
-    map_.set_goal(list(goals))
-    map_.set_roadmap_config(
-        sample_num=sample_num, num_neighbors=13, min_edge_length=1e-10, max_edge_length=5.0
-    )
-    map_.generateRandomNodes()
-    map_.generate_roadmap("prm")
-    return map_
+from path_planning.utils.util import set_global_seed
+from tests.helpers import GOAL, START, build_block_map
 
 
 BLOCK_CENTER_Y = 10.0
-START = (2.0, 10.0)
-GOAL = (18.0, 10.0)
 
 
 class TestCTopPRM(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         set_global_seed(42)
-        cls.map_ = _build_block_map([START], [GOAL])
+        cls.map_ = build_block_map([START], [GOAL])
         cls.planner = CTopPRM(cls.map_)
         cls.results = cls.planner.find_distinct_paths([(START, GOAL)])
         cls.pair_key = next(iter(cls.results))
@@ -92,7 +62,7 @@ class TestCTopPRM(unittest.TestCase):
         set_global_seed(7)
         starts = [(2.0, 10.0), (2.0, 3.0)]
         goals = [(18.0, 10.0), (18.0, 17.0)]
-        map_ = _build_block_map(starts, goals)
+        map_ = build_block_map(starts, goals)
         planner = CTopPRM(map_)
         pairs = list(zip(starts, goals))
         results = planner.find_distinct_paths(pairs)
@@ -110,7 +80,7 @@ class TestCTopPRM(unittest.TestCase):
 
     def test_greedy_fallback(self):
         set_global_seed(42)
-        map_ = _build_block_map([START], [GOAL])
+        map_ = build_block_map([START], [GOAL])
         planner = CTopPRM(map_, shortening_mode="greedy")
         results = planner.find_distinct_paths([(START, GOAL)])
         paths = next(iter(results.values()))
@@ -120,7 +90,7 @@ class TestCTopPRM(unittest.TestCase):
 
     def test_pruned_graph_from_paths(self):
         set_global_seed(42)
-        map_ = _build_block_map([START], [GOAL])
+        map_ = build_block_map([START], [GOAL])
         planner = CTopPRM(map_, shortening_mode="none")
         results = planner.find_distinct_paths([(START, GOAL)])
 
@@ -151,7 +121,7 @@ class TestCTopPRM(unittest.TestCase):
         from path_planning.cluster.CTopPRMpy import shortening as S
 
         set_global_seed(42)
-        map_ = _build_block_map([START], [GOAL])
+        map_ = build_block_map([START], [GOAL])
         cfg = CTopPRM(map_).geometry
         over_the_top = np.array(
             [[2.0, 10.0], [4.0, 15.5], [10.0, 15.5], [16.0, 15.5], [18.0, 10.0]]
@@ -191,7 +161,3 @@ class TestCTopPRM(unittest.TestCase):
         self.assertEqual(snapped, s_idx)
         with self.assertRaises(ValueError):
             self.planner.find_distinct_paths([(s_idx, s_idx)])
-
-
-if __name__ == "__main__":
-    unittest.main()

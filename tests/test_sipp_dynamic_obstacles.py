@@ -14,8 +14,8 @@ from path_planning.agent import Agent
 from path_planning.multi_agent_planner.centralized.sipp.graph_generation import SippGraph
 from path_planning.multi_agent_planner.decentralized.neural_attf.neural_attf import NeuralATTF
 from path_planning.utils.util import read_graph_sampler_from_yaml, set_global_seed
+from tests.helpers import MAP_2D
 
-MAP_YAML = "path_planning/maps/2d/2d.yaml"
 RADIUS = 1.0
 VELOCITY = 1.0
 # Two free grid cells 3 apart in the lower-left room of 2d.yaml, addressed by their
@@ -27,7 +27,7 @@ Q = (8.5, 5.5)
 def _build_grid_map():
     """Discrete 4-neighbour grid roadmap on 2d.yaml (same build as run_sipp.py)."""
     set_global_seed(42)
-    map_ = read_graph_sampler_from_yaml(MAP_YAML, use_discrete_space=True)
+    map_ = read_graph_sampler_from_yaml(MAP_2D, use_discrete_space=True)
     map_.inflate_obstacles(radius=RADIUS + np.sqrt(2) / 2)
     map_.set_roadmap_config(sample_num=0, num_neighbors=4.0, min_edge_length=0.0, max_edge_length=1.1)
     map_.set_start([P])
@@ -249,7 +249,7 @@ class TestSippGoalSafeUntil(unittest.TestCase):
         # before t=4 and after t=7.
         planner = SippPlanner(
             self.map_,
-            [{"name": "a", "start": P, "goal": Q, "agent": Agent.disc(RADIUS, VELOCITY or None)}],
+            [{"name": "a", "start": P, "goal": Q, "agent": Agent.disc(RADIUS, VELOCITY)}],
             dynamic_obstacles={"other": [_point(Q, 4.0), _point(Q, 6.0)]},
             heuristic_type="euclidean",
             time_limit=10.0,
@@ -391,7 +391,7 @@ class TestSippGraphDynamicObstacles(unittest.TestCase):
         return SippGraph(
             self.map_,
             dynamic_obstacles={"other": schedule},
-            agent=Agent.disc(RADIUS, VELOCITY or None),
+            agent=Agent.disc(RADIUS, VELOCITY),
             obstacle_horizon=horizon,
         )
 
@@ -441,7 +441,3 @@ class TestSippGraphDynamicObstacles(unittest.TestCase):
         g2 = self._graph([_point(Q, 0.0)], {"other": 1.0})
         self.assertFalse(_safe_at(g2.sipp_graph[Q], 0.5))
         self.assertTrue(_safe_at(g2.sipp_graph[Q], 2.0))
-
-
-if __name__ == "__main__":
-    unittest.main()
