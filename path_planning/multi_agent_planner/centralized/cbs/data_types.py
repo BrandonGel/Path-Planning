@@ -115,7 +115,7 @@ def _turn_steps(ori, target, rate: float) -> int:
 @lru_cache(maxsize=None)
 def _bounding_ball(body: Agent) -> Agent:
     """``body``'s bounding ball: what it sweeps while turning in place."""
-    return body if body.is_ball else Agent(body.radius, None, None, body.type, body.clearance)
+    return body if body.is_ball else body.replace(shape=body.radius, max_speed=None, max_rotation=None)
 
 
 #: One step of an agent's plan: ``agent`` (its body) goes ``a -> b`` (equal: it stays). ``body`` is what it

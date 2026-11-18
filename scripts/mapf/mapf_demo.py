@@ -12,17 +12,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))   # this repo, ahea
 
 from path_planning.common.visualizer.visualizer_2d import Visualizer2D
 from path_planning.multi_agent_planner.mapf_solver import solve_mapf
-from path_planning.utils.util import (_to_native_yaml, read_agents_from_yaml, read_graph_sampler_from_yaml,
-                                      set_global_seed, write_to_yaml)
+from path_planning.utils.util import (_to_native_yaml, agents_yaml_to_roadmap_frame, read_agents_from_yaml,
+                                      read_graph_sampler_from_yaml, set_global_seed, write_to_yaml)
 
 MAP_YAML = "path_planning/maps/2d/2d.yaml"
 
 
 def run_demo(solver, cases, spaces=(True, False), inflate=lambda radius: radius + np.sqrt(2) / 2,
-             max_iterations=10000):
+             max_iterations=10000, to_roadmap_frame=False):
     """Run ``solver`` on ``MAP_YAML`` for every ``(velocity, radius)`` in ``cases`` and every space in
     ``spaces`` (True: the grid, False: a 1000-node PRM). ``inflate(radius)`` is the obstacle inflation
-    (``None``: no inflation). Outputs go to ``path_planning/maps/2d/<solver>/`` and ``figs/<solver>/``; the
+    (``None``: no inflation). ``to_roadmap_frame``: convert the YAML starts and goals with
+    ``agents_yaml_to_roadmap_frame`` (cell centres on the grid) before placing them. Outputs go to ``path_planning/maps/2d/<solver>/`` and ``figs/<solver>/``; the
     velocity is part of the file names when any case has one."""
     os.makedirs(f"figs/{solver}", exist_ok=True)
     os.makedirs(f"path_planning/maps/2d/{solver}", exist_ok=True)
@@ -40,8 +41,9 @@ def run_demo(solver, cases, spaces=(True, False), inflate=lambda radius: radius 
             else:
                 map_.set_roadmap_config(sample_num=1000, num_neighbors=13.0, min_edge_length=0.0, max_edge_length=5.1)
 
-            map_.set_start([agent["start"] for agent in agents])
-            map_.set_goal([agent["goal"] for agent in agents])
+            placed = agents_yaml_to_roadmap_frame(map_, agents) if to_roadmap_frame else agents
+            map_.set_start([agent["start"] for agent in placed])
+            map_.set_goal([agent["goal"] for agent in placed])
             nodes = map_.generateRandomNodes(generate_grid_nodes=use_discrete_space)
             map_.generate_roadmap("prm")
             road_map = map_.road_map            # per-node neighbour lists, as the plots read them

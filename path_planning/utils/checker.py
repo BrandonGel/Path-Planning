@@ -63,7 +63,6 @@ def check_collision(solution, r, verbose: bool = True):
     agents = {name: path for name, path in solution.items()}
     agent_names = list(agents.keys())
     collision_radius_sq = (2 * r) ** 2
-    no_collision = True
     collisions = {}
 
     def get_pos(traj, t):
@@ -221,7 +220,7 @@ def check_collision_bodies(solution, bodies, graph_map=None, verbose: bool = Tru
                 speed = float(np.linalg.norm(b - a)) / dur
                 key = (body.key, speed)
                 if key not in movers:
-                    movers[key] = Agent(body.shape, speed, None, body.type, body.clearance)
+                    movers[key] = body.replace(max_speed=speed, max_rotation=None)
                 agents.append(movers[key])
                 paths.append(np.array([a, b]))
                 holds.append(0.0)

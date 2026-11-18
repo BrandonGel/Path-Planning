@@ -78,10 +78,10 @@ class SippPlanner:
         self._max_edge = None                # longest roadmap edge (estimates for unit-time moves)
         self._neighbours = {}                # position -> neighbour positions
         self.agent_names = [agent["name"] for agent in agents]
-        self.plan, self.plan_cost, self.action_cost = {}, {}, {}
+        self.plan, self.action_cost = {}, {}
         self._mtime_cache = {}
         self.sipp_max_iterations = sipp_max_iterations if sipp_max_iterations is not None and sipp_max_iterations > 0 else float("inf")
-        self.heuristic_type = HEURISTIC_TYPE.get(heuristic_type, HEURISTIC_TYPE["manhattan"]) if heuristic_type else HEURISTIC_TYPE["manhattan"]
+        self.heuristic_type = HEURISTIC_TYPE.get(heuristic_type, HEURISTIC_TYPE["manhattan"])
         self._new_round()
 
     # ------------------------------------------------------------------ tables, one per body
@@ -313,7 +313,6 @@ class SippPlanner:
             self.shuffle_agents()
             self._new_round()
             self.plan = {}
-            self.plan_cost = {}
             self.action_cost = {}
             iterations += 1
             success = True
@@ -352,7 +351,6 @@ class SippPlanner:
                     break
                 total_cost += goal_cost
                 self.plan[name] = plan
-                self.plan_cost[name] = goal_cost
                 self.action_cost[name] = costs
                 self._commit(name, plan, costs)
             if success and total_cost < best_solution_cost:
@@ -385,7 +383,15 @@ class SippPlanner:
         # makes another redundant. position -> [(arrival time, end of its interval)].
         arrivals = {start: [(0.0, start_interval[1])]} if graph.oriented else None
 
-        heapq.heappush(open_heap, (self.get_heuristic(start, goal, name), counter, initial_state))
+        h_cache = {}                            # position -> estimate (fixed for this search)
+
+        def h(position):
+            v = h_cache.get(position)
+            if v is None:
+                v = h_cache[position] = self.get_heuristic(position, goal, name)
+            return v
+
+        heapq.heappush(open_heap, (h(start), counter, initial_state))
         counter += 1
         low_level_iterations = 0
         while open_heap and low_level_iterations < self.sipp_max_iterations and time.perf_counter() - st < self.time_limit:
@@ -421,7 +427,7 @@ class SippPlanner:
                             print("Plan successfully calculated!!")
                         plan, plan_action_cost = self.reconstruct_path(came_from, action_cost, successor)
                         return True, plan, plan_action_cost, successor.time, low_level_iterations
-                    f_score = g_score[succ_key] + self.get_heuristic(successor.position, goal, name)
+                    f_score = g_score[succ_key] + h(successor.position)
                     heapq.heappush(open_heap, (f_score, counter, successor))
                     counter += 1
         return False, None, None, float('inf'), low_level_iterations
@@ -528,11 +534,7 @@ class SippPlanner:
             action_cost = self.action_cost[agent]
             path_list = []
             if not self.has_bodies:
-                path_list.append(self._setpoint(plan[0].time, plan[0].position))
-                for i in range(len(plan)-1):
-                    for j in range(int(plan[i+1].time - plan[i].time-1)):
-                        path_list.append(self._setpoint(plan[i].time, plan[i].position))
-                    path_list.append(self._setpoint(plan[i+1].time, plan[i+1].position))
+                path_list = [self._setpoint(s.time, s.position) for s in SippGraph._unit_states(plan)]
             else:
                 points = [state.position for state in plan]
                 moves = [_ori_between(a, b) if a != b else None for a, b in zip(points, points[1:])]
@@ -540,13 +542,9 @@ class SippPlanner:
                 for k, (action, state) in enumerate(zip(action_cost, plan)):
                     if k and moves[k - 1] is not None:
                         facing = moves[k - 1]
-                    path_list.append(self._with_heading(self._setpoint(state.time, state.position), facing))
+                    path_list.append(put_heading(self._setpoint(state.time, state.position), facing))
                     action_wait_cost, action_move_cost = action
                     if action_wait_cost > 1e-10:
-                        path_list.append(self._with_heading(self._setpoint(state.time + action_wait_cost, state.position), facing))
+                        path_list.append(put_heading(self._setpoint(state.time + action_wait_cost, state.position), facing))
             solution[agent] = path_list
         return solution
-
-    @staticmethod
-    def _with_heading(entry: dict, facing) -> dict:
-        return put_heading(entry, facing)

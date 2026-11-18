@@ -110,6 +110,15 @@ class Agent:
         """A ball agent of ``radius`` (a disc in 2D, a sphere in 3D)."""
         return cls(float(radius), max_speed, None, type, clearance)
 
+    def replace(self, **changes) -> "Agent":
+        """A copy with some fields changed, e.g. ``agent.replace(max_speed=None)``."""
+        fields = dict(shape=self._shape, max_speed=self._max_speed, max_rotation=self._max_rotation,
+                      type=self._type, clearance=self._clearance)
+        unknown = changes.keys() - fields.keys()
+        if unknown:
+            raise TypeError(f"Agent.replace: unknown fields {sorted(unknown)}")
+        return Agent(**{**fields, **changes})
+
     def to_dict(self) -> dict:
         s = self._shape
         shape = {"radius": s} if not isinstance(s, Shape) else {"class": s.__class__.__name__, **s.to_dict()}

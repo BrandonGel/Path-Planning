@@ -23,7 +23,7 @@ class BodyConflicts:
     def _unit_step(agent):
         """``agent``'s shape and clearance as the type used in the collision queries: no speed (every step
         takes 1 time unit) and no turning time (a turn is its own step here). None stays None."""
-        return None if agent is None else Agent(agent.shape, None, None, agent.type, agent.clearance)
+        return None if agent is None else agent.replace(max_speed=None, max_rotation=None)
 
     def agent_type(self, name) -> "Agent | None":
         """The body of agent ``name`` (None: a point agent)."""

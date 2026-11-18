@@ -161,10 +161,8 @@ class ICBS(CBS):
 
         child = HighLevelNode()
         child.solution, child.solution_cost = P.solution.copy(), P.solution_cost.copy()
-        child.constraint_dict = {}
-        for a, con in P.constraint_dict.items():
-            child.constraint_dict[a] = con.copy()
-            child.constraint_dict[a].add_constraint(forced if a == agent else banned if a not in mine else Constraints())
+        child.constraint_dict = self._with_constraints(
+            P, {agent: forced, **{a: banned for a in P.constraint_dict if a not in mine}})
         position = lambda a, time: self.env.get_state(a, child.solution, time).location
 
         def violates(a):

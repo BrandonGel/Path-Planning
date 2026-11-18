@@ -49,7 +49,7 @@ def config_agent(mapf_solver_config: dict, mapf_solver_name: str):
               clearance=float(mapf_solver_config.get("agent_clearance", 0.0))) if agent_radius > 0 else None)
     velocity = mapf_solver_config.get("agent_velocity")
     if body is not None and mapf_solver_name in TIMED_SOLVERS and body.max_speed is None and velocity:
-        body = Agent(body.shape, float(velocity), body.max_rotation, body.type, body.clearance)
+        body = body.replace(max_speed=float(velocity))
     return body
 
 
@@ -77,7 +77,6 @@ def _snap_agents_to_nodes(map_, agents_rt):
     from an off-node state). The nearest node is typically <1 cell away. Points that
     are already nodes are left untouched (grid/halton), so this is a no-op there.
     """
-    from path_planning.common.environment.node import Node
 
     nodes = getattr(map_, "nodes", None)
     if not nodes:
@@ -85,25 +84,22 @@ def _snap_agents_to_nodes(map_, agents_rt):
     nidx = getattr(map_, "pos_index_dict", {})
     pts = [tuple(float(c) for c in n.current) for n in nodes]
     kdt = None
-    out = []
-    for a in agents_rt:
-        s = tuple(float(x) for x in a["start"])
-        g = tuple(float(x) for x in a["goal"])
-        if s not in nidx:
+
+    def snap(p):
+        nonlocal kdt
+        p = tuple(float(x) for x in p)
+        if p in nidx:
+            return p
+        if kdt is None:
             from scipy.spatial import KDTree
-            kdt = kdt or KDTree(pts)
-            s = pts[int(kdt.query(np.asarray(s))[1])]
-        if g not in nidx:
-            from scipy.spatial import KDTree
-            kdt = kdt or KDTree(pts)
-            g = pts[int(kdt.query(np.asarray(g))[1])]
-        out.append({**a, "start": s, "goal": g})
-    return out
+            kdt = KDTree(pts)
+        return pts[int(kdt.query(np.asarray(p))[1])]
+
+    return [{**a, "start": snap(a["start"]), "goal": snap(a["goal"])} for a in agents_rt]
 
 
 def _agents_off_nodes(map_, agents_rt) -> List[str]:
     """Return a description of every agent start/goal that is not an exact roadmap node."""
-    from path_planning.common.environment.node import Node
 
     nidx = getattr(map_, "pos_index_dict", {}) or {}
     off = []
@@ -157,11 +153,8 @@ def solve_mapf(map_, agents,mapf_solver_config:dict) -> Tuple[dict, float]:
         agents_rt = _snap_agents_to_nodes(map_, agents_rt)
     # Low-level A* (inside CBS/ICBS) may need a larger budget than the high-level CBS iteration cap,
     # especially once constraints are introduced (time-expanded state space).
-    try:
-        num_nodes = int(len(getattr(map_, "nodes", [])))
-    except Exception:
-        num_nodes = 0
-    low_level_astar_max_iterations = int(max(int(max_iterations or 0), num_nodes * 5, 10000))   # None: no cap given
+    num_nodes = len(getattr(map_, "nodes", []))
+    low_level_astar_max_iterations = max(int(max_iterations or 0), num_nodes * 5, 10000)   # None: no cap given
     low_level_cap = mapf_solver_config.get("low_level_astar_max_iterations")
     if low_level_cap is not None:
         low_level_astar_max_iterations = min(low_level_astar_max_iterations, int(low_level_cap))
@@ -174,28 +167,19 @@ def solve_mapf(map_, agents,mapf_solver_config:dict) -> Tuple[dict, float]:
     agents_rt = with_bodies(agents_rt, mapf_solver_config, mapf_solver_name)
     bodies = _bodies_of(agents_rt)
 
+    if mapf_solver_name in ('cbs', 'icbs'):
+        env = (Environment if mapf_solver_name == 'cbs' else IEnvironment)(
+            map_,
+            agents_rt,
+            astar_max_iterations=low_level_astar_max_iterations,
+            heuristic_type=heuristic_type,
+            move_parked_agents=bool(mapf_solver_config.get("move_parked_agents", True)),
+            conflict_span=mapf_solver_config.get("conflict_span", "window"),        # agents with bodies: "window" | "step"
+            goal_conflicts=bool(mapf_solver_config.get("goal_conflicts", False)),   # agents with bodies
+        )
     if mapf_solver_name == 'cbs':
-        env = Environment(
-            map_,
-            agents_rt,
-            astar_max_iterations=low_level_astar_max_iterations,
-            heuristic_type=heuristic_type,
-            move_parked_agents=bool(mapf_solver_config.get("move_parked_agents", True)),
-            conflict_span=mapf_solver_config.get("conflict_span", "window"),        # agents with bodies: "window" | "step"
-            goal_conflicts=bool(mapf_solver_config.get("goal_conflicts", False)),   # agents with bodies
-        )
-        cbs = CBS(env,time_limit=time_limit,max_iterations=max_iterations,verbose=False)
-        solution,solution_info = cbs.search()
+        solution, solution_info = CBS(env, time_limit=time_limit, max_iterations=max_iterations, verbose=False).search()
     elif mapf_solver_name == 'icbs':
-        env = IEnvironment(
-            map_,
-            agents_rt,
-            astar_max_iterations=low_level_astar_max_iterations,
-            heuristic_type=heuristic_type,
-            move_parked_agents=bool(mapf_solver_config.get("move_parked_agents", True)),
-            conflict_span=mapf_solver_config.get("conflict_span", "window"),        # agents with bodies: "window" | "step"
-            goal_conflicts=bool(mapf_solver_config.get("goal_conflicts", False)),   # agents with bodies
-        )
         icbs = ICBS(
             env,
             time_limit=time_limit,
@@ -307,25 +291,6 @@ def solve_mapd(map_, agents, tasks, non_task_endpoints, mapf_solver_config: dict
               "max_iterations": None, "heuristic_type": "euclidean", **mapf_solver_config}
     return summarize_solution(solution, solution_info, config, map_, bodies)
 
-
-def get_mapf_solver(mapf_solver_name:str) -> Tuple[CBS,Environment]:
-    mapf_solver_name = mapf_solver_name.lower()
-    if mapf_solver_name == "cbs":
-        return CBS,Environment
-    elif mapf_solver_name == "icbs":
-        return ICBS,IEnvironment
-    elif mapf_solver_name == "lacam":
-        return LaCAM
-    elif mapf_solver_name == "lacam_random":
-        return LaCAM_random
-    elif mapf_solver_name == "sipp":
-        return SippPlanner
-    elif mapf_solver_name == "ccbs":
-        return CCBS,CCBS_Environment
-    elif mapf_solver_name == "neural_attf":
-        return NeuralATTF, Simulation
-    else:
-        raise ValueError(f"Invalid algorithm: {mapf_solver_name}")
 
 def computer_solution_cost(solution:dict):
     cost_dict = {}

@@ -140,13 +140,6 @@ class GraphSampler(GraphSamplerBase):
     def goal_nodes(self) -> List[Node]:
         return self.node_sampler.get_nodes(index_type='goal_points')
 
-    @property
-    def boundary_nodes(self) -> List[Node]:
-        """The boundary nodes (the sampler's ``'boundary_points'`` kind) as
-        ``Node`` objects: outline vertices when they were generated, otherwise
-        the sampled nodes whose cell touches a wall or the map edge."""
-        return self.node_sampler.get_nodes(index_type='boundary_points')
-
     # ------------------------------------------------------------ Nodes Methods
     def generateRandomNodes(self,sample_num: int = None, generate_grid_nodes = False, generate_boundary_nodes = False, prob_map = None, samp_from_prob_map_ratio = 0.5, roadmap_type: str = None):
         """Reset ``node_sampler`` and sample this map's node set (see
@@ -459,7 +452,7 @@ class GraphSampler(GraphSamplerBase):
         single_point = prev is not None and np.ndim(prev) == 1 and all(np.isscalar(x) for x in prev)
         prevs = [prev] * n if prev is None or single_point else list(prev)
         t0s, holds, heads, speeds = (_per_agent(x, n) for x in (t0, goal_hold, heading, speed))
-        movers = [a if sp is None else Agent(a.shape, sp, a.max_rotation, a.type, a.clearance)
+        movers = [a if sp is None else a.replace(max_speed=sp)
                   for a, sp in zip(agents, speeds)]
         prevs = [None if q is None or a.max_rotation == 0 or tuple(map(float, q)) == tuple(p[0]) else
                  np.asarray(q, dtype=float) for q, a, p in zip(prevs, movers, paths)]

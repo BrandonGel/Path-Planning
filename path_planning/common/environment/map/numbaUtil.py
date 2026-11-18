@@ -1,10 +1,5 @@
-from itertools import product
-from typing import Iterable, Union, Tuple, List, Dict
-import time
 
 import numpy as np
-from scipy import ndimage
-from scipy.ndimage import map_coordinates
 
 try:
     from numba import njit as _numba_njit
@@ -51,83 +46,6 @@ def convert_np_to_tuple(array: np.ndarray) -> list:
     if array.ndim != 2:
         raise ValueError(f"expected an (N, dim) array, got shape {array.shape}")
     return list(zip(*array.T.tolist()))
-
-@_njit(cache=True)
-def _world_line_of_sight(p1: np.ndarray, p2: np.ndarray, bounds: np.ndarray, resolution: float, shape: np.ndarray) -> np.ndarray:
-    """
-    Check if two world points are in line of sight.
-
-    Args:
-        p1: Start point of the line (world coordinates).
-        p2: End point of the line (world coordinates).
-
-    Returns:
-        bool: True if the two points are in line of sight, False otherwise.
-    """
-    dim = p1.size
-    inv_res = 1.0 / resolution
-
-    # Continuous grid-index space: cell k occupies [k, k+1).
-    p1_f = np.empty(dim, dtype=np.float64)
-    p2_f = np.empty(dim, dtype=np.float64)
-    for d in range(dim):
-        p1_f[d] = (p1[d] - bounds[d, 0]) * inv_res
-        p2_f[d] = (p2[d] - bounds[d, 0]) * inv_res
-
-    # Start/end cells with the map's own convention (round to nearest centre, clip).
-    p1_grid = world_to_cell(p1, bounds, resolution, shape)
-    p2_grid = world_to_cell(p2, bounds, resolution, shape)
-    current = p1_grid.copy()
-
-    step = np.zeros(dim, dtype=np.int64)
-    t_max = np.full(dim, np.inf)
-    t_delta = np.full(dim, np.inf)
-    for d in range(dim):
-        delta = p2_f[d] - p1_f[d]
-        if delta > 1e-10:
-            step[d] = 1
-            t_max[d] = ((p1_grid[d] + 1) - p1_f[d]) / delta
-            t_delta[d] = 1.0 / delta
-        elif delta < -1e-10:
-            step[d] = -1
-            t_max[d] = (p1_f[d] - p1_grid[d]) / (-delta)
-            t_delta[d] = 1.0 / (-delta)
-    
-    max_steps = 0
-    for d in range(dim):
-        max_steps += abs(p2_grid[d] - p1_grid[d])
-    out = np.empty((max_steps + 1, dim), dtype=np.int64)
-    out[0, :] = current
-    count = 1
-
-    # Traverse with early termination
-    tie_eps = 1e-9
-    for _ in range(max_steps):
-        done = True
-        for d in range(dim):
-            if current[d] != p2_grid[d]:
-                done = False
-        if done:
-            break
-        t_min = np.inf
-        for d in range(dim):
-            if t_max[d] < t_min:
-                t_min = t_max[d]
-        if not np.isfinite(t_min):
-            break
-        
-        # Step every tied axis that has not reached its end cell (diagonal tie-break; no overshoot at t=1).
-        moved = False
-        for d in range(dim):
-            if t_max[d] <= t_min + tie_eps and current[d] != p2_grid[d]:
-                current[d] += step[d]
-                t_max[d] += t_delta[d]
-                moved = True
-        if not moved:
-            break
-        out[count, :] = current
-        count += 1
-    return out[:count]
 
 @_njit(cache=True)
 def _world_in_collision(p1: np.ndarray, p2: np.ndarray, bounds: np.ndarray, resolution: float, shape: np.ndarray, type_map: np.ndarray, esdf: np.ndarray, obstacle_type: int, inflation_type: int, strict_collision: bool) -> np.ndarray:
