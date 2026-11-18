@@ -14,31 +14,24 @@ from pathlib import Path
 
 import numpy as np
 
-try:
-    from path_planning.cluster.embeddings import (
-        EMBEDDING_METHODS,
-        compute_embedding,
-        default_method_name,
-        explained_variance,
-        largest_component,
-        symmetric_roadmap_csr,
-    )
-    from path_planning.cluster.gnn_cluster_map import (
-        _kmeans_medoids,
-        gnn_seed_indices,
-        load_cluster_encoder,
-        read_run_config,
-        ablation_flags_from_config,
-        sampler_to_cluster_heterodata,
-    )
-    from path_planning.utils.util import set_global_seed
-    from tests.test_ctopprm import _build_block_map, START, GOAL
-
-    _IMPORTS_OK = True
-    _IMPORT_ERROR = ""
-except ModuleNotFoundError as exc:  # pragma: no cover
-    _IMPORTS_OK = False
-    _IMPORT_ERROR = str(exc)
+from path_planning.cluster.embeddings import (
+    EMBEDDING_METHODS,
+    compute_embedding,
+    default_method_name,
+    explained_variance,
+    largest_component,
+    symmetric_roadmap_csr,
+)
+from path_planning.cluster.gnn_cluster_map import (
+    _kmeans_medoids,
+    gnn_seed_indices,
+    load_cluster_encoder,
+    read_run_config,
+    ablation_flags_from_config,
+    sampler_to_cluster_heterodata,
+)
+from path_planning.utils.util import set_global_seed
+from tests.test_ctopprm import _build_block_map, START, GOAL
 
 GNN6_RUN = Path(os.environ.get(
     "GNN6_RUN",
@@ -60,7 +53,6 @@ def _detach_vertex(map_, i: int) -> None:
     map_.roadmap.set_adjacency(road_map, weights)    # edges / edge_weights are views over map_.roadmap
 
 
-@unittest.skipUnless(_IMPORTS_OK, f"imports failed: {_IMPORT_ERROR}")
 class TestEmbeddingControls(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

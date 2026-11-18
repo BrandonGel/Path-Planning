@@ -7,21 +7,14 @@ import unittest
 
 import numpy as np
 
-try:
-    from path_planning.common.environment.map.graph_sampler import GraphSampler
-    from path_planning.cluster.CTopPRMpy.ctopprm import CTopPRM
-    from path_planning.cluster.kmeans.graph_kmeans import (
-        GraphKMeans,
-        build_symmetric_adjacency,
-        multi_source_dijkstra,
-    )
-    from path_planning.utils.util import obstacles_world_to_grid, set_global_seed
-
-    _IMPORTS_OK = True
-    _IMPORT_ERROR = ""
-except ModuleNotFoundError as exc:  # pragma: no cover
-    _IMPORTS_OK = False
-    _IMPORT_ERROR = str(exc)
+from path_planning.common.environment.map.graph_sampler import GraphSampler
+from path_planning.cluster.CTopPRMpy.ctopprm import CTopPRM
+from path_planning.cluster.kmeans.graph_kmeans import (
+    GraphKMeans,
+    build_symmetric_adjacency,
+    multi_source_dijkstra,
+)
+from path_planning.utils.util import obstacles_world_to_grid, set_global_seed
 
 
 def _build_block_map(starts, goals, sample_num=400):
@@ -43,8 +36,8 @@ def _build_block_map(starts, goals, sample_num=400):
     map_.set_roadmap_config(
         sample_num=sample_num, num_neighbors=13, min_edge_length=1e-10, max_edge_length=5.0
     )
-    nodes = map_.generateRandomNodes()
-    map_.generate_roadmap(nodes)
+    map_.generateRandomNodes()
+    map_.generate_roadmap("prm")
     return map_
 
 
@@ -54,7 +47,6 @@ SEEDS = [START, GOAL, (2.0, 3.0), (18.0, 17.0)]
 K = 8
 
 
-@unittest.skipUnless(_IMPORTS_OK, f"imports failed: {_IMPORT_ERROR}")
 class TestGraphKMeans(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

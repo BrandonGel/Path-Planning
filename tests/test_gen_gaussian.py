@@ -30,10 +30,12 @@ BASE = dict(
     obs_size=0.5, time_limit=1, max_iterations=10, road_map_type="grid", use_discrete_space=True,
     sample_num=0, num_neighbors=4.0, min_edge_len=1e-10, max_edge_len=1.1,
 )
-# sha256 of {agents, obstacles} produced by the generator BEFORE the gaussian mode was added.
+# sha256 of {agents, obstacles} from the uniform generator. Recorded again after b6d46f3 ("Update occupied
+# position"), which keeps obstacles clear with the map's Euclidean inflation instead of a square kernel of
+# ceil(2r / resolution) cells; before it: 42 -> cfe4663b..., 7 -> 8c3bbc01....
 GOLDEN = {
-    42: "cfe4663b05a648aea7add90eaf86b749a26cc2916eedb49c3ba4691194815ece",
-    7: "8c3bbc016cdb2647e8a2f5e7386627319bd501efb0542ebf075aed382e70d301",
+    42: "5ae601bd30192b15475139938c4b58607ab47cf524f4e43bea9aeab5cca8890f",
+    7: "f8bb12ee3454e0681312d84170b9f11c41ce2bcd61058db05d247e980e69ceac",
 }
 
 
