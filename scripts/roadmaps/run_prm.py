@@ -3,6 +3,11 @@ Run PRM for 2D and 3D maps.
 python scripts/roadmaps/run_prm.py
 """
 
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))   # this repo, ahead of any installed copy
+
 from path_planning.utils.util import set_global_seed
 from path_planning.global_planner.sample_search.prm import PRM
 from path_planning.utils.util import read_grid_from_yaml

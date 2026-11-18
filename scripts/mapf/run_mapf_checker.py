@@ -11,15 +11,20 @@ as discs of the summary's ``agent_radius``. A constant speed is expected when th
 python scripts/mapf/run_mapf_checker.py [solver ...]
 '''
 
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))   # this repo, ahead of any installed copy
+
 import glob
 import os
-import sys
 
 import yaml
 
+from path_planning.multi_agent_planner.mapf_solver import MAPF_SOLVERS
 from path_planning.utils.checker import check_collision, check_collision_bodies, check_time_anomaly, check_velocity_anomaly
 
-SOLVERS = ("cbs", "icbs", "ccbs", "sipp", "lacam", "lacam_random", "neural_attf")
+SOLVERS = (*MAPF_SOLVERS, "neural_attf")
 ROOT = "path_planning/maps/2d"
 
 
@@ -27,7 +32,7 @@ def check_mapf_solution(file, radius: float = None, velocity: float = None, verb
     """Check one saved solution; True when it has no anomaly and no collision. ``radius`` / ``velocity``
     default to the summary's ``agent_radius`` / ``agent_velocity``; recorded bodies take precedence."""
     with open(file, 'r') as f:
-        data = yaml.safe_load(f)
+        data = yaml.load(f, Loader=getattr(yaml, "CSafeLoader", yaml.SafeLoader))
     solution = data.get('schedule') or {}
     if not solution:
         print(f"{file}: no schedule")

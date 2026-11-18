@@ -42,7 +42,9 @@ repo_root = Path(__file__).resolve().parents[2]
 if str(repo_root) not in sys.path:
     sys.path.insert(0, str(repo_root))
 
-from path_planning.data_generation.dataset_ground_truth_solve import create_solutions,create_path_parameter_directory
+from path_planning.multi_agent_planner.mapf_solver import MAPF_SOLVERS
+from path_planning.data_generation.dataset_ground_truth_solve import create_solutions
+from path_planning.data_generation.dataset_util import create_path_parameter_directory
 from path_planning.data_generation.dataset_ground_truth_map import create_maps
 import argparse
 import yaml
@@ -65,11 +67,10 @@ if __name__ == "__main__":
     parser.add_argument("-pt","--nb_permutations_tries",type=int, default=32, help="number of permutations tries")
     parser.add_argument("-t","--time_limit",type=float, default=60, help="time_limit for the solver in seconds")
     parser.add_argument("-m","--max_iterations",type=int, default=10000, help="max iterations for the solver")
-    parser.add_argument("-mapf","--mapf_solver_name",type=str, default="cbs", choices=["cbs", "icbs", "lacam", "lacam_random"], help="MAPF solver to use")
+    parser.add_argument("-mapf","--mapf_solver_name",type=str, default="cbs", choices=list(MAPF_SOLVERS), help="MAPF solver to use")
     parser.add_argument("-gng","--generate_new_graph",action="store_true", help="generate new graph")
     parser.add_argument("-gbn","--generate_boundary_nodes",action="store_true", help="also register obstacle/map boundary vertices as roadmap nodes")
-    parser.add_argument("-bns","--boundary_node_spacing",type=float, default=None, help="resample obstacle/map boundary nodes every this many world units (e.g. the resolution for one node per boundary cell); default: corners/junctions only")
-    parser.add_argument("-w","--num_workers",type=int, default=1, help="number of parallel workers for cases (default: auto-detect CPU cores)")
+    parser.add_argument("-w","--num_workers",type=int, default=1, help="number of parallel workers for cases (default: 1)")
     parser.add_argument("-verbose","--verbose",dest="verbose",action="store_true", help="verbose")
     parser.add_argument("-cfg","--config",type=str, default='config/map.yaml', help="config file")
     parser.add_argument("-gen_config","--gen_config",type=str, default='config/gen.yaml', help="start/goal placement config (uniform | gaussian), see config/gen.yaml")
@@ -82,7 +83,7 @@ if __name__ == "__main__":
     map_config['road_map_type'] = "grid"
     map_config['use_discrete_space'] = True
     map_config['solve_till_success'] = True
-    map_config['num_samples'] = 0
+    map_config['sample_num'] = 0                      # the grid roadmap has no random samples
     map_config['num_neighbors'] = 4.0
     map_config['min_edge_len'] = 0.1
     map_config['max_edge_len'] = 1.1
@@ -90,7 +91,6 @@ if __name__ == "__main__":
     map_config = set_map_config(map_config=map_config,args=args)
     map_config['gen'] = read_gen_config_from_yaml(args.gen_config)
     map_config['generate_boundary_nodes'] = args.generate_boundary_nodes
-    map_config['boundary_node_spacing'] = args.boundary_node_spacing
 
     base_path = map_config['path']
     nb_agents = map_config['nb_agents']
@@ -106,5 +106,4 @@ if __name__ == "__main__":
     create_maps(path, num_cases, map_config, num_workers=num_workers, generate_new_graph= generate_new_graph, verbose=verbose)
 
     print(f"Phase 2: MAPF Solver for num_agents={nb_agents}, road_map_type={road_map_types}, agent_radius={agent_radius}")
-    path = create_path_parameter_directory(base_path, map_config)
     create_solutions(path, num_cases, map_config, num_workers=num_workers, verbose=verbose)

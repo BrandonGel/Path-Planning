@@ -1,15 +1,15 @@
 """
 Run Neural-ATTF (multi-agent pickup-and-delivery via token passing + Neural
-STA*) across several random task frequencies, in both discrete (grid) and
-continuous (PRM) graph modes.
+STA*) on one life-long MAPD instance: agents, parking endpoints and tasks are
+read from the map YAML. run_neural_attf_random.py and
+run_neural_attf_continous.py reuse the helpers defined here.
 
 Usage:
     python scripts/mapf/run_neural_attf.py [--map path/to/mapd.yaml]
 
 Outputs:
-    figs/neural_attf/neural_attf_<mode>_freq<f>.png
-    figs/neural_attf/neural_attf_<mode>_freq<f>.gif
-    path_planning/maps/2d/neural_attf/solution_<mode>_freq<f>.yaml
+    figs/neural_attf/neural_attf_mapd_<mode>.png
+    path_planning/maps/2d/neural_attf/solution_mapd_<mode>.yaml
 """
 
 from __future__ import annotations
@@ -17,7 +17,6 @@ from __future__ import annotations
 import os
 import random
 import sys
-import time
 from copy import deepcopy
 
 # Make the source tree importable when the package is installed non-editably:

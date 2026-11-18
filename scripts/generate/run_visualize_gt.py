@@ -1,42 +1,51 @@
 '''
 2D Scenario
-Visualize a dataset of MAPF instances and their solutions for 4 agents in a 32x32 grid with 0.1 obstacles and 16 permutations for the first 3 cases with all workers.
+Visualize a dataset of MAPF instances and their solutions for 4 agents in a 32x32 grid with 0.1 obstacles for the first 3 cases with all workers.
 python scripts/generate/run_visualize_gt.py -s benchmark/train
 
 Save the dataset in the benchmark/train folder if path not
-python scripts/generate/run_visualize_gt.py -s benchmark/train -b 0 32.0 0 32.0 -n 4 -o 0.1 -p 16 -r 1.0 
+python scripts/generate/run_visualize_gt.py -s benchmark/train -b 0 32.0 0 32.0 -n 4 -o 0.1 -r 1.0
 
 Visualize a dataset of MAPF instances and their solutions with a config file.
-python scripts/generate/run_visualize_gt.py -s benchmark/train -y benchmark/train/map32.0x32.0_resolution1.0/agents4_obst0.1/config.yaml
+python scripts/generate/run_visualize_gt.py -s benchmark/train -cfg benchmark/train/map32.0x32.0_resolution1.0/agents4_obst0.1/config.yaml
 
 Visualize a dataset of MAPF instances and their solutions with all cases, first_n, range, and specific modes.
-python scripts/generate/run_visualize_gt.py -s benchmark/train -y benchmark/train/map32.0x32.0_resolution1.0/agents4_obst0.1/config.yaml -cm all
-python scripts/generate/run_visualize_gt.py -s benchmark/train -y benchmark/train/map32.0x32.0_resolution1.0/agents4_obst0.1/config.yaml -cm first_n -cn 3
-python scripts/generate/run_visualize_gt.py -s benchmark/train -y benchmark/train/map32.0x32.0_resolution1.0/agents4_obst0.1/config.yaml -cm range -cr 3 4
-python scripts/generate/run_visualize_gt.py -s benchmark/train -y benchmark/train/map32.0x32.0_resolution1.0/agents4_obst0.1/config.yaml -cm specific -cs 0 5 10
+python scripts/generate/run_visualize_gt.py -s benchmark/train -cfg benchmark/train/map32.0x32.0_resolution1.0/agents4_obst0.1/config.yaml -cm all
+python scripts/generate/run_visualize_gt.py -s benchmark/train -cfg benchmark/train/map32.0x32.0_resolution1.0/agents4_obst0.1/config.yaml -cm first_n -cn 3
+python scripts/generate/run_visualize_gt.py -s benchmark/train -cfg benchmark/train/map32.0x32.0_resolution1.0/agents4_obst0.1/config.yaml -cm range -cr 3 4
+python scripts/generate/run_visualize_gt.py -s benchmark/train -cfg benchmark/train/map32.0x32.0_resolution1.0/agents4_obst0.1/config.yaml -cm specific -cs 0 5 10
 
 Visualize a dataset of MAPF instances and their solutions with first_n, range, and specific modes for casese and permutations.
-python scripts/generate/run_visualize_gt.py -s benchmark/train -y benchmark/train/map32.0x32.0_resolution1.0/agents4_obst0.1/config.yaml -cm first_n -cn 3 -pv all
-python scripts/generate/run_visualize_gt.py -s benchmark/train -y benchmark/train/map32.0x32.0_resolution1.0/agents4_obst0.1/config.yaml -cm first_n -cn 3 -pv first_n -pn 3
-python scripts/generate/run_visualize_gt.py -s benchmark/train -y benchmark/train/map32.0x32.0_resolution1.0/agents4_obst0.1/config.yaml -cm range -cr 3 4 -pv range -pr 3 4
-python scripts/generate/run_visualize_gt.py -s benchmark/train -y benchmark/train/map32.0x32.0_resolution1.0/agents4_obst0.1/config.yaml -cm specific -cs 5 -pv specific -ps 0 5 10
+python scripts/generate/run_visualize_gt.py -s benchmark/train -cfg benchmark/train/map32.0x32.0_resolution1.0/agents4_obst0.1/config.yaml -cm first_n -cn 3 -pv all
+python scripts/generate/run_visualize_gt.py -s benchmark/train -cfg benchmark/train/map32.0x32.0_resolution1.0/agents4_obst0.1/config.yaml -cm first_n -cn 3 -pv first_n -pn 3
+python scripts/generate/run_visualize_gt.py -s benchmark/train -cfg benchmark/train/map32.0x32.0_resolution1.0/agents4_obst0.1/config.yaml -cm range -cr 3 4 -pv range -pr 3 4
+python scripts/generate/run_visualize_gt.py -s benchmark/train -cfg benchmark/train/map32.0x32.0_resolution1.0/agents4_obst0.1/config.yaml -cm specific -cs 5 -pv specific -ps 0 5 10
 
 Visualize a dataset of MAPF instances and their solutions with static visualization and animation.
-python scripts/generate/run_visualize_gt.py -s benchmark/train -y benchmark/train/map32.0x32.0_resolution1.0/agents4_obst0.1/config.yaml -ss True 
-python scripts/generate/run_visualize_gt.py -s benchmark/train -y benchmark/train/map32.0x32.0_resolution1.0/agents4_obst0.1/config.yaml -cm specific -cs 0 -sa True
+python scripts/generate/run_visualize_gt.py -s benchmark/train -cfg benchmark/train/map32.0x32.0_resolution1.0/agents4_obst0.1/config.yaml -ss 
+python scripts/generate/run_visualize_gt.py -s benchmark/train -cfg benchmark/train/map32.0x32.0_resolution1.0/agents4_obst0.1/config.yaml -cm specific -cs 0 -sa
 
 '''
 
-from path_planning.data_generation.dataset_visualize_ground_truth import load_and_visualize_case
 import argparse
+import sys
 from pathlib import Path
+
+# Import this repo's `path_planning`, not an installed copy from site-packages.
+repo_root = Path(__file__).resolve().parents[2]
+if str(repo_root) not in sys.path:
+    sys.path.insert(0, str(repo_root))
 import yaml
 import os
-from multiprocessing import Pool, cpu_count
-from tqdm import tqdm
 import numpy as np
 from path_planning.utils.util import set_map_config
-from path_planning.data_generation.dataset_util import *
+from path_planning.data_generation.dataset_util import (
+    create_path_parameter_directory,
+    generate_map_path,
+    generate_perm_base_path,
+    generate_roadmap_path,
+    get_graph_file_path,
+)
 from path_planning.data_generation.dataset_visualize_ground_truth import visualize_gt
 
 
@@ -69,7 +78,7 @@ def get_all_cases(path: Path, case_mode: str = "first_n", num_cases: int = 3, ca
         cases_to_viz = case_dirs[:3]  # Default to first 3
     return cases_to_viz
 
-def get_all_permutations(cases_to_viz: Path, permutation_mode: str = "first_n", num_permutations: int = 4, permutations_range: list[int] = [0, 16], specific_permutations: list[int] = [0, 5, 10],graph_file_name: str = None):
+def get_all_permutations(cases_to_viz: Path, road_map_type: str, permutation_mode: str = "first_n", num_permutations: int = 4, permutations_range: list[int] = [0, 16], specific_permutations: list[int] = [0, 5, 10],graph_file_name: str = None):
     perm_mode = permutation_mode  # Change this to control which permutations to visualize
     n_permutations = num_permutations
     permutations_range = np.array(permutations_range).astype(int).flatten()  # Range if using "range"
@@ -148,7 +157,7 @@ if __name__ == "__main__":
         raise ValueError("At least one of show_static or show_animation must be True")
 
     cases_to_viz = get_all_cases(path, case_mode=args.case_mode, num_cases=args.num_cases, case_range=args.case_range, specific_cases=args.specific_cases)
-    tasks = get_all_permutations(cases_to_viz, permutation_mode=args.permutation_mode, num_permutations=args.num_permutations, permutations_range=args.permutations_range, specific_permutations=args.specific_permutations)
+    tasks = get_all_permutations(cases_to_viz, road_map_type, permutation_mode=args.permutation_mode, num_permutations=args.num_permutations, permutations_range=args.permutations_range, specific_permutations=args.specific_permutations)
 
     for task in tasks:
         task.extend([mapf_solver_name, road_map_type, agent_velocity, show_static, show_animation, verbose])

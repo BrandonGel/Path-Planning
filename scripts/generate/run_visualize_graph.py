@@ -1,5 +1,12 @@
 import argparse
 import os
+import sys
+from pathlib import Path
+
+# Import this repo's `path_planning`, not an installed copy from site-packages.
+repo_root = Path(__file__).resolve().parents[2]
+if str(repo_root) not in sys.path:
+    sys.path.insert(0, str(repo_root))
 import yaml
 from multiprocessing import cpu_count
 
@@ -13,7 +20,7 @@ from path_planning.data_generation.dataset_util import create_path_parameter_dir
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("-s","--path",type=str, default='/home/bho36/Dropbox/Team_Path_Planning/brandon_graph_data/train', help="input file containing map and obstacles")
-    parser.add_argument("-rmt","--road_map_type",type=str,default="prm",help="Road map type to visualize (matches folders under sample/<road_type>/).",)
+    parser.add_argument("-rmt","--road_map_types",type=str,nargs='+',default=["prm"],help="Road map types to visualize (folders under sample/<road_type>/).",)
     parser.add_argument("-ts","--target_space",type=str, default="convolution_binary", help="Target space to visualize.")
     parser.add_argument("-cm","--case_mode",type=str, default="first_n", choices=["all", "first_n", "range", "specific"], help="How to select case_*/ folders.")
     parser.add_argument("-cn","--num_cases",type=int, default=2, help="Number of cases when case_mode=first_n.")

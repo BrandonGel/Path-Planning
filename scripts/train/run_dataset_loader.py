@@ -14,7 +14,11 @@ Run dataset loader with the default settings for a specific map and graph data w
 python scripts/train/run_dataset_loader.py -s benchmark/train/map32.0x32.0_resolution1.0/agents4_obst0.1 -w 1
 """
 
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))   # this repo, ahead of any installed copy
+
 from path_planning.gnn.dataloader import get_graph_dataset_file_paths, GraphDataset
 from multiprocessing import cpu_count
 import argparse
@@ -30,7 +34,7 @@ if __name__ == "__main__":
     parser.add_argument("-l","--load_file",type=str, default=None, help="load file")
     parser.add_argument("-sf","--save_file",type=str, default='/home/bho36/Dropbox/Team_Path_Planning/brandon_graph_data/train/data.pt', help="save file")
     parser.add_argument("-rmt","--road_map_type",type=str, nargs='+', default=['prm','cdt'], help="road map type")
-    parser.add_argument("-ts","--target_space",type=str, nargs='+', default=['convolution_binary'], help="target space")
+    parser.add_argument("-ts","--target_space",type=str, default='convolution_binary', help="target space")
     parser.add_argument("-w","--num_workers",type=int, default=None, help="number of parallel workers for cases (default: auto-detect CPU cores)")
     args = parser.parse_args()
 
@@ -40,11 +44,10 @@ if __name__ == "__main__":
     save_file = Path(args.save_file) if args.save_file is not None else None
     num_workers = args.num_workers if args.num_workers is not None else cpu_count()
     config = {
-            "road_map_types": args.road_map_type,
-            "target_spaces": args.target_space,
-            "num_workers": num_workers,
+            "road_map_type": args.road_map_type,
+            "target_space": args.target_space,
         }
     data_files = get_graph_dataset_file_paths(file_paths,config)
-    graph_dataset =GraphDataset(data_files,load_file=load_file,save_file=save_file,num_hops=-1,num_workers=num_workers)
+    graph_dataset =GraphDataset(data_files,load_file=load_file,save_file=save_file,num_workers=num_workers)
     if save_file is not None:
         graph_dataset.save()

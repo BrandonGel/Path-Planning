@@ -1,3 +1,8 @@
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))   # this repo, ahead of any installed copy
+
 import os
 import warnings
 import logging
@@ -7,7 +12,6 @@ os.environ['TORCH_LOGS'] = '-all'
 os.environ['TORCHDYNAMO_VERBOSE'] = '0'
 os.environ['TORCH_CPP_LOG_LEVEL'] = 'ERROR'
 
-from pathlib import Path
 import argparse
 import wandb
 import numpy as np
@@ -78,7 +82,7 @@ def set_model(model_config:dict,train_config: dict, data_sample: HeteroData, dev
     if resume_epoch > 0 and model_load_folder is not None:
         model_load_file = f"epoch_{resume_epoch}.pth"  if model_name_suffix == "" else f"epoch_{resume_epoch}_{model_name_suffix}.pth"       
         model_load_path = os.path.join(model_load_folder, model_load_file)        
-        model.load_state_dict(torch.load(model_load_path))
+        model.load_state_dict(torch.load(model_load_path, map_location=device))
     
     # Initialize the optimizer
     optimizer_type = model_config['optimizer']['type']
@@ -107,7 +111,7 @@ def run_train(train_config: dict,num_workers: int = None, use_cuda: bool = True,
 
     # Getting the dataset file paths
     data_files = get_graph_dataset_file_paths(folder_path,config)
-    graph_dataset =GraphDataset(data_files,load_file=load_file,save_file=save_file,num_hops=-1,num_workers=num_workers)
+    graph_dataset =GraphDataset(data_files,load_file=load_file,save_file=save_file,num_workers=num_workers)
     if save_file is not None:
         graph_dataset.save()
 
@@ -130,7 +134,7 @@ def run_train(train_config: dict,num_workers: int = None, use_cuda: bool = True,
     num_epochs = max(0,resume_epoch)+train_config['train']['num_epochs']
     save_epoch = train_config['train']['save_epoch']
     verbose_epoch = train_config.get('train',{}).get('verbose_epoch',10)
-    with wandb.init(mode="offline" if not online else "online",dir = model_save_folder,project="path-planning", name=f"{model_type_str}_{"compile" if args.compile else ""}", config=train_config) as run:
+    with wandb.init(mode="offline" if not online else "online",dir = model_save_folder,project="path-planning", name=f"{model_type_str}_{"compile" if train_config['device']['compile'] else ""}", config=train_config) as run:
 
         model_save_version_folder = os.path.join(wandb.run.dir, "model")
         os.makedirs(model_save_version_folder, exist_ok=True)
@@ -148,9 +152,9 @@ def run_train(train_config: dict,num_workers: int = None, use_cuda: bool = True,
         start_time = time()
         for epoch in range(resume_epoch + 1, num_epochs + 1):
             st = time()
-            train_loss,train_time = train(train_loader,model,optimizer,threshold_model=threshold_model,loss_function=loss_fcn,device=device,run=run,num_prune=num_prune)
+            train_loss,train_time = train(train_loader,model,optimizer,loss_function=loss_fcn,device=device,run=run,num_prune=num_prune)
             et = time()
-            test_loss,test_time = test(test_loader,model,threshold_model=threshold_model,loss_function=loss_fcn,device=device,run=run,num_prune=num_prune)
+            test_loss,test_time = test(test_loader,model,loss_function=loss_fcn,device=device,run=run,num_prune=num_prune)
             tt = time()
             epoch_train_time = et-st
             epoch_test_time = tt-et

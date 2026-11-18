@@ -17,6 +17,7 @@ if _PROJECT_ROOT not in sys.path:
 import matplotlib.pyplot as plt
 
 from path_planning.cluster.CTopPRMpy.ctopprm import CTopPRM
+from path_planning.cluster.cluster_map import install_roadmap
 from path_planning.common.visualizer.visualizer_2d import Visualizer2D
 from path_planning.utils.util import (
     agents_yaml_to_roadmap_frame,
@@ -45,10 +46,9 @@ if __name__ == "__main__":
     map_.set_roadmap_config(sample_num=800, num_neighbors=13, min_edge_length=1e-10, max_edge_length=8.0)
 
     st = time.time()
-    nodes = map_.generateRandomNodes(generate_grid_nodes=False)
-    road_map = map_.generate_planar_map(nodes)
-    num_edges = sum(len(e) for e in road_map)
-    print(f"Roadmap: {len(nodes)} nodes, {num_edges} edges in {time.time() - st:.2f}s")
+    map_.generateRandomNodes(generate_grid_nodes=False)
+    map_.generate_roadmap("cdt")
+    print(f"Roadmap: {len(map_.nodes)} nodes, {len(map_.edges)} edges in {time.time() - st:.2f}s")
 
     # k-means seeding: agent endpoints stay fixed centers, plus free
     # clusters whose centers track the member centroids.
@@ -86,8 +86,7 @@ if __name__ == "__main__":
     map_.set_start(starts)
     map_.set_goal(goals)
     points, edges = planner.get_roadmap()
-    map_.generate_custom_nodes(points)
-    map_.generate_custom_roadmap(edges)
+    install_roadmap(map_, points, edges)
     print(f"Distilled roadmap: {len(points)} nodes, {len(edges)} edges")
     vis = Visualizer2D()
     vis.plot_grid_map(map_)

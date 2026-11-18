@@ -3,6 +3,11 @@ Run graph sampler for 2D and 3D maps.
 python scripts/roadmaps/run_graph_sampler.py
 """
 
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))   # this repo, ahead of any installed copy
+
 from path_planning.common.visualizer.visualizer_2d import Visualizer2D
 from path_planning.common.visualizer.visualizer_3d import Visualizer3D
 from path_planning.utils.util import read_graph_sampler_from_yaml
@@ -26,18 +31,20 @@ def run_graph_sampler(graph_sampler,start,goal,generate_grid_nodes = True,sample
     print(f"Generated {len(nodes)} nodes in {time.time() - st} seconds")
 
     st = time.time()
-    road_map = graph_sampler.generate_roadmap(nodes)
-    num_edges = sum([len(edges) for edges in road_map])
+    graph_sampler.generate_roadmap("prm")
+    road_map = graph_sampler.road_map
+    num_edges = len(graph_sampler.edges)
     print(f"Generated {num_edges} road map edges in {time.time() - st} seconds")
 
-    if map_.dim == 2:
+    if graph_sampler.dim == 2:
         roadmap_type = 'cdt'
     else:
         roadmap_type = 'dt'
     st = time.time()
-    planar_map = graph_sampler.generate_planar_map(nodes, use_option=roadmap_type)
+    graph_sampler.generate_roadmap(roadmap_type)          # replaces the k-nearest roadmap built above
+    planar_map = graph_sampler.road_map
     planar_nodes = graph_sampler.nodes
-    num_edges = sum([len(edges) for edges in planar_map])   
+    num_edges = len(graph_sampler.edges)
     print(f"Generated {num_edges} planar map edges in {time.time() - st} seconds")
 
     return graph_sampler, nodes, road_map, planar_nodes, planar_map
@@ -120,7 +127,7 @@ if __name__ == "__main__":
 
     vis = Visualizer3D()
     vis.plot_grid_map(map_)
-    vis.plot_road_map(map_,nodes,planar_map)
+    vis.plot_road_map(map_,planar_nodes,planar_map)
     vis.show()
     vis.savefig('figs/graph_sampler/graph_sampler_3d_planarmap.png')
     vis.close()

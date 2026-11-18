@@ -22,7 +22,6 @@ if str(repo_root) not in sys.path:
     sys.path.insert(0, str(repo_root))
 
 from path_planning.data_generation.cluster_dataset_generate import generate_graph_samples
-from multiprocessing import cpu_count
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -37,16 +36,15 @@ if __name__ == "__main__":
     parser.add_argument("-rmt","--road_map_types",type=str, nargs='+', default=['prm'], help="road map type(s), e.g. -rmt grid prm cdt halton (grid = lattice, ignores -ns)")
     parser.add_argument("-gng","--generate_new_graph",action="store_true", help="regenerate existing samples")
     parser.add_argument("-no-gbn","--no_generate_boundary_nodes",action="store_true", help="disable boundary nodes (on by default for this generator)")
-    parser.add_argument("-bns","--boundary_node_spacing",type=float, default=None, help="resample obstacle/map boundary nodes every this many world units (e.g. the resolution for one node per boundary cell); default: corners/junctions only")
     parser.add_argument("-sps","--num_sp_sources",type=int, default=16, help="Dijkstra sources for shortest-path supervision pairs")
     parser.add_argument("-spp","--num_sp_pairs",type=int, default=2048, help="max shortest-path supervision pairs per sample")
     parser.add_argument("-ar","--agent_radius",type=float, default=0.5, help="agent radius (inflation)")
     parser.add_argument("-r","--resolution",type=float, default=1.0, help="map resolution")
-    parser.add_argument("-w","--num_workers",type=int, default=1, help="number of parallel workers")
+    parser.add_argument("-w","--num_workers",type=int, default=1, help="number of parallel workers (default: 1)")
     args = parser.parse_args()
 
     folder_path = [Path(p) for p in args.path]
-    num_workers = args.num_workers if args.num_workers is not None else cpu_count()
+    num_workers = args.num_workers
     config = {
         "seed": args.seed,
         "use_discrete_space": args.use_discrete_space,
@@ -59,7 +57,6 @@ if __name__ == "__main__":
         "target_space": "cluster",
         "generate_new_graph": args.generate_new_graph,
         "generate_boundary_nodes": not args.no_generate_boundary_nodes,
-        "boundary_node_spacing": args.boundary_node_spacing,
         "num_sp_sources": args.num_sp_sources,
         "num_sp_pairs": args.num_sp_pairs,
         "agent_radius": args.agent_radius,
