@@ -1,46 +1,63 @@
-# Map config defaults (see path_planning.utils.util.set_map_config)
+# Dataset / map defaults, read by path_planning.utils.util.set_map_config.
+#
+# The generate and test scripts (scripts/generate/*.py, scripts/test/run_all*.py) load this file with
+# -cfg and then overlay their command-line arguments: an argument that is given replaces the value here.
+# Keys the scripts set themselves and that therefore have no entry here: generate_boundary_nodes (-gbn),
+# gen (start/goal placement, from config/gen.yaml), resolve_solution.
 
 seed: 42
-path: null
-bounds: [[0, 32.0], [0, 32.0]]
-nb_agents: 4
-nb_obstacles: 0.1
+path: null                    # dataset root; null: <cwd>/benchmark/train. -s replaces it only if that folder exists.
+
+# ---- the case: map, obstacles, agents
+bounds: [[0, 32.0], [0, 32.0]]   # [[x_min, x_max], [y_min, y_max]] (a third pair for 3D), world units
 resolution: 1.0
-obs_size: 0.5
-agent_radius: 0.0
-agent_velocity: 0.0
+nb_obstacles: 0.1             # obstacle count, or the fraction of cells when < 1
+obs_size: 0.5                 # side length of one obstacle, world units
+nb_agents: 4
+agent_radius: 0.0             # 0: point particles; > 0: a disc / sphere body (required by ccbs)
+agent_velocity: 0.0           # 0: every move takes one time unit; > 0: speed (sipp, ccbs)
 num_cases: 1
-nb_permutations: 64
-nb_permutations_tries: 128
-time_limit: 60
+nb_permutations: 64           # start/goal permutations to solve per case
+nb_permutations_tries: 128    # permutations tried when solve_till_success is on
+
+# ---- solving (path_planning.multi_agent_planner.mapf_solver.solve_mapf)
+mapf_solver_name: cbs         # cbs | icbs | ccbs | sipp | lacam | lacam_random (lacam*: points on a grid only)
+heuristic_type: manhattan     # manhattan | euclidean | dijkstra
+time_limit: 60                # seconds per instance
 max_iterations: 10000
-mapf_solver_name: cbs
-road_map_type: grid
-solve_till_success: false
-use_discrete_space: true
-generate_new_graph: true
-num_samples: 0  # used for sample_num when args.num_samples not set
-num_neighbors: 4.0
+solve_till_success: false     # keep trying permutations until nb_permutations are solved
+
+# ---- the roadmap
+road_map_type: grid           # grid | prm | cdt | rrg | midpoints | centroids | voronoi | halton
+use_discrete_space: true      # nodes snapped to cell centres
+generate_new_graph: true      # true: a NEW case (new obstacles and agents) replaces an existing one
+num_samples: 0                # random nodes (stored as sample_num; -ns overrides)
+num_neighbors: 4.0            # prm: edges per node
 min_edge_len: 1.0e-10
 max_edge_len: 1.1
-heuristic_type: manhattan
-# Ignored for GNN graph gen: input.yaml agents are always in world coordinates.
-is_start_goal_discrete: true
-weighted_sampling: true
-samp_from_prob_map_ratio: 0.5
-num_graph_samples: 1
-target_space: convolution_binary
-num_workers: null
+
+# ---- training samples (scripts/generate/run_generate.py, run_all.py)
+num_graph_samples: 1          # sampled roadmaps per case (each also saved in 3 rotations)
+target_space: convolution_binary   # binary | bilinear | distribution | fuzzy_binary | fuzzy_distribution
+                                   # | convolution_binary | convolution_distribution
+weighted_sampling: true       # draw part of the samples from the solved paths' density
+samp_from_prob_map_ratio: 0.5 # that part, as a fraction of the samples
+
+num_workers: null             # null: every core
 verbose: false
-# Halton roadmap rejection sampling (GraphSampler.generateRandomNodes ->
-# halton.halton_sampling). Acceptance probability of a sample at wall
-# distance d (world units, measured from the inflated obstacle boundary):
+
+# ---- node sampling (NodeSampler.sampling_dist_dict; recorded in each case's input.yaml)
+# halton: rejection sampling for the 'halton' roadmap type. A sample at wall distance d (world units,
+# from the inflated obstacle boundary) is kept with probability
 #   0 if d < d_min, else floor + (1 - floor) * exp(-(d - d_opt)^2 / (2 sigma^2))
-# d_min: 0.0 keeps samples right up to the inflation; the old default 0.3 left
-# a visible empty band around every obstacle.
+# d_min 0.0 keeps samples right up to the inflation (the sampler's own default, 0.3, leaves an empty
+# band around every obstacle).
+# distributed: the density-weighted sampler used when a probability map is given.
 sampling_dist_dict:
   halton:
     d_min: 0.0
     d_opt: 0.4
     sigma: 0.5
     floor: 0.2
+  distributed:
+    samp_from_prob_map_ratio: 0.5
