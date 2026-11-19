@@ -1,0 +1,36 @@
+# The fleet and its tasks, read by path_planning.tasks.TaskGenerator. Pass with --tasks to the
+# scripts/mapf runners (with --agents config/agents.yaml for the agent types). Coordinates are world
+# coordinates of the map the script runs on; these fit path_planning/maps/2d/2d_mapd.yaml.
+
+# ---- the fleet: how many agents of each type (type names from agents.yaml)
+agents:
+  amr: 3
+  forklift: 1
+# Without agents.yaml the agents are point particles (unit moves, instant turning): `agents: 4`.
+#
+# Assignments already made: list the agents instead, each with its goal or sequence of goals. `start`
+# and `name` are optional (a start that is left out is drawn on the free map; names default to
+# agent0, agent1, ...). Each agent's goals are a task only it may take. The one-shot solvers (cbs,
+# icbs, ccbs, sipp, lacam) need this form with exactly one goal per agent and no `tasks`.
+# agents:
+#   - {type: amr, start: [10.5, 5.5], goal: [45.5, 25.5]}
+#   - {type: forklift, goals: [[15.5, 12.5], [15.5, 9.5]]}
+
+# ---- the tasks: name -> goal, sequence of goals, or {goals, types}
+tasks:
+  pallet:
+    goals: [[15.5, 12.5], [15.5, 9.5]]
+    types: [forklift]                # only these agent types may take it (left out: any agent)
+  tote: [[15.5, 6.5], [35.5, 25.5]]  # short form: the sequence of goals
+  drop: [45.5, 25.5]                 # short form: one goal
+
+# ---- when the run is finished
+# singular: every task done once            repeated: every task done `count` times (same tasks again)
+# achieved: `count` tasks done              endless : never; runs to the horizon or the time limit
+mode: repeated
+count: 2
+
+# ---- how tasks are created
+frequency: 0.05       # releases per time unit, the first at t = 0 (left out: all at t = 0; endless needs it)
+per_release: 1        # tasks created at each release
+order: sequential     # sequential | random: the order tasks are drawn from the pool

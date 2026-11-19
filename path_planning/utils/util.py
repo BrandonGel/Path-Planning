@@ -453,9 +453,9 @@ def read_mapd_from_yaml(filename: str) -> dict:
 
 def mapd_agents_to_roadmap_frame(map_: GraphSampler, agents: List[dict]) -> List[dict]:
     """
-    Convert MAPD agents (``name`` + ``start`` only, no ``goal``) into the
-    roadmap-native frame. NeuralATTF only consumes agent ``name``/``start``, so no
-    goal is required here (cf. :func:`agents_yaml_to_roadmap_frame`).
+    Convert MAPD agents (``name`` + ``start``, no ``goal``) into the roadmap-native
+    frame (cf. :func:`agents_yaml_to_roadmap_frame`). Their other keys (``agent``, the
+    body; ``type``; ``yaw``) are kept.
 
     Args:
         map_: Constructed ``GraphSampler`` for the instance.
@@ -463,11 +463,11 @@ def mapd_agents_to_roadmap_frame(map_: GraphSampler, agents: List[dict]) -> List
             :func:`read_mapd_from_yaml`.
 
     Returns:
-        New list of ``{name, start}`` dicts with ``start`` in roadmap-native frame.
+        New list of agent dicts with ``start`` in roadmap-native frame.
     """
     starts = points_to_roadmap_frame(map_, [a["start"] for a in agents])
     return [
-        {"name": a.get("name", f"agent{i}"), "start": s}
+        {**{k: v for k, v in a.items() if k != "goal"}, "name": a.get("name", f"agent{i}"), "start": s}
         for i, (a, s) in enumerate(zip(agents, starts))
     ]
 

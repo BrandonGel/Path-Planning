@@ -235,24 +235,32 @@ def solve_mapd(map_, agents, tasks, non_task_endpoints, mapf_solver_config: dict
     """Life-long MAPD with Neural-ATTF (token passing; SIPP or grid low level) driven by ``Simulation``.
 
     Inputs are in the roadmap frame (see ``util.mapd_agents_to_roadmap_frame`` / ``points_to_roadmap_frame``):
-    ``agents`` (``name``, ``start``, optionally ``yaw`` and their own ``"agent"``), ``tasks`` (dicts with
-    ``task_name``, ``start_time`` and ``waypoints``, as ``tasks_generator.convert_mapd_tasks`` makes them) and
-    the parking spots ``non_task_endpoints``. Config keys: the body as for ``solve_mapf`` (``agent`` /
+    ``agents`` (``name``, ``start``, optionally ``yaw``, their own ``"agent"`` and ``type``), ``tasks`` and
+    the parking spots ``non_task_endpoints``. ``tasks`` is a list of dicts with ``task_name``,
+    ``start_time`` and ``waypoints`` (as ``tasks_generator.convert_mapd_tasks`` makes them), or a
+    ``TaskGenerator`` (``path_planning/tasks``), which creates the tasks as the run goes and says when
+    it is finished (its ``mode``). Config keys: the body as for ``solve_mapf`` (``agent`` /
     ``agent_radius`` / ``agent_velocity`` / ``agent_clearance``), ``low_level`` ("sipp" | "grid"; default
-    "sipp"), ``heuristic_type`` (default "euclidean"), ``horizon`` (ticks, default 2000),
-    ``timestep_duration`` (default 1), ``delay_probability`` (default 0), ``seed`` (default 0; or pass
-    ``rng``, a ``random.Random``, for the simulation's delays) and ``neural_attf_options`` (more
-    ``NeuralATTF`` keyword arguments).
+    "sipp"), ``heuristic_type`` (default "euclidean"), ``horizon`` (ticks, default 2000), ``time_limit``
+    (wall seconds; default none), ``timestep_duration`` (default 1), ``delay_probability`` (default 0),
+    ``seed`` (default 0; or pass ``rng``, a ``random.Random``, for the simulation's delays) and
+    ``neural_attf_options`` (more ``NeuralATTF`` keyword arguments).
 
-    Returns a summary like ``solve_mapf``'s: ``schedule`` (the executed paths), costs, ``completed_tasks`` /
-    ``n_tasks``, ``completed_tasks_times``, ``n_replans``, SIPP effort, ``runtime`` (wall) and ``algo_time``
-    (planner), ``success`` (every task done, collision-free) and ``collision`` from the exact check."""
+    Returns a summary like ``solve_mapf``'s: ``schedule`` (the executed paths), costs, ``completed_tasks``,
+    ``n_tasks`` (tasks created), ``target_tasks`` (how many finish the run; None: endless),
+    ``completed_tasks_times``, ``n_replans``, SIPP effort, ``runtime`` (wall) and ``algo_time`` (planner),
+    ``success`` (the target reached, or for an endless stream the run got to its horizon or time limit;
+    collision-free) and ``collision`` from the exact check."""
     import random
+
+    from path_planning.tasks.task_generator import TaskGenerator
+    stream = tasks if isinstance(tasks, TaskGenerator) else TaskGenerator.from_list(tasks)
 
     agents = with_bodies(list(agents), mapf_solver_config, "neural_attf")
     bodies = _bodies_of(agents)
     dt = float(mapf_solver_config.get("timestep_duration", 1.0))
     horizon = int(mapf_solver_config.get("horizon", 2000))
+    time_limit = mapf_solver_config.get("time_limit") or float("inf")
     planner = NeuralATTF(
         map_, agents, non_task_endpoints,
         heuristic_type=mapf_solver_config.get("heuristic_type", "euclidean"),
@@ -263,20 +271,22 @@ def solve_mapd(map_, agents, tasks, non_task_endpoints, mapf_solver_config: dict
     sim = Simulation(tasks=[], agents=agents, delay_probability=float(mapf_solver_config.get("delay_probability", 0.0)),
                      rng=rng or random.Random(mapf_solver_config.get("seed", 0)), timestep_duration=dt)
     st = time.perf_counter()
-    while planner.get_completed_tasks() < len(tasks) and sim.get_time() < horizon:
-        new_tasks = [t for t in tasks if int(t["start_time"]) == sim.get_time()]
+    while (not stream.finished(planner.get_completed_tasks()) and sim.get_time() < horizon
+           and time.perf_counter() - st < time_limit):
+        new_tasks = stream.release(sim.get_time())
         if new_tasks:
             planner.update_tasks(sim.get_time(), new_tasks)
         sim.time_forward(planner)
     solution = sim.get_actual_paths()
     solution_info = {
-        "success": planner.get_completed_tasks() == len(tasks),
+        "success": stream.target is None or stream.finished(planner.get_completed_tasks()),
         "runtime": time.perf_counter() - st,
         "algo_time": sim.get_algo_time(),
         "steps": sim.get_time(),
         "horizon": horizon,
         "completed_tasks": planner.get_completed_tasks(),
-        "n_tasks": len(tasks),
+        "n_tasks": stream.released,
+        "target_tasks": stream.target,
         "completed_tasks_times": planner.get_completed_tasks_times(),
         "n_replans": planner.get_n_replans(),
         "low_level_iterations": planner.get_sipp_iterations(),

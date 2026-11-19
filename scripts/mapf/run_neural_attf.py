@@ -6,6 +6,11 @@ run_neural_attf_continous.py reuse the helpers defined here.
 
 Usage:
     python scripts/mapf/run_neural_attf.py [--map path/to/mapd.yaml]
+    python scripts/mapf/run_neural_attf.py --tasks config/tasks.yaml [--agents config/agents.yaml]
+
+With ``--tasks`` the fleet and the tasks come from that file (and the agents' bodies from
+``--agents``; without it: point particles) instead of the map YAML, which still gives the map and
+its parking endpoints. See ``path_planning/tasks/task_generator.py`` for the format.
 
 Outputs:
     figs/neural_attf/neural_attf_mapd_<mode>.png
@@ -34,6 +39,7 @@ from path_planning.multi_agent_planner.mapf_solver import solve_mapd
 from path_planning.multi_agent_planner.decentralized.neural_attf.tasks_generator import (
     convert_mapd_tasks,
 )
+from path_planning.tasks import TaskGenerator
 from path_planning.utils.util import (
     _to_native_yaml,
     mapd_agents_to_roadmap_frame,
@@ -48,6 +54,20 @@ from path_planning.utils.util import (
 DEFAULT_MAP_YAML = "path_planning/maps/2d/2d_mapd.yaml"
 
 
+def _option_from_argv(flag: str, default=None):
+    """Pop an optional ``<flag> VALUE`` (or ``<flag>=VALUE``) from ``sys.argv``."""
+    argv = sys.argv
+    for i, a in enumerate(argv[1:], start=1):
+        if a == flag and i + 1 < len(argv):
+            value = argv[i + 1]
+            del argv[i:i + 2]
+            return value
+        if a.startswith(flag + "="):
+            del argv[i]
+            return a.split("=", 1)[1]
+    return default
+
+
 def _map_yaml_from_argv(default: str = DEFAULT_MAP_YAML) -> str:
     """Pop an optional ``--map PATH`` (or ``--map=PATH``) from ``sys.argv``.
 
@@ -55,16 +75,12 @@ def _map_yaml_from_argv(default: str = DEFAULT_MAP_YAML) -> str:
     ``2d_mapd_8agents.yaml``) can be run without editing the script; the
     positional arguments of ``run_neural_attf_continous.py`` are untouched.
     """
-    argv = sys.argv
-    for i, a in enumerate(argv[1:], start=1):
-        if a == "--map" and i + 1 < len(argv):
-            path = argv[i + 1]
-            del argv[i:i + 2]
-            return path
-        if a.startswith("--map="):
-            del argv[i]
-            return a.split("=", 1)[1]
-    return default
+    return _option_from_argv("--map", default)
+
+
+def _task_files_from_argv():
+    """Pop the optional ``--tasks PATH`` and ``--agents PATH`` from ``sys.argv``: ``(tasks, agents)``."""
+    return _option_from_argv("--tasks"), _option_from_argv("--agents")
 
 
 def _map_tag(map_yaml: str) -> str:
@@ -75,7 +91,7 @@ def _map_tag(map_yaml: str) -> str:
 
 def _make_map_mapd(map_yaml: str, use_discrete_space: bool, agent_radius: float,
                    register_task_endpoints: bool = False, roadmap_type: str | None = None,
-                   sweep_backend: str = "auto"):
+                   sweep_backend: str = "auto", generator: TaskGenerator | None = None):
     """
     Build the roadmap for a life-long MAPD instance (e.g. ``2d_mapd.yaml``).
 
@@ -95,6 +111,10 @@ def _make_map_mapd(map_yaml: str, use_discrete_space: bool, agent_radius: float,
     (``cdt``/``voronoi``/``rrg``) rebuild the node set and may not route through
     arbitrary registered endpoints — prefer ``prm``/``halton`` when endpoints are
     fixed.
+
+    ``generator``: a ``TaskGenerator`` whose fleet replaces the file's agents and whose
+    task goals are the endpoints to register (``agent_radius`` is then the fleet's
+    largest reach).
     """
     if roadmap_type is None:
         roadmap_type = "grid" if use_discrete_space else "prm"
@@ -117,19 +137,25 @@ def _make_map_mapd(map_yaml: str, use_discrete_space: bool, agent_radius: float,
         map_.set_roadmap_config(sample_num=400, num_neighbors=8.0, min_edge_length=0.0, max_edge_length=3.0)
 
     # World-frame starts so generateRandomNodes registers them as roadmap nodes.
-    agents_rt = mapd_agents_to_roadmap_frame(map_, mapd["agents"])
+    if generator is not None:
+        agents_rt = generator.agents(map_)       # (starts that are not given are drawn on the free map)
+    else:
+        agents_rt = mapd_agents_to_roadmap_frame(map_, mapd["agents"])
     map_.set_start([a["start"] for a in agents_rt])
 
     if register_task_endpoints:
         # Continuous roadmaps: candidate task/parking endpoints aren't sampled nodes,
         # so register them (exact coords) via set_goal so generateRandomNodes adds
         # them and generate_map connects them. Cleared after build for a clean figure.
-        endpoint_world = (
-            [p for pair in mapd["goal_locations"] for p in pair]
-            + [p for pair in mapd["start_locations"] for p in pair]
-            + list(mapd["non_task_endpoints"])
-        )
-        map_.set_goal(points_to_roadmap_frame(map_, endpoint_world))
+        if generator is not None:
+            endpoints = generator.goal_points() + points_to_roadmap_frame(map_, mapd["non_task_endpoints"])
+        else:
+            endpoints = points_to_roadmap_frame(map_, (
+                [p for pair in mapd["goal_locations"] for p in pair]
+                + [p for pair in mapd["start_locations"] for p in pair]
+                + list(mapd["non_task_endpoints"])
+            ))
+        map_.set_goal(endpoints)
     else:
         map_.set_goal([])
 
@@ -205,6 +231,67 @@ def _run_mapd(
     )
 
 
+def _run_tasks(
+    map_yaml: str,
+    tasks_yaml: str,
+    agents_yaml: str | None = None,
+    use_discrete_space: bool = True,
+    horizon: int = 2000,
+    seed: int = 42,
+    roadmap_type: str | None = None,
+    sweep_backend: str = "auto",
+    time_limit: float | None = None,
+    out_dir_figs: str = "figs/neural_attf",
+    out_dir_yaml: str = "path_planning/maps/2d/neural_attf",
+    make_gif: bool = True,
+):
+    """
+    Run Neural-ATTF with the fleet and the task stream of ``tasks_yaml`` (agent
+    types from ``agents_yaml``; none: point particles) on the map of ``map_yaml``,
+    whose ``non_task_endpoints`` are the parking spots. Agents with bodies are
+    planned with the SIPP low level, point particles on the grid.
+    """
+    mode = "discrete" if use_discrete_space else "continuous"
+    stem = os.path.splitext(os.path.basename(tasks_yaml))[0]
+    tag = f"{stem}_{mode}{_map_tag(map_yaml)}"
+    print(f"\n=== Neural-ATTF ({os.path.basename(tasks_yaml)}) | {os.path.basename(map_yaml)} | mode={mode} ===")
+
+    rng = random.Random(seed)
+    generator = TaskGenerator.from_yaml(tasks_yaml, agents_yaml, seed=seed)
+    map_, agents, mapd, nodes, road_map = _make_map_mapd(
+        map_yaml, use_discrete_space, generator.reach(), register_task_endpoints=not use_discrete_space,
+        roadmap_type=roadmap_type, sweep_backend=sweep_backend, generator=generator)
+    parking_pts = points_to_roadmap_frame(map_, mapd["non_task_endpoints"])
+    fleet = {}
+    for a in agents:
+        fleet[a["type"]] = fleet.get(a["type"], 0) + 1
+    print(f"  {len(agents)} agents {fleet} | {len(generator.pool)} tasks in the pool | mode={generator.mode}"
+          f" | target={generator.target} | frequency={generator.frequency}")
+    map_.set_endpoints(pickups=generator.goal_points(), deliveries=[], parking=parking_pts)
+
+    bodied = generator.agent_types is not None
+    _solve_and_save(
+        map_=map_,
+        agents=agents,
+        tasks=generator,
+        parking_pts=parking_pts,
+        nodes=nodes,
+        road_map=road_map,
+        tag=tag,
+        use_discrete_space=use_discrete_space,
+        agent_radius=generator.reach(),
+        horizon=horizon,
+        rng=rng,
+        out_dir_figs=out_dir_figs,
+        out_dir_yaml=out_dir_yaml,
+        make_gif=make_gif,
+        low_level="sipp" if bodied else "grid",
+        time_limit=time_limit,
+        extra_summary={"map_yaml": map_yaml, "tasks_yaml": tasks_yaml, "agents_yaml": agents_yaml,
+                       "task_mode": generator.mode, "agent_types": {a["name"]: a["type"] for a in agents}},
+    )
+
+
 def _solve_and_save(
     *,
     map_,
@@ -226,6 +313,7 @@ def _solve_and_save(
     delay_probability: float = 0.0,
     extra_summary: dict | None = None,
     agent: Agent | None = None,
+    time_limit: float | None = None,
 ):
     """
     Shared tail for the Neural-ATTF runners: simulate the token-passing planner
@@ -235,12 +323,15 @@ def _solve_and_save(
     ``Agent``, any shape), by default a disc of ``agent_radius`` moving at
     ``velocity`` (0: one time unit per move); ``agent_radius`` 0 and no ``agent``:
     point particles. ``delay_probability`` is the per-step probability that an agent
-    is held in place by ``Simulation``.
+    is held in place by ``Simulation``. ``tasks``: a list of tasks or a
+    ``TaskGenerator``; agents that carry their own ``"agent"`` keep it.
+    ``time_limit``: wall seconds (None: the horizon only).
     """
     config = {
         "agent": agent, "agent_radius": agent_radius, "agent_velocity": velocity,
         "heuristic_type": "manhattan" if use_discrete_space else "euclidean",
         "low_level": low_level, "horizon": horizon, "delay_probability": delay_probability,
+        "time_limit": time_limit,
     }
     summary = solve_mapd(map_, agents, tasks, parking_pts, config, rng=rng)
     print(
@@ -248,7 +339,7 @@ def _solve_and_save(
         f"(planner: {summary['algo_time']:.2f}s, wall: {summary['runtime']:.2f}s)"
         + (" | COLLISION" if summary["collision"] else "")
     )
-    summary["tasks"] = tasks
+    summary["tasks"] = tasks.created if isinstance(tasks, TaskGenerator) else tasks
     summary["use_discrete_space"] = use_discrete_space
     if extra_summary:
         summary.update(extra_summary)
@@ -297,9 +388,14 @@ def main():
     # corridors. The footprint clearance is 2*agent_radius, so a radius >= 0.5
     # makes two agents on adjacent cells (1.0 apart) mutually blocking and
     # deadlocks the corridors. 0.293 -> inflation 1.0 (one cell), still passable.
-    # CLI: `python run_neural_attf.py [--map path/to/mapd.yaml]`
+    # CLI: `python run_neural_attf.py [--map path/to/mapd.yaml] [--tasks tasks.yaml [--agents agents.yaml]]`
+    map_yaml = _map_yaml_from_argv()
+    tasks_yaml, agents_yaml = _task_files_from_argv()
+    if tasks_yaml:
+        _run_tasks(map_yaml, tasks_yaml, agents_yaml, use_discrete_space=True, horizon=2000, seed=42, make_gif=False)
+        return
     _run_mapd(
-        map_yaml=_map_yaml_from_argv(),
+        map_yaml=map_yaml,
         use_discrete_space=True,
         horizon=2000,
         seed=42,

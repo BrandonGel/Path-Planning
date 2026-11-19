@@ -178,6 +178,8 @@ class NeuralATTF:
         self.a_star_max_iter = a_star_max_iter
         self.deadlock_radius = float(deadlock_radius)
         self.bodies = {a["name"]: a.get("agent") for a in agents}
+        # An agent's type, for tasks limited to some types: its dict's "type", else its body's.
+        self._agent_type = {a["name"]: a.get("type", getattr(a.get("agent"), "type", None)) for a in agents}
         with_body = [b is not None for b in self.bodies.values()]
         if any(with_body) and not all(with_body):
             raise ValueError('Neural-ATTF: every agent dict needs an "agent" (an Agent) once any of them has one')
@@ -269,13 +271,20 @@ class NeuralATTF:
                 self.token["occupied_non_task_endpoints"].add(start)
         self.token["deadlock_count_per_agent"] = defaultdict(lambda: 0)
         self.token["assigned_task_pairs"] = {}
+        self.token["task_types"] = {}        # task name -> the agent types that may take it (absent: any)
 
     # ------------------------------------------------------------------ tasks
 
     def update_tasks(self, t: int, new_tasks: Iterable[dict], assigned_task_pairs: Optional[dict] = None):
+        """Add tasks at tick ``t``. A task may limit who takes it: ``agent`` (one agent's name; the same
+        as an ``assigned_task_pairs`` entry) or ``types`` (agent types, see the agents' ``type``)."""
         if assigned_task_pairs:
             self.token["assigned_task_pairs"].update(assigned_task_pairs)
         for new_task in new_tasks:
+            if new_task.get("agent") is not None:
+                self.token["assigned_task_pairs"][new_task["task_name"]] = new_task["agent"]
+            if new_task.get("types") is not None:
+                self.token["task_types"][new_task["task_name"]] = set(new_task["types"])
             # A task is stored as an ordered list of >=2 waypoints. A multi-leg
             # (pickup->delivery->pickup->delivery...) task is given as ``waypoints``;
             # legacy single-leg tasks give ``start``/``goal`` (kept as 2 waypoints).
@@ -336,6 +345,9 @@ class NeuralATTF:
                         task_name in self.token["assigned_task_pairs"]
                         and self.token["assigned_task_pairs"][task_name] != agent
                     ):
+                        continue
+                    allowed = self.token["task_types"].get(task_name)
+                    if allowed is not None and self._agent_type.get(agent) not in allowed:
                         continue
                     task_start = task_positions[0]
                     d = self.admissible_heuristic(task_start, agent_position)

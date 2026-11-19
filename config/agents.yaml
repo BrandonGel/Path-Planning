@@ -1,0 +1,24 @@
+# Agent types, read by path_planning.agent.agent_types.load_agent_types. The name of a type is what
+# config/tasks.yaml refers to (and becomes Agent.type). Pass with --agents to the scripts/mapf runners.
+#
+# shape + size:
+#   disc             size: radius
+#   rectangle        size: [length along travel, width]
+#   triangle         size: [side, side, side]
+#   regular_polygon  size: {sides: N, side: length}
+#   polygon          size: [[x, y], ...]   vertices in order; +x is the direction of travel
+# max_speed     : world units per time unit (left out: every move takes one time unit)
+# turning_speed : degrees per time unit (left out: turns instantly). Used by CBS and ICBS only;
+#                 CCBS, SIPP and Neural-ATTF turn instantly.
+# clearance     : extra radial buffer, world units (default 0)
+types:
+  amr:
+    shape: disc
+    size: 0.3
+    max_speed: 1.0
+  forklift:
+    shape: rectangle
+    size: [0.7, 0.4]
+    max_speed: 0.5
+    turning_speed: 90
+    clearance: 0.02

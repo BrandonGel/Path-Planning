@@ -385,7 +385,9 @@ class Visualizer2D(BaseVisualizer2D):
         # _ax_w_pts = self.figsize[0] * _right * 72.0
         # _marker_dia_pts = np.sqrt(RACK_S)
         # agent_radius_vis = (_marker_dia_pts / 2.0) * (_data_w / _ax_w_pts)
-        agent_radius_vis = radius
+        # One radius for every agent, or {agent name: radius} for a mixed fleet (a body that is not a
+        # disc is drawn as its bounding circle).
+        radius_of = (lambda name: float(radius.get(name, 0.0))) if isinstance(radius, dict) else (lambda name: radius)
 
         # Draw static map and paths
         if agent_colors is None:
@@ -437,7 +439,7 @@ class Visualizer2D(BaseVisualizer2D):
             x,y = start["x"], start["y"]
             color = Colors[ii%len(Colors)]
 
-            agents[name] = Circle((x, y), agent_radius_vis, facecolor=color, edgecolor='black',zorder=self.zorder['robot_circle'])
+            agents[name] = Circle((x, y), radius_of(name), facecolor=color, edgecolor='black',zorder=self.zorder['robot_circle'])
             agents[name].original_face_color = color
             patches.append(agents[name])
 
@@ -479,14 +481,13 @@ class Visualizer2D(BaseVisualizer2D):
                 agent.set_facecolor(agent.original_face_color)
 
             # check drive-drive collisions
-            agents_array = [agent for _,agent in agents.items()]
+            agents_array = list(agents.items())
             for i in range(0, len(agents_array)):
                 for j in range(i+1, len(agents_array)):
-                    d1 = agents_array[i]
-                    d2 = agents_array[j]
+                    (name1, d1), (name2, d2) = agents_array[i], agents_array[j]
                     pos1 = np.array(d1.center)
                     pos2 = np.array(d2.center)
-                    if np.linalg.norm(pos1 - pos2) < 2*radius:
+                    if np.linalg.norm(pos1 - pos2) < radius_of(name1) + radius_of(name2):
                         d1.set_facecolor('red')
                         d2.set_facecolor('red')
                         print("COLLISION! (agent-agent) ({}, {})".format(i, j))

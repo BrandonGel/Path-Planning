@@ -40,7 +40,8 @@ from path_planning.multi_agent_planner.decentralized.neural_attf.tasks_generator
     gen_mapd_tasks,
 )
 from path_planning.utils.util import points_to_roadmap_frame, set_global_seed
-from run_neural_attf import _make_map_mapd, _map_tag, _map_yaml_from_argv, _solve_and_save
+from run_neural_attf import (_make_map_mapd, _map_tag, _map_yaml_from_argv, _run_tasks, _solve_and_save,
+                             _task_files_from_argv)
 
 
 def _run_random(
@@ -132,9 +133,15 @@ def _run_random(
 
 def main():
     set_global_seed(42)
-    # CLI: `python run_neural_attf_random.py [--map path/to/mapd.yaml]`
+    # CLI: `python run_neural_attf_random.py [--map path/to/mapd.yaml] [--tasks tasks.yaml [--agents agents.yaml]]`
+    # With --tasks the fleet and the tasks come from that file (see run_neural_attf.py), not from random draws.
+    map_yaml = _map_yaml_from_argv()
+    tasks_yaml, agents_yaml = _task_files_from_argv()
+    if tasks_yaml:
+        _run_tasks(map_yaml, tasks_yaml, agents_yaml, use_discrete_space=True, horizon=2000, seed=42)
+        return
     _run_random(
-        map_yaml=_map_yaml_from_argv(),
+        map_yaml=map_yaml,
         use_discrete_space=True,
         horizon=2000,
         seed=42,

@@ -1,0 +1,9 @@
+# A fleet whose assignments are already made: each agent has its goal, so there is no `tasks` pool.
+# This is the form the one-shot solvers take (one goal per agent), for example
+#   python scripts/mapf/run_sipp.py --tasks config/tasks_assigned.yaml --agents config/agents.yaml
+# Coordinates fit path_planning/maps/2d/2d.yaml. See config/tasks.yaml for every option.
+agents:
+  - {type: amr, start: [5.5, 15.5], goal: [44.5, 19.5]}
+  - {type: amr, start: [10.5, 5.5], goal: [20.5, 25.5]}
+  - {type: forklift, start: [45.5, 5.5], goal: [8.5, 25.5]}
+  - {type: forklift, goal: [35.5, 20.5]}          # no start: drawn on the free map

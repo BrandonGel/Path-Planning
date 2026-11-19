@@ -41,7 +41,8 @@ from path_planning.multi_agent_planner.decentralized.neural_attf.tasks_generator
     gen_mapd_tasks,
 )
 from path_planning.utils.util import points_to_roadmap_frame, set_global_seed
-from run_neural_attf import _make_map_mapd, _map_tag, _map_yaml_from_argv, _solve_and_save
+from run_neural_attf import (_make_map_mapd, _map_tag, _map_yaml_from_argv, _run_tasks, _solve_and_save,
+                             _task_files_from_argv)
 
 
 def _run_continuous(
@@ -139,10 +140,17 @@ def main():
     # CLI: `python run_neural_attf_continous.py [roadmap_type] [sweep_backend] [--map path/to/mapd.yaml]`
     # roadmap_type: halton (default), prm, rrg, cdt, voronoi, midpoints, centroids, dt
     # sweep_backend: auto (default; shapely in 2D, cgal in 3D+), or force cgal/shapely
+    # With `--tasks tasks.yaml [--agents agents.yaml]` the fleet and the tasks come from those files
+    # (see run_neural_attf.py), not from random draws.
     map_yaml = _map_yaml_from_argv()  # strip --map first so positionals keep their slots
+    tasks_yaml, agents_yaml = _task_files_from_argv()
     roadmap_type = sys.argv[1] if len(sys.argv) > 1 else "halton"
     sweep_backend = sys.argv[2] if len(sys.argv) > 2 else "auto"
     set_global_seed(42)
+    if tasks_yaml:
+        _run_tasks(map_yaml, tasks_yaml, agents_yaml, use_discrete_space=False, horizon=2000, seed=42,
+                   roadmap_type=roadmap_type, sweep_backend=sweep_backend)
+        return
     _run_continuous(
         map_yaml=map_yaml,
         horizon=2000,
