@@ -57,17 +57,6 @@ def convex_pieces(poly: Polygon) -> list:
     return list(shapely.constrained_delaunay_triangles(poly).geoms)
 
 
-def minkowski_segment(poly: Polygon, d) -> Polygon:
-    """``poly (+) segment[0, d]``: the area ``poly`` covers when translated from 0 to ``d``. Exact for
-    any simple polygon (the union of hull(T, T + d) over its convex pieces)."""
-    dx, dy = float(d[0]), float(d[1])
-    if dx == 0.0 and dy == 0.0:
-        return poly
-    hulls = [shapely.union(piece, _affinity.translate(piece, dx, dy)).convex_hull
-                for piece in convex_pieces(poly)]
-    return hulls[0] if len(hulls) == 1 else shapely.union_all(hulls)
-
-
 # ---------------------------------------------------------------------------
 # Swept region of an agent along a path
 # ---------------------------------------------------------------------------

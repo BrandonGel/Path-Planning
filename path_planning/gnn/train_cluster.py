@@ -259,7 +259,7 @@ def run_cluster_train(train_config: dict, num_workers: int = None, use_cuda: boo
           + ("" if len(rels) > 1 else " (roadmap edges only)")
           + f"; node type features: {feat}")
     graph_dataset = GraphDataset(data_files, load_file=load_file, save_file=save_file,
-                                 num_hops=-1, num_workers=num_workers,
+                                 num_workers=num_workers,
                                  use_boundary_edges=use_boundary_edges,
                                  use_task_edges=use_task_edges,
                                  use_node_type_features=use_node_type_features,

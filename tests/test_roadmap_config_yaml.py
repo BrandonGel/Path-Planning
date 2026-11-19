@@ -72,7 +72,3 @@ class TestRoadmapConfigYaml(unittest.TestCase):
         self.assertEqual(len(m.nodes), 42)
         self.assertLessEqual(max(len(r) for r in m.road_map), 5)
         self.assertLessEqual(max((max(w) for w in m.road_map_edge_weights if w), default=0), 12.0)
-
-
-if __name__ == "__main__":
-    unittest.main()

@@ -4,7 +4,7 @@ from path_planning.common.environment.node import Node
 from python_motion_planning.common.env.map.grid import Grid
 from python_motion_planning.common import TYPES
 from python_motion_planning.common.env.map.grid import _grid_is_expandable, _grid_path_map_to_world, _grid_path_world_to_map_float
-from path_planning.common.environment.map.numbaUtil import _world_line_of_sight, _world_in_collision, _grid_vector_is_expandable, convert_np_to_tuple, world_to_cell, world_to_cells
+from path_planning.common.environment.map.numbaUtil import _world_in_collision, _grid_vector_is_expandable, convert_np_to_tuple, world_to_cell, world_to_cells
 from path_planning.common.utils.geometry import GeometryNumpy as Geometry
 
 ROADMAP_TYPES = set(["grid", "prm", "cdt", "rrg", "midpoints", "centroids", "voronoi", "halton"])
@@ -91,21 +91,6 @@ class GraphSamplerBase(Grid):
         """Neighbours of a node along a roadmap. The base map has no roadmap;
         ``GraphSampler.get_neighbors`` reads ``road_map``."""
         raise ValueError("No neighbors")
-
-    def line_of_sight(self, p1: Tuple[float, ...], p2: Tuple[float, ...]) -> List[Tuple[int, ...]]:
-        """
-        Check if two world points are in line of sight.
-        Args:
-            p1: Start point of the line (world coordinates).
-            p2: End point of the line (world coordinates).
-
-        Returns:
-            cells: Grid indices crossed by the segment, start cell first.
-        """
-        p1_array = np.asarray(p1, dtype=np.float64)
-        p2_array = np.asarray(p2, dtype=np.float64)
-        points = _world_line_of_sight(p1_array, p2_array, np.asarray(self.bounds, dtype=np.float64), self.resolution, np.asarray(self.shape, dtype=int))
-        return [tuple(int(x) for x in points[i]) for i in range(points.shape[0])]
 
     def in_collision(self, p1: Tuple[float, ...], p2 : Tuple[float, ...] = None) -> bool:
         """

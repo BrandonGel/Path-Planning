@@ -1,8 +1,8 @@
 '''
 This script will generate a dataset of MAPF instances and their solutions, parse the trajectories, and generate the target space.
-- Using the dataset_gen.py script to generate the dataset of MAPF instances and their solutions
-- Using the trajectory_parser.py script to parse the trajectories
-- Using the target_gen.py script to generate the target space
+- dataset_ground_truth_map / dataset_ground_truth_solve: the MAPF instances and their solutions
+- dataset_label: the trajectories parsed into a density map
+- dataset_generate: the sampled roadmaps and their target space
 
 2D Scenario
 Generate a dataset of MAPF instances and their solutions for 4 agents in a 32x32 grid with 0.1 obstacles and 64 permutations.
@@ -27,10 +27,10 @@ python scripts/generate/run_all.py -s benchmark/train -mapf lacam
 python scripts/generate/run_all.py -s benchmark/train -mapf lacam_random
 
 Generate & Target a dataset of MAPF instances and their solutions for 4 agents in a 32x32 grid with 0.1 obstacles and 64 permutations.
-python scripts/generate/run_all.py -s benchmark/train -b 0 32.0 0 32.0 -n 4 -o 0.1 -p 64 -r 1.0 -c 100 -ds True -ns 1000 -nn 13.0 -min_el 1e-10 -max_el 5.0000001 -ngs 1 -rmt prm -ts convolution_binary -gn True -isg True -ws True -spfr 0.5
+python scripts/generate/run_all.py -s benchmark/train -b 0 32.0 0 32.0 -n 4 -o 0.1 -p 64 -r 1.0 -c 100 -ds -ns 1000 -nn 13.0 -min_el 1e-10 -max_el 5.0000001 -ngs 1 -rmt prm -ts convolution_binary -ggn -ws -spfr 0.5
 
 Generate & Visualize & Target a dataset of MAPF instances and their solutions for 4 agents in a 32x32 grid with 0.1 obstacles and 64 permutations.
-python scripts/generate/run_all.py -s benchmark/train -b 0 32.0 0 32.0 -n 4 -o 0.1 -p 64 -r 1.0 -c 100 -v -ds True -ns 1000 -nn 13.0 -min_el 1e-10 -max_el 5.0000001 -ngs 1 -rmt prm -ts convolution_binary -gn True -isg True -ws True -spfr 0.5
+python scripts/generate/run_all.py -s benchmark/train -b 0 32.0 0 32.0 -n 4 -o 0.1 -p 64 -r 1.0 -c 100 -v -ds -ns 1000 -nn 13.0 -min_el 1e-10 -max_el 5.0000001 -ngs 1 -rmt prm -ts convolution_binary -ggn -ws -spfr 0.5
 '''
 
 
@@ -43,9 +43,10 @@ from pathlib import Path
 repo_root = Path(__file__).resolve().parents[2]
 if str(repo_root) not in sys.path:
     sys.path.insert(0, str(repo_root))
-from pathlib import Path
 import yaml
-from path_planning.data_generation.dataset_ground_truth_solve import create_solutions,create_path_parameter_directory
+from path_planning.multi_agent_planner.mapf_solver import MAPF_SOLVERS
+from path_planning.data_generation.dataset_ground_truth_solve import create_solutions
+from path_planning.data_generation.dataset_util import create_path_parameter_directory
 from path_planning.data_generation.dataset_label import label_dataset
 from path_planning.data_generation.dataset_generate import generate_graph_samples
 from path_planning.utils.util import set_map_config
@@ -68,13 +69,12 @@ if __name__ == "__main__":
     parser.add_argument("-pt","--nb_permutations_tries",type=int, default=64, help="number of permutations tries")
     parser.add_argument("-t","--time_limit",type=float, default=60, help="time_limit for the solver in seconds")
     parser.add_argument("-m","--max_iterations",type=int, default=10000, help="max iterations for the solver")
-    parser.add_argument("-mapf","--mapf_solver_name",type=str, default="cbs", choices=["cbs", "icbs", "lacam", "lacam_random"], help="MAPF solver to use")
+    parser.add_argument("-mapf","--mapf_solver_name",type=str, default="cbs", choices=list(MAPF_SOLVERS), help="MAPF solver to use")
     parser.add_argument("-gng","--generate_new_graph",action="store_true", help="generate new graph")
     parser.add_argument("-v","--visualize",action='store_true', help="visualize the density map")
     parser.add_argument("-ds","--use_discrete_space",action="store_true", help="use discrete space")
     parser.add_argument("-ggn","--generate_grid_nodes",action="store_true", help="generate grid nodes")
     parser.add_argument("-gbn","--generate_boundary_nodes",action="store_true", help="also register obstacle/map boundary vertices as roadmap nodes")
-    parser.add_argument("-bns","--boundary_node_spacing",type=float, default=None, help="resample obstacle/map boundary nodes every this many world units (e.g. the resolution for one node per boundary cell); default: corners/junctions only")
     parser.add_argument("-ns","--num_samples",type=int, default=1000, help="number of samples")
     parser.add_argument("-nn","--num_neighbors",type=float, default=15, help="number of neighbors")
     parser.add_argument("-min_el","--min_edge_len",type=float, default=1e-10, help="minimum edge length")
@@ -82,8 +82,6 @@ if __name__ == "__main__":
     parser.add_argument("-ngs","--num_graph_samples",type=int, default=5, help="number of graph samples")
     parser.add_argument("-rmt","--road_map_types",type=str, nargs='+', default=['prm'], help="road map types")
     parser.add_argument("-ts","--target_space",type=str, default='convolution_binary', help="target space")
-    parser.add_argument("-isg","--is_start_goal_discrete",dest="is_start_goal_discrete",action="store_true", help="use discrete space for start and goal")
-    parser.add_argument("--no-is-start-goal-discrete",dest="is_start_goal_discrete",action="store_false", help="disable discrete space for start and goal")
     parser.add_argument("-ws","--weighted_sampling",dest="weighted_sampling",action="store_true", help="weighted sampling")
     parser.add_argument("-spfr","--samp_from_prob_map_ratio",type=float, default=0.2, help="sample from prob map ratio")
     parser.add_argument("-num_hops","--num_hops",type=int, default=10, help="number of hops")
@@ -91,7 +89,6 @@ if __name__ == "__main__":
     parser.add_argument("-gen_config","--gen_config",type=str, default='config/gen.yaml', help="start/goal placement config (uniform | gaussian), see config/gen.yaml")
     parser.add_argument("-w","--num_workers",type=int, default=None, help="number of parallel workers for cases (default: auto-detect CPU cores)")
     parser.add_argument("-verbose","--verbose",action="store_true", help="verbose")
-    parser.set_defaults(is_start_goal_discrete=True)
     args = parser.parse_args()
     
 
@@ -103,30 +100,23 @@ if __name__ == "__main__":
     map_config['road_map_type'] = "grid"
     map_config['use_discrete_space'] = True
     map_config['solve_till_success'] = True
-    map_config['num_samples'] = 0
+    map_config['sample_num'] = 0                      # the grid roadmap has no random samples
     map_config['num_neighbors'] = 4.0
     map_config['min_edge_len'] = 0.1
     map_config['max_edge_len'] = 1.1
     map_config['heuristic_type'] = "manhattan"
     map_config['generate_boundary_nodes'] = args.generate_boundary_nodes
-    map_config['boundary_node_spacing'] = args.boundary_node_spacing
     base_path = map_config['path']
     seed = map_config['seed']
-    bounds = map_config['bounds']
     resolution = map_config['resolution']
     nb_agents = map_config['nb_agents']
-    nb_obstacles = map_config['nb_obstacles']
-    nb_permutations = map_config['nb_permutations']
     nb_permutations_tries = map_config['nb_permutations_tries']
-    time_limit = map_config['time_limit']
-    max_iterations = map_config['max_iterations']
     mapf_solver_name = map_config['mapf_solver_name']
-    road_map_type = map_config['road_map_type']
     generate_new_graph = map_config['generate_new_graph']
     agent_radius = map_config['agent_radius']
-    road_map_type = map_config['road_map_type']
+    road_map_type = map_config['road_map_type']        # the ground-truth roadmap: the grid
     num_cases = map_config['num_cases']
-    road_map_types = map_config['road_map_type']
+    road_map_types = road_map_type
     num_workers = map_config['num_workers']
     verbose = map_config['verbose']
     print(f"nb_permutations_tries {nb_permutations_tries}")
@@ -155,9 +145,7 @@ if __name__ == "__main__":
                 "target_space": args.target_space,
                 "generate_grid_nodes": args.generate_grid_nodes,
                 "generate_boundary_nodes": args.generate_boundary_nodes,
-                "boundary_node_spacing": args.boundary_node_spacing,
                 "generate_new_graph": generate_new_graph,
-                "is_start_goal_discrete": args.is_start_goal_discrete,
                 "weighted_sampling": args.weighted_sampling,
                 "samp_from_prob_map_ratio": args.samp_from_prob_map_ratio,
                 "agent_radius": agent_radius,

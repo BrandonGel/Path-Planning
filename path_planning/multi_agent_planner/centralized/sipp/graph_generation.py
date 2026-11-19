@@ -44,17 +44,12 @@ class SippNode(object):
         b_end = t2 + t_buffer
 
         for s_start, s_end in self.interval_list:
-            # Case 1: Blocked window is entirely after this interval
-            if b_start >= s_end:
+            # The blocked window misses this interval (entirely after or before it)
+            if b_start >= s_end or b_end <= s_start:
                 if s_end - s_start > 1e-6:
                     interval_list.append((s_start, s_end))
 
-            # Case 2: Blocked window is entirely before this interval
-            elif b_end <= s_start:
-                if s_end - s_start > 1e-6:
-                    interval_list.append((s_start, s_end))
-
-            # Case 3: Overlap occurs: keep the left and right remnants (slivers of 1e-6 or less go)
+            # Overlap occurs: keep the left and right remnants (slivers of 1e-6 or less go)
             else:
                 if b_start - s_start > 1e-6:
                     interval_list.append((s_start, b_start))
@@ -209,7 +204,7 @@ class SippGraph(object):
         # Vertices per heading (vertex_node) for a body that is not a ball, unless switched off.
         self.oriented = exact_vertices and agent is not None and not agent.is_ball
         if self.oriented:
-            self._standing = Agent(agent.shape, None, None, agent.type, agent.clearance)
+            self._standing = agent.replace(max_speed=None, max_rotation=None)
         self.reset_graph()
 
     # ------------------------------------------------------------------ the table
@@ -416,7 +411,7 @@ class SippGraph(object):
         self._mark(vertices, edges)
         if self.oriented and vertices:
             if body is not None and speed != body.max_speed:     # (the exact test reads the speed from the body)
-                body = Agent(body.shape, speed, body.max_rotation, body.type, body.clearance)
+                body = body.replace(max_speed=speed)
             self._remember((body, (p, q), t0, 0.0, None), [v for v, _, _ in vertices])
 
     # ------------------------------------------------------------------ vertices per heading

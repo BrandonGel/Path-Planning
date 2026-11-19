@@ -2,21 +2,28 @@
 Visualize all training cases from the benchmark dataset.
 Displays both static path visualizations and animations for each case.
 """
-import yaml
 import numpy as np
-import networkx as nx
 from pathlib import Path
 import matplotlib.pyplot as plt
 import os
 from typing import List, Tuple
 from path_planning.common.visualizer.visualizer_2d import Visualizer2D
-from path_planning.common.environment.map.graph_sampler import GraphSampler
-from python_motion_planning.common import TYPES
-from path_planning.data_generation.dataset_label import get_trajectory_map
-from path_planning.data_generation.dataset_util import *
+from path_planning.data_generation.dataset_util import (
+    generate_cluster_sample_base_path,
+    generate_gnn_sampler_path,
+    generate_ground_truth_path,
+    generate_map_path,
+    generate_roadmap_path,
+    generate_sample_base_path,
+    get_density_map_file,
+    get_graph_file_path,
+    get_input_file_path,
+    get_prediction_file_path,
+    get_solution_name_suffix,
+    get_target_file_path,
+)
 from multiprocessing import Pool, cpu_count
 from tqdm import tqdm
-from path_planning.data_generation.dataset_generate import TARGET_SPACE_TYPE_TO_NAME
 from path_planning.utils.util import read_graph_sampler_from_yaml
 
 
@@ -33,25 +40,26 @@ def visualize_graph_sample(input_file: Path, graph_dir: Path, graph_file: Path, 
         augmentation_id = int(graph_name_parts[-1])
     else:
         augmentation_id = 0
-    # Per-node arrays are stored as (N,) or (N, 1); use one value per node.
-    y = np.asarray(np.load(target_file), dtype=float)
-    if y.ndim > 1:
-        y = y.reshape(y.shape[0], -1)[:, 0]
+    # Per-node arrays are stored as (N,) or (N, 1); use one value per node. No target file (target space
+    # 'ignore'): the graph is drawn without node values.
+    y = None
+    if target_file.exists():
+        y = np.asarray(np.load(target_file), dtype=float)
+        if y.ndim > 1:
+            y = y.reshape(y.shape[0], -1)[:, 0]
 
-    map_ =read_graph_sampler_from_yaml(input_file,graph_file=graph_file, args={"use_constraint_sweep": False})
-    use_discrete_space = map_.use_discrete_space
+    map_ =read_graph_sampler_from_yaml(input_file,graph_file=graph_file, args={"use_collision_sweep": False})
 
-    if len(y) != len(map_.nodes):
+    if y is not None and len(y) != len(map_.nodes):
         # ``y`` is a per-node array over the *base* roadmap (graph_map.pkl) while
         # ``graph_file`` may be a pruned copy of it. Map the values onto the loaded
-        # graph's nodes by coordinate. (The old ``y[y > 0]`` shortcut assumed the
-        # pruned graph is exactly the mask's ones, but prune_map also force-keeps
-        # start/goal anchors whose mask value is 0, so the lengths drift apart.)
+        # graph's nodes by coordinate (prune_map also keeps start/goal anchors whose
+        # mask value is 0, so the pruned graph is not just the mask's ones).
         base_graph_file = get_graph_file_path(graph_dir)  # <graph_dir>/graph_map.pkl
         base_nodes = None
         if base_graph_file.exists() and base_graph_file != graph_file:
             base_map = read_graph_sampler_from_yaml(
-                input_file, graph_file=base_graph_file, args={"use_constraint_sweep": False}
+                input_file, graph_file=base_graph_file, args={"use_collision_sweep": False}
             )
             base_nodes = base_map.nodes
         if base_nodes is not None and len(base_nodes) == len(y):
@@ -67,7 +75,7 @@ def visualize_graph_sample(input_file: Path, graph_dir: Path, graph_file: Path, 
     plt.close("all")
     visualizer = Visualizer2D(figname=f"{graph_dir.name} - Graph", figsize=(8, 8))
     visualizer.plot_grid_map(map_)
-    visualizer.plot_road_map(map_, map_.nodes, map_.road_map, map_frame=use_discrete_space, node_value=y)
+    visualizer.plot_road_map(map_, map_.nodes, map_.road_map, map_frame=False, node_value=y)   # nodes are world coordinates
     if density_map_file.exists():
         density_map = np.rot90(np.load(density_map_file), k=augmentation_id, axes=(0, 1))
         visualizer.plot_density_map(density_map)
@@ -156,7 +164,9 @@ def collect_graph_tasks(
         verbose: bool = True,
         folder_key: str = "sample",
     ) -> List[Tuple[Path, bool, bool]]:
-    """Collect graph sample visualization tasks under case_*/sample/{road_type}/graph_*_*."""
+    """Collect graph visualization tasks: the samples under ``case_*/sample/{road_type}/graph_*_*``
+    (``folder_key`` "sample"; "sample_cluster" for the cluster samples) or the maps under
+    ``case_*/maps/{road_type}`` ("map")."""
     case_dirs = sorted(
         [d for d in base_path.iterdir() if d.is_dir() and d.name.startswith("case_") and len(os.listdir(d)) > 0],
         key=lambda value: int(value.name.split("_")[1]),
@@ -180,8 +190,8 @@ def collect_graph_tasks(
     tasks: List[Tuple[Path,Path, str, Path, bool, bool]] = []
     target_space_type = target_space.lower() 
 
-    if folder_key == "sample":
-        get_base_path = generate_sample_base_path
+    if folder_key in ("sample", "sample_cluster"):
+        get_base_path = generate_sample_base_path if folder_key == "sample" else generate_cluster_sample_base_path
         def get_graph_dirs(base_path: Path):
             return sorted(
                 [d for d in base_path.iterdir() if d.is_dir() and d.name.startswith("graph_")],

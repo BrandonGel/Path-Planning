@@ -13,7 +13,15 @@ Visualize the density map for single paths with 1 worker
 python scripts/generate/run_label.py -s benchmark/train/map32.0x32.0_resolution1.0/agents4_obst0.1 -w 1
 '''
 import argparse
+import sys
 from pathlib import Path
+
+# Import this repo's `path_planning`, not an installed copy from site-packages.
+repo_root = Path(__file__).resolve().parents[2]
+if str(repo_root) not in sys.path:
+    sys.path.insert(0, str(repo_root))
+from path_planning.common.environment.map.graph_sampler_base import ROADMAP_TYPES
+from path_planning.multi_agent_planner.mapf_solver import MAPF_SOLVERS
 from path_planning.data_generation.dataset_label import label_dataset
 from multiprocessing import cpu_count
 
@@ -22,8 +30,8 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument("-s","--paths", default=['benchmark/train/map32.0x32.0_resolution1.0/agents4_obst0.1/radius0.0'], nargs='+', type=Path, help="input folder containing cases")
-    parser.add_argument("-mapf","--mapf_solver_name", type=str, default='cbs', choices=['cbs', 'icbs', 'lacam', 'lacam_random'], help="MAPF solver to use")
-    parser.add_argument("-rmt","--road_map_types", type=str, nargs='+', default=['grid'], choices=['grid', 'prm', 'planar'], help="roadmap types")
+    parser.add_argument("-mapf","--mapf_solver_name", type=str, default='cbs', choices=list(MAPF_SOLVERS), help="MAPF solver to use")
+    parser.add_argument("-rmt","--road_map_types", type=str, nargs='+', default=['grid'], choices=sorted(ROADMAP_TYPES), help="roadmap types")
     parser.add_argument("-av","--agent_velocity", type=float, default=0.0, help="agent velocity")
     parser.add_argument("-g","--graph_file_name", type=Path, default=None, help="graph file name")
     parser.add_argument("-v","--visualize", action='store_true', help="visualize the density map")

@@ -6,8 +6,13 @@ After building the graph, you can use graph search algorithms (Dijkstra, A*)
 to find paths between any start/goal pairs in the graph.
 
 Usage:
-    python scripts/run_rrg.py
+    python scripts/roadmaps/run_rrg.py
 """
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))   # this repo, ahead of any installed copy
 
 from path_planning.utils.util import set_global_seed
 from path_planning.global_planner.sample_search.rrg import RRG
@@ -20,7 +25,6 @@ if __name__ == "__main__":
     set_global_seed(42)
     os.makedirs("figs/rrg", exist_ok=True)
 
-    # Simple Example: 2D map (uncomment to run)
     print("=" * 60)
     print("RRG (Rapidly-exploring Random Graph) Example")
     print("=" * 60)
@@ -43,7 +47,7 @@ if __name__ == "__main__":
         sample_num=5000,  # Number of samples to generate
         goal_sample_rate=0.1,  # Probability of sampling goal directly
         discrete=False,  # Use continuous space
-        use_faiss=False,  # Use FAISS for faster nearest neighbor search
+        use_faiss=False,  # True: FAISS for faster nearest neighbor search
     )
 
     path2d, path2d_info = planner_2d.plan()
@@ -51,8 +55,8 @@ if __name__ == "__main__":
     # RRG builds a graph structure (road_map) that can be used for path finding
     # The graph is stored in:
     #   - planner_2d.road_map: adjacency list representation
-    #   - result_2d[1]["node_list"]: list of node positions
-    #   - result_2d[1]["expand"]: dictionary of all nodes
+    #   - path2d_info["node_list"]: list of node positions
+    #   - path2d_info["expand"]: dictionary of all nodes
     #
     # To find a path, you can use graph search algorithms (Dijkstra, A*) on the road_map
     print(f"RRG built graph with {len(planner_2d.road_map)} nodes")

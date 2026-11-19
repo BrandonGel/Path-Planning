@@ -14,31 +14,23 @@ from pathlib import Path
 
 import numpy as np
 
-try:
-    from path_planning.cluster.embeddings import (
-        EMBEDDING_METHODS,
-        compute_embedding,
-        default_method_name,
-        explained_variance,
-        largest_component,
-        symmetric_roadmap_csr,
-    )
-    from path_planning.cluster.gnn_cluster_map import (
-        _kmeans_medoids,
-        gnn_seed_indices,
-        load_cluster_encoder,
-        read_run_config,
-        ablation_flags_from_config,
-        sampler_to_cluster_heterodata,
-    )
-    from path_planning.utils.util import set_global_seed
-    from tests.test_ctopprm import _build_block_map, START, GOAL
-
-    _IMPORTS_OK = True
-    _IMPORT_ERROR = ""
-except ModuleNotFoundError as exc:  # pragma: no cover
-    _IMPORTS_OK = False
-    _IMPORT_ERROR = str(exc)
+from path_planning.cluster.embeddings import (
+    compute_embedding,
+    default_method_name,
+    explained_variance,
+    largest_component,
+    symmetric_roadmap_csr,
+)
+from path_planning.cluster.gnn_cluster_map import (
+    _kmeans_medoids,
+    gnn_seed_indices,
+    load_cluster_encoder,
+    read_run_config,
+    ablation_flags_from_config,
+    sampler_to_cluster_heterodata,
+)
+from path_planning.utils.util import set_global_seed
+from tests.helpers import GOAL, START, build_block_map
 
 GNN6_RUN = Path(os.environ.get(
     "GNN6_RUN",
@@ -60,12 +52,11 @@ def _detach_vertex(map_, i: int) -> None:
     map_.roadmap.set_adjacency(road_map, weights)    # edges / edge_weights are views over map_.roadmap
 
 
-@unittest.skipUnless(_IMPORTS_OK, f"imports failed: {_IMPORT_ERROR}")
 class TestEmbeddingControls(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         set_global_seed(42)
-        cls.map = _build_block_map([START], [GOAL], sample_num=300)
+        cls.map = build_block_map([START], [GOAL], sample_num=300)
         cls.n = len(cls.map.nodes)
         cls.sg = set(cls.map.start_nodes_index.values()) | set(cls.map.goal_nodes_index.values())
         cls.K = 24
@@ -127,7 +118,7 @@ class TestEmbeddingControls(unittest.TestCase):
 
     def test_detached_vertex_is_dropped_and_kmeans_still_runs(self):
         set_global_seed(42)
-        m = _build_block_map([START], [GOAL], sample_num=300)
+        m = build_block_map([START], [GOAL], sample_num=300)
         sg = set(m.start_nodes_index.values()) | set(m.goal_nodes_index.values())
         victim = next(i for i in range(len(m.nodes)) if i not in sg)
         _detach_vertex(m, victim)
@@ -151,7 +142,7 @@ class TestEmbeddingControls(unittest.TestCase):
 
     def test_start_outside_component_raises(self):
         set_global_seed(42)
-        m = _build_block_map([START], [GOAL], sample_num=300)
+        m = build_block_map([START], [GOAL], sample_num=300)
         s_idx = next(iter(m.start_nodes_index.values()))
         _detach_vertex(m, s_idx)
         for method in ("isomap", "spectral"):
@@ -203,7 +194,7 @@ class TestEmbeddingControls(unittest.TestCase):
 
     def test_drop_disconnected_equalises_candidates_for_euclid(self):
         set_global_seed(42)
-        m = _build_block_map([START], [GOAL], sample_num=300)
+        m = build_block_map([START], [GOAL], sample_num=300)
         sg = set(m.start_nodes_index.values()) | set(m.goal_nodes_index.values())
         victim = next(i for i in range(len(m.nodes)) if i not in sg)
         _detach_vertex(m, victim)
@@ -242,7 +233,3 @@ class TestEmbeddingControls(unittest.TestCase):
         self.assertTrue(np.array_equal(latent["embeddings"], z_direct))
         self.assertEqual(times["embedding"]["n_dropped"], 0)
         self.assertEqual(times["embedding"]["n_candidates"], len(free))
-
-
-if __name__ == "__main__":
-    unittest.main()

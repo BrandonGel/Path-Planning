@@ -27,6 +27,7 @@ import yaml
 
 from path_planning.common.visualizer.visualizer_2d import Visualizer2D
 from path_planning.data_generation.dataset_ground_truth_map import create_map
+from path_planning.cluster.cluster_map import CLUSTER_METHODS, get_cluster_graph_name
 from path_planning.data_generation.dataset_util import (
     create_path_parameter_directory,
     generate_base_case_path,
@@ -35,22 +36,16 @@ from path_planning.data_generation.dataset_util import (
     get_input_file_path,
 )
 
-METHOD_GRAPHS = {
-    "ctopprm": "graph_map_ctopprm.pkl",
-    "kmeans": "graph_map_kmeans.pkl",
-    "em": "graph_map_em.pkl",
-    "gnn": "graph_map_gnn.pkl",
-    # Full source roadmap, no clustering (the comparison baseline); lives in
-    # maps/<rmt>/ rather than the cluster/ subdir.
-    "none": "graph_map.pkl",
-}
+# "none": the full source roadmap, no clustering; lives in maps/<rmt>/ rather than the cluster/ subdir.
+METHOD_GRAPHS = {**{m: get_cluster_graph_name(m) for m in CLUSTER_METHODS},
+                 "gnn": "graph_map_gnn.pkl", "none": "graph_map.pkl"}
 
 
 def render(map_, title, out_file):
     plt.close('all')
     vis = Visualizer2D(figname=str(out_file), figsize=(9, 9))
     vis.plot_grid_map(map_)
-    vis.plot_road_map(map_, map_.nodes, map_.road_map, map_frame=map_.use_discrete_space)
+    vis.plot_road_map(map_, map_.nodes, map_.road_map, map_frame=False)   # nodes are world coordinates
     vis.ax.set_title(title)
     vis.savefig(out_file)
     vis.close()
@@ -65,7 +60,7 @@ if __name__ == "__main__":
     parser.add_argument("-r","--resolution",type=float, default=1.0)
     parser.add_argument("-ar","--agent_radius",type=float, default=0.5)
     parser.add_argument("-rmt","--road_map_types",type=str, nargs='+', default=['grid', 'prm', 'cdt'])
-    parser.add_argument("-cmm","--cluster_methods",type=str, nargs='+', default=['none'], choices=['none'] + list(METHOD_GRAPHS))
+    parser.add_argument("-cmm","--cluster_methods",type=str, nargs='+', default=['none'], choices=list(METHOD_GRAPHS))
     parser.add_argument("-cm","--case_mode",type=str, default="first_n", choices=["all", "first_n", "specific"])
     parser.add_argument("-cn","--num_cases",type=int, default=2)
     parser.add_argument("-cs","--specific_cases",type=int, nargs='+', default=[0])
@@ -103,7 +98,7 @@ if __name__ == "__main__":
                 src_file = get_graph_file_path(map_path)
                 if src_file.exists():
                     m = create_map(inpt, graph_file=src_file, verbose=False,
-                                   args={"use_constraint_sweep": False})
+                                   args={"use_collision_sweep": False})
                     render(m, f"case_{case_id} {road_map_type} source ({len(m.nodes)} nodes)",
                            map_path / "graph_map.png")
                     rendered += 1
@@ -114,7 +109,7 @@ if __name__ == "__main__":
                     missing += 1
                     continue
                 m = create_map(inpt, graph_file=pkl, verbose=False,
-                               args={"use_constraint_sweep": False})
+                               args={"use_collision_sweep": False})
                 render(m, f"case_{case_id} {road_map_type}/{method} "
                           f"({len(m.nodes)} nodes, {len(m.edges)} edges)",
                        pkl_dir / f"{pkl.stem}.png")

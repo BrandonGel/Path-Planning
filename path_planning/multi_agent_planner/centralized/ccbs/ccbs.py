@@ -10,7 +10,6 @@ from itertools import count
 
 import numpy as np
 
-from path_planning.agent import Agent
 from path_planning.multi_agent_planner.centralized.cbs.data_types import start_heading
 from path_planning.multi_agent_planner.centralized.cbs.routing import RoadmapCosts
 from path_planning.multi_agent_planner.centralized.ccbs.conflicts import ContinuousConflicts
@@ -43,7 +42,7 @@ class Environment(RoadmapCosts, ContinuousConflicts):
             raise ValueError(f'CCBS: every agent dict needs an "agent" (an Agent); missing for {missing}')
         self.graph_map, self.precision = graph_map, float(precision)
         # Turns are instant here, so the bodies carry no turning rate.
-        self.bodies = {a["name"]: Agent(a["agent"].shape, a["agent"].max_speed, None, a["agent"].type, a["agent"].clearance)
+        self.bodies = {a["name"]: a["agent"].replace(max_rotation=None)
                        for a in agents}
         graph_map.set_collision_sweep()
         self.cache = shared_sweep_cache(graph_map, "ccbs")

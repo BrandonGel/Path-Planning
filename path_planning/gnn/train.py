@@ -1,13 +1,11 @@
 from sklearn.model_selection import train_test_split
 from path_planning.gnn.dataloader import GraphDataset
 from torch_geometric.loader import DataLoader
-import torch.nn.functional as F
 import torch
 import wandb
 from time import time
 from path_planning.gnn.loss import LossFunction
 from typing import Dict
-from path_planning.gnn.loss import get_probability
 
 def split_dataset(graph_dataset:GraphDataset,batch_size=128,test_size=0.1,random_state=42,num_workers=1):
 
@@ -65,10 +63,8 @@ def normalize_threshold(threshold: torch.Tensor,batch_dict: Dict[str, torch.Tens
     return new_threshold
     
 
-def train(train_loader,model,optimizer,loss_function:LossFunction,threshold_model=None,num_prune=0,device='cuda:0',run: wandb.Run =None):
+def train(train_loader,model,optimizer,loss_function:LossFunction,num_prune=0,device='cuda:0',run: wandb.Run =None):
     model.train()
-    # if threshold_model is not None:
-    #     threshold_model.eval()
     train_loss = []
     train_time = []
     for batch in train_loader:
@@ -99,10 +95,8 @@ def train(train_loader,model,optimizer,loss_function:LossFunction,threshold_mode
                 })
     return train_loss,train_time
 
-def test(test_loader,model,loss_function:LossFunction,threshold_model=None,num_prune=0,device='cuda:0',run: wandb.Run =None):
+def test(test_loader,model,loss_function:LossFunction,num_prune=0,device='cuda:0',run: wandb.Run =None):
     model.eval()
-    # if threshold_model is not None:
-    #     threshold_model.eval()
     test_loss = []
     test_time = []
     with torch.no_grad():

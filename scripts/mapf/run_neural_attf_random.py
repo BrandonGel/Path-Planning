@@ -50,7 +50,7 @@ def _run_random(
     seed: int = 42,
     # Obstacle inflation accounts for the agent footprint (see _make_map_mapd):
     # the ESDF is grid-quantized, so agent_radius must be >= ~0.293 for any
-    # inflation to take effect (radius 0 inflates nothing). Match _run_mapd's 1.0.
+    # inflation to take effect (radius 0 inflates nothing).
     agent_radius: float = 1.0,
     out_dir_figs: str = "figs/neural_attf",
     out_dir_yaml: str = "path_planning/maps/2d/neural_attf",

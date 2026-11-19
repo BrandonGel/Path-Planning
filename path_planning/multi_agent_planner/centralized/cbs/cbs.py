@@ -6,13 +6,14 @@ description: This file implements the Conflict-based search algorithm for multi-
 
 import heapq
 import time
+from collections import defaultdict
 from itertools import combinations, count
 
 from path_planning.common.environment.map.graph_sampler import GraphSampler
 from path_planning.multi_agent_planner.centralized.cbs.a_star import AStar
 from path_planning.multi_agent_planner.centralized.cbs.bodies import BodyConflicts
 from path_planning.multi_agent_planner.centralized.cbs.data_types import (   # noqa: F401  (the types are re-exported)
-    Conflict, Constraints, EdgeConstraint, HighLevelNode, Location, State, VertexConstraint, _turn_toward, start_heading)
+    Conflict, Constraints, EdgeConstraint, HighLevelNode, Location, State, VertexConstraint, _turn_toward, put_heading, start_heading)
 from path_planning.multi_agent_planner.centralized.cbs.routing import RoadmapCosts
 from path_planning.multi_agent_planner.data_type import HEURISTIC_TYPE
 
@@ -133,18 +134,25 @@ class Environment(BodyConflicts, RoadmapCosts):
             return self._body_conflicts(solution, max_t, get_first_conflict, max_conflicts)
 
         conflicts = []
-        agent_pairs = list(combinations(solution.keys(), 2))
+        names = list(solution.keys())
         # Each agent's location per step up to max_t, holding its last one once its plan has ended.
-        at = {a: [s.location for s in path] + [path[-1].location] * (max_t + 1 - len(path)) for a, path in solution.items()}
+        at = [[s.location for s in path] + [path[-1].location] * (max_t + 1 - len(path)) for path in solution.values()]
         for t in range(max_t):
-            for agent_1, agent_2 in agent_pairs:
-                here_1, here_2, next_1, next_2 = at[agent_1][t], at[agent_2][t], at[agent_1][t + 1], at[agent_2][t + 1]
-                if here_1 == here_2:                             # both at one vertex
-                    c = Conflict(Conflict.VERTEX, t, agent_1, agent_2, here_1)
-                elif here_1 == next_2 and next_1 == here_2:      # swapping along an edge
-                    c = Conflict(Conflict.EDGE, t, agent_1, agent_2, here_1, next_1)
-                else:
-                    continue
+            # Hash each agent by vertex and by move, then visit the clashing pairs in pair order (i < j).
+            by_vertex, by_move = defaultdict(list), defaultdict(list)
+            for i, row in enumerate(at):
+                by_vertex[row[t]].append(i)
+                if row[t] != row[t + 1]:
+                    by_move[(row[t], row[t + 1])].append(i)
+            pairs = [(i, j) for group in by_vertex.values() if len(group) > 1 for i, j in combinations(group, 2)]
+            pairs += [tuple(sorted((i, j))) for (here, nxt), group in by_move.items() if (nxt, here) in by_move
+                      for i in group for j in by_move[(nxt, here)]]
+            for i, j in sorted(set(pairs)):
+                here_1, next_1 = at[i][t], at[i][t + 1]
+                if here_1 == at[j][t]:                           # both at one vertex
+                    c = Conflict(Conflict.VERTEX, t, names[i], names[j], here_1)
+                else:                                            # swapping along an edge
+                    c = Conflict(Conflict.EDGE, t, names[i], names[j], here_1, next_1)
                 if get_first_conflict:
                     return c
                 conflicts.append(c)
@@ -436,13 +444,6 @@ class CBS(object):
             if len(path[0].location) not in (2, 3):
                 raise ValueError(f"Invalid location dimension: {len(path[0].location)}")
             oris = self.env.plan_oris(agent, [s.location.point for s in path], [s.ori for s in path])
-            entries = []
-            for state, ori in zip(path, oris):
-                entry = {'t': state.time, **dict(zip('xyz', state.location.point))}
-                if isinstance(ori, tuple):
-                    entry['yaw'], entry['pitch'] = ori
-                elif ori is not None:
-                    entry['yaw'] = ori
-                entries.append(entry)
-            plan[agent] = entries
+            plan[agent] = [put_heading({'t': state.time, **dict(zip('xyz', state.location.point))}, ori)
+                           for state, ori in zip(path, oris)]
         return plan

@@ -689,12 +689,6 @@ def set_map_config(map_config: dict = None,args: argparse.Namespace = None):
     else:
         map_config['heuristic_type'] = map_config['heuristic_type'] if map_config['heuristic_type'] is not None else 'manhattan'
 
-    # Setting the is_start_goal_discrete
-    if args_dict.get('is_start_goal_discrete') is not None:
-        map_config['is_start_goal_discrete'] = args.is_start_goal_discrete
-    else:
-        map_config['is_start_goal_discrete'] = map_config['is_start_goal_discrete'] if map_config['is_start_goal_discrete'] is not None else True
-
     # Setting the weighted_sampling
     if args_dict.get('weighted_sampling') is not None:
         map_config['weighted_sampling'] = args.weighted_sampling

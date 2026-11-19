@@ -1,12 +1,15 @@
-import os
-import yaml
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))   # this repo, ahead of any installed copy
+
+import yaml
 import numpy as np
 import argparse
 import re
 from tqdm import tqdm
 from multiprocessing import Pool, cpu_count
-from path_planning.common.environment.map.graph_sampler import GraphSampler
+from path_planning.multi_agent_planner.mapf_solver import MAPF_SOLVERS
 
 def _deep_merge(target, source):
     """Recursively merge source into target. Prevents shallow update from overwriting nested dicts."""
@@ -209,7 +212,7 @@ def process_sol_file(sol_file):
     # Initialize the raw_data
     raw_data = {}
     with open(sol_file, "r") as f:
-        data = yaml.safe_load(f)
+        data = yaml.load(f, Loader=getattr(yaml, "CSafeLoader", yaml.SafeLoader))
 
     # Get keys for the raw_data
     keys = extract_keys(sol_file)
@@ -284,7 +287,7 @@ if __name__ == "__main__":
         "--solver",
         type=str,
         default="all",
-        choices=["all", "cbs", "icbs", "lacam", "lacam_random", "sipp", "ccbs"],
+        choices=["all", *MAPF_SOLVERS],
         help="solver to check (all = every solver under perm directories)",
     )
     parser.add_argument(

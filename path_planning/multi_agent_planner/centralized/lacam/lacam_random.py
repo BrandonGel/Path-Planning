@@ -10,7 +10,6 @@ from loguru import logger
 from path_planning.common.environment.map.graph_sampler import GraphSampler
 from path_planning.multi_agent_planner.centralized.lacam.utility import Coord,is_valid_coord,get_neighbors,Config,Deadline,Configs,centre_of,reset_cells
 from path_planning.multi_agent_planner.centralized.lacam.dist_table import DistTable
-from path_planning.multi_agent_planner.centralized.lacam.pibt import PIBT
 
 NO_AGENT: int = np.iinfo(np.int32).max
 """Sentinel value indicating no agent occupies a location."""

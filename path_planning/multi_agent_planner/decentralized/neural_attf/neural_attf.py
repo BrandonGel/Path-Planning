@@ -407,7 +407,7 @@ class NeuralATTF:
         m = self.sipp_clearance_margin
         if body.is_ball and not body.clearance:
             return Agent.disc(body.radius + m, body.max_speed, type=body.type)
-        return Agent(body.shape, body.max_speed, body.max_rotation, body.type, body.clearance + m)
+        return body.replace(clearance=body.clearance + m)
 
     def _faces(self, name) -> bool:
         """Whether ``name``'s heading matters for its collisions (a body that is not a ball)."""

@@ -140,13 +140,6 @@ class GraphSampler(GraphSamplerBase):
     def goal_nodes(self) -> List[Node]:
         return self.node_sampler.get_nodes(index_type='goal_points')
 
-    @property
-    def boundary_nodes(self) -> List[Node]:
-        """The boundary nodes (the sampler's ``'boundary_points'`` kind) as
-        ``Node`` objects: outline vertices when they were generated, otherwise
-        the sampled nodes whose cell touches a wall or the map edge."""
-        return self.node_sampler.get_nodes(index_type='boundary_points')
-
     # ------------------------------------------------------------ Nodes Methods
     def generateRandomNodes(self,sample_num: int = None, generate_grid_nodes = False, generate_boundary_nodes = False, prob_map = None, samp_from_prob_map_ratio = 0.5, roadmap_type: str = None):
         """Reset ``node_sampler`` and sample this map's node set (see
@@ -269,21 +262,18 @@ class GraphSampler(GraphSamplerBase):
         in ``.adj``) is ``self.roadmap``; ``edges``, ``edge_weights``,
         ``road_map`` and ``road_map_edge_weights`` are views over it.
 
-        Legacy form ``generate_roadmap(samples)`` (a node list as first
-        argument) builds the k-nearest PRM, as before.
-
         Returns:
             roadmap: the installed ``Roadmap``.
         """
-        samples = None
-        if not isinstance(roadmap_type, str):          # legacy generate_roadmap(samples)
-            roadmap_type, samples = "prm", roadmap_type
+        if not isinstance(roadmap_type, str):
+            raise TypeError(f"generate_roadmap takes the roadmap type (a str), got {type(roadmap_type).__name__}; "
+                            "the nodes are this map's own (generateRandomNodes)")
         if config is None:                               # this sampler's roadmap_config
             config = self.roadmap_config
         if not isinstance(config, RoadmapConfig):      # dict: overrides on top of it
             config = RoadmapConfig({**self.roadmap_config.as_dict(), **config})
         self.roadmap = Roadmap(self, roadmap_type, config=config, **options)
-        self.roadmap.generate_roadmap(self.nodes if samples is None else samples)
+        self.roadmap.generate_roadmap(self.nodes)
         self.roadmap.apply()
         return self.roadmap
 
@@ -462,7 +452,7 @@ class GraphSampler(GraphSamplerBase):
         single_point = prev is not None and np.ndim(prev) == 1 and all(np.isscalar(x) for x in prev)
         prevs = [prev] * n if prev is None or single_point else list(prev)
         t0s, holds, heads, speeds = (_per_agent(x, n) for x in (t0, goal_hold, heading, speed))
-        movers = [a if sp is None else Agent(a.shape, sp, a.max_rotation, a.type, a.clearance)
+        movers = [a if sp is None else a.replace(max_speed=sp)
                   for a, sp in zip(agents, speeds)]
         prevs = [None if q is None or a.max_rotation == 0 or tuple(map(float, q)) == tuple(p[0]) else
                  np.asarray(q, dtype=float) for q, a, p in zip(prevs, movers, paths)]
@@ -599,54 +589,55 @@ class GraphSampler(GraphSamplerBase):
         ``sweep_backend`` and ``sweep_spatial_index``."""
         with open(path, 'rb') as f:
             data = pickle.load(f)
+        if not isinstance(data, dict) or data.get("version") != self.PICKLE_VERSION:
+            raise ValueError(f"{path}: not a version {self.PICKLE_VERSION} graph sampler pickle "
+                             "(written by older code: rebuild the map)")
         self._load_from_dict(data, args)
 
-    def _load_from_dict(self, data: dict, args: dict = {}):
-        """Restore a pickle written by ``save_graph_sampler``. Version 2 holds
-        ``node_sampler`` / ``roadmap`` state dicts; the legacy layout holds
-        ``nodes`` (Node list), ``road_map`` / ``road_map_edge_weights``
-        (nested neighbour lists), the config and ``sampling_dist_dict`` at the
-        top level and optional ``boundary_points``; it is still read
-        (``grid_points``, when present, is ignored: grid nodes are plain
-        samples now)."""
+    def _load_from_dict(self, data: dict, args: dict = {}, grid_from: "GraphSampler | None" = None):
+        """Restore the data ``save_graph_sampler`` writes (version 2: the settings, start / goal, obstacles
+        and the ``node_sampler`` / ``roadmap`` state dicts). ``grid_from``: a map with the same bounds,
+        resolution, start / goal, obstacles and inflation, whose grid is copied instead of rebuilt."""
         self.use_discrete_space = data["use_discrete_space"]
         self.set_start(data["start"])
         self.set_goal(data["goal"])
 
-        self.obs_size = data.get("obs_size", 0.5)
+        self.obs_size = data["obs_size"]
         self.inflation_radius = data["inflation_radius"]
-        self.set_obstacles(data["obstacles"])
-        self.inflate_obstacles(self.inflation_radius)
+        if grid_from is None:
+            self.set_obstacles(data["obstacles"])
+            self.inflate_obstacles(self.inflation_radius)
+        else:
+            self._copy_grid(grid_from)
 
-        if "node_sampler" in data:              # version 2: plain-array state dicts carry the config and sampling parameters
-            self.node_sampler.load_state_dict(data["node_sampler"])
-            self.roadmap = Roadmap(self, config=data["roadmap"].get("config"))
-            self.roadmap.load_state_dict(data["roadmap"])
-        else:                                   # legacy layout: config and sampling parameters at the top level
-            if "roadmap_config" in data:
-                roadmap_config = data["roadmap_config"]
-            else:                               # pickles written before roadmap_config existed
-                roadmap_config = {"sample_num": data["sample_num"], "num_neighbors": data["num_neighbors"],
-                                  "min_edge_length": data["min_edge_length"], "max_edge_length": data["max_edge_length"]}
-            self.node_sampler.set_sampling_dist_dict(data.get("sampling_dist_dict"))
-            self.node_sampler.set_nodes(data["nodes"])      # nodes / pos_index_dict are views over the sampler
-            self.node_sampler.register_points('start_points', self.start)
-            self.node_sampler.register_points('goal_points', self.goal)
-            self.node_sampler.register_points('boundary_points', data.get("boundary_points", []))
-            self.roadmap = Roadmap(self, config=roadmap_config)
-            self.roadmap.set_nodes(self.nodes)
-            self.roadmap.set_adjacency(data["road_map"], data.get("road_map_edge_weights"))
+        self.node_sampler.load_state_dict(data["node_sampler"])       # plain-array state dicts: they carry
+        self.roadmap = Roadmap(self, config=data["roadmap"].get("config"))   # the config and sampling parameters
+        self.roadmap.load_state_dict(data["roadmap"])
         # nodes / pos_index_dict / edges / edge_weights / road_map are views over the sampler and roadmap.
         # The start/goal edge lists are built lazily by get_start/goal_nodes_with_all_edges.
 
-        # Collision sweep: rebuilt from the settings (maps saved before the rename store ``use_constraint_sweep``).
-        self.use_collision_sweep = args.get("use_collision_sweep", data.get("use_collision_sweep", data.get("use_constraint_sweep", True)))
+        # Collision sweep: rebuilt from the settings.
+        self.use_collision_sweep = args.get("use_collision_sweep", data["use_collision_sweep"])
         self.sweep_backend = args.get("sweep_backend", data.get("sweep_backend", "auto"))
         self.sweep_spatial_index = args.get("sweep_spatial_index", data.get("sweep_spatial_index", "grid"))
         self.collision_sweep = self._make_collision_sweep()
         self._collision_sweep_signature = None          # the new sweep is unbound, even if the roadmap is not new
         if self.use_collision_sweep:
             self.set_collision_sweep()
+
+    def _copy_grid(self, source: "GraphSampler"):
+        """Take ``source``'s obstacle grid as copies: its obstacles, type map (obstacles, inflation and the
+        start / goal cells) and ESDF, as ``set_obstacles`` + ``inflate_obstacles`` would rebuild them, but
+        without re-marking every obstacle or recomputing the distance field. The arrays are copied, not
+        shared: ``set_start`` / ``set_goal`` write cells in place."""
+        esdf = source.esdf                               # (brings the source's ESDF up to date first)
+        self.obstacles = list(source.obstacles)
+        self.inflation_radius = source.inflation_radius
+        self._type_map = GridTypeMap(source.type_map.data.copy())   # a fresh map: ESDF + connectivity dirty
+        self._esdf = esdf.copy()
+        self._esdf_lazy_flag_ = False                    # ... and the ESDF is current; connectivity stays lazy
+        if source._inflated_esdf_source is esdf:         # derived from the ESDF, never written in place
+            self._inflated_esdf, self._inflated_esdf_source = source._inflated_esdf, self._esdf
 
     def rotate(self, k: int, axes: Tuple[int, int] = (0, 1)):
         """Rotate the map in place by ``k`` quarter turns counterclockwise in the plane of ``axes`` (two distinct
@@ -701,39 +692,79 @@ class GraphSampler(GraphSamplerBase):
         if self.use_collision_sweep and len(self.edges) > 0:
             self.set_collision_sweep()
 
-    def create_pruned_copy(self, kept_node_indices: np.ndarray):
-        """A new ``GraphSampler`` with the same map and settings holding only the nodes ``kept_node_indices``
-        plus the start and goal nodes (always kept), renumbered in increasing index order, and the roadmap
-        edges between them."""
+    def pruned(self, kept_node_indices: np.ndarray, return_copy: bool = False) -> "GraphSampler":
+        """Keep only the nodes ``kept_node_indices`` plus the start and goal nodes (always kept), renumbered
+        in increasing index order, and the roadmap edges between them; returns the pruned map.
+
+        - ``return_copy`` False: prunes this map's node sampler and roadmap in place (the grid, start / goal
+          and settings are unchanged) and returns ``self``. Index-keyed state is renewed: the start / goal
+          edge lists, and the collision sweep is rebound (``sweep_version`` bumps, so planner sweep caches
+          built on the old numbering are not reused).
+        - ``return_copy`` True: leaves this map untouched and returns a new ``GraphSampler`` with the same map
+          and settings (the grid is copied, not rebuilt)."""
+        node_sampler, roadmap = self._pruned_state(kept_node_indices)
+        if not return_copy:
+            self.node_sampler.load_state_dict(node_sampler)
+            self.roadmap = Roadmap(self, config=roadmap["config"])
+            self.roadmap.load_state_dict(roadmap)
+            self._reset_edge_caches()
+            if self.use_collision_sweep and len(self.edges) > 0:
+                self.set_collision_sweep()
+            else:                                        # nothing to bind: drop the old graph's binding
+                self.collision_sweep = self._make_collision_sweep()
+                self._collision_sweep_signature = None
+                self.sweep_version += 1
+            return self
+        settings = self._settings()
+        copy = GraphSampler(bounds=self.bounds, resolution=self.resolution, start=[], goal=[],
+                            roadmap_config={**roadmap["config"], "sample_num": 0}, **settings,
+                            sampling_dist_dict=self.node_sampler.sampling_dist_dict)
+        copy._load_from_dict({                           # the layout save_graph_sampler writes
+            "version": self.PICKLE_VERSION,
+            **settings,
+            "start": self.start,
+            "goal": self.goal,
+            "node_sampler": node_sampler,
+            "roadmap": roadmap,
+            "obstacles": self.obstacles,
+            "obs_size": self.obs_size,
+            "inflation_radius": self.inflation_radius,
+        }, grid_from=self)                              # same map: copy the grid rather than rebuild it
+        return copy
+
+    def _pruned_state(self, kept_node_indices: np.ndarray) -> Tuple[dict, dict]:
+        """The ``node_sampler`` and ``roadmap`` state dicts of this map restricted to ``kept_node_indices`` plus
+        the start and goal nodes, renumbered in increasing index order (see ``pruned``)."""
         if kept_node_indices is None or len(kept_node_indices) == 0:
             raise ValueError("kept_node_indices must be a non-empty array of node indices.")
         start_goal = set(self.start_nodes_index.values()) | set(self.goal_nodes_index.values())
         kept = sorted(set(np.asarray(kept_node_indices, dtype=int).tolist()) | start_goal)
-        new_index = {old: new for new, old in enumerate(kept)}
-        weights = self.road_map_edge_weights if len(self.road_map_edge_weights) else None
-        road_map, road_map_weights = [], []
-        old_map = self.road_map                    # built once: every access rebuilds all the lists
-        for i in kept:
-            nbrs = old_map[i] if i < len(old_map) else []
-            slots = [n for n, j in enumerate(nbrs) if j in new_index]
-            road_map.append([new_index[nbrs[n]] for n in slots])
-            road_map_weights.append([weights[i][n] for n in slots] if weights is not None else [])
-        settings = self._settings()
-        roadmap_config = self.roadmap_config.as_dict()
-        copy = GraphSampler(bounds=self.bounds, resolution=self.resolution, start=[], goal=[],
-                            roadmap_config={**roadmap_config, "sample_num": 0}, **settings,
-                            sampling_dist_dict=self.node_sampler.sampling_dist_dict)
-        copy._load_from_dict({                           # the legacy (node list + nested adjacency) layout
-            **settings,
-            "start": self.start,
-            "goal": self.goal,
-            "roadmap_config": {**roadmap_config, "sample_num": sum(i not in start_goal for i in kept)},
-            "boundary_points": [n.current for n, i in self.boundary_nodes_index.items() if i in new_index],
-            "nodes": [self.nodes[i] for i in kept],
-            "obstacles": self.obstacles,
-            "inflation_radius": self.inflation_radius,
-            "road_map": road_map,
-            "road_map_edge_weights": road_map_weights,
+        kept_arr = np.asarray(kept, dtype=np.int64)
+        m = len(kept_arr)
+        new_index = np.full(len(self.nodes), -1, dtype=np.int64)
+        new_index[kept_arr] = np.arange(m)
+        # The edges between kept nodes, in their old order (rows stay sorted: the renumbering is monotone).
+        adj = self.roadmap.adj
+        rows = np.repeat(np.arange(adj.shape[0]), np.diff(adj.indptr))
+        keep = (new_index[rows] >= 0) & (new_index[adj.indices] >= 0)
+        new_rows = new_index[rows[keep]]
+        kinds = {kind: sorted(int(new_index[i]) for i in index.values() if new_index[i] >= 0)
+                 for kind, index in (("start_points", self.start_nodes_index), ("goal_points", self.goal_nodes_index),
+                                     ("boundary_points", self.boundary_nodes_index))}
+        roadmap_config = {**self.roadmap_config.as_dict(), "sample_num": sum(i not in start_goal for i in kept)}
+        clearance = np.array([self.nodes[i].max_clearance for i in kept], dtype=np.float64)
+        node_sampler = {
             "sampling_dist_dict": self.node_sampler.sampling_dist_dict,
-        })
-        return copy
+            "pos_index_dict": {tuple(self.nodes[i].current): new for new, i in enumerate(kept)},
+            "clearance": clearance,
+            "kinds": {kind: np.array(idx, dtype=np.int64) for kind, idx in kinds.items()},
+        }
+        roadmap = {
+            "config": roadmap_config,
+            "nodes": np.array([self.nodes[i].current for i in kept], dtype=np.float64).reshape(m, self.dim),
+            "clearance": clearance,
+            "indptr": np.concatenate([[0], np.cumsum(np.bincount(new_rows, minlength=m))]),
+            "indices": new_index[adj.indices[keep]],
+            "data": np.asarray(adj.data, dtype=np.float64)[keep],
+        }
+        return node_sampler, roadmap

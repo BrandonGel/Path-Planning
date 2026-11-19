@@ -118,9 +118,6 @@ class CTNode:
             yield node
             node = node.parent
 
-    def path_of(self, agent):
-        return next(node.paths[agent] for node in self.chain() if agent in node.paths)
-
     def cost_of(self, agent) -> float:
         return next(node.costs[agent] for node in self.chain() if agent in node.costs)
 
