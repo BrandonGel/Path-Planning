@@ -18,6 +18,17 @@ from path_planning.common.utils.geometry import GeometryNumpy as Geometry
 from path_planning.common.environment.roadmap.roadmap import Roadmap
 
 import pickle
+import zlib
+
+
+def _pack_array(a: np.ndarray) -> dict:
+    """``a`` zlib-compressed (the type map is mostly free cells: ~200x smaller), for the pickle."""
+    a = np.ascontiguousarray(a)
+    return {"shape": a.shape, "dtype": a.dtype.str, "zlib": zlib.compress(a.tobytes(), 6)}
+
+
+def _unpack_array(d: dict) -> np.ndarray:
+    return np.frombuffer(zlib.decompress(d["zlib"]), dtype=np.dtype(d["dtype"])).reshape(d["shape"]).copy()
 
 
 def _agent_fields(agents):
@@ -552,7 +563,7 @@ class GraphSampler(GraphSamplerBase):
         self.node_sampler.reset()
         self.roadmap.reset()
 
-    PICKLE_VERSION = 2
+    PICKLE_VERSION = 3          # 3: the type map (compressed) replaces the obstacle list; 2 still loads
 
     def _settings(self) -> dict:
         """The map's settings, as saved and as passed to a copy's constructor."""
@@ -564,10 +575,13 @@ class GraphSampler(GraphSamplerBase):
         }
 
     def save_graph_sampler(self, path: str):
-        """Pickle the map as plain data (version 2): the settings, the start / goal, the obstacles,
-        ``node_sampler.state_dict()`` (nodes, kinds, ``sampling_dist_dict``) and ``roadmap.state_dict()``
-        (nodes, adjacency, ``roadmap_config``). Neither object is pickled itself (both reference the map),
-        nor is ``collision_sweep``: it is rebuilt from the settings on load."""
+        """Pickle the map as plain data (version 3): the settings, the start / goal, the type map
+        (obstacles, inflation and start / goal cells; zlib-compressed), ``node_sampler.state_dict()`` (nodes,
+        kinds, ``sampling_dist_dict``) and ``roadmap.state_dict()`` (nodes, adjacency, ``roadmap_config``).
+        The type map is restored on load instead of re-marking the obstacles and recomputing the distance
+        field to inflate them (seconds on a large map); the obstacle list is read back off it. Neither the
+        sampler nor the roadmap is pickled itself (both reference the map), nor is ``collision_sweep``: it
+        is rebuilt from the settings on load."""
         data = {
             "version": self.PICKLE_VERSION,
             **self._settings(),
@@ -575,9 +589,7 @@ class GraphSampler(GraphSamplerBase):
             "goal": self.goal,
             "node_sampler": self.node_sampler.state_dict(),
             "roadmap": self.roadmap.state_dict(),
-            # ndarray, not list-of-tuples: pickling 4.5M tuples costs ~10s / ~200MB, the array
-            # milliseconds / ~70MB. set_obstacles() accepts either on load.
-            "obstacles": np.asarray(self.obstacles, dtype=np.int64) if len(self.obstacles) else [],
+            "type_map": _pack_array(self.type_map.data),
             "obs_size": self.obs_size,
             "inflation_radius": self.inflation_radius,
         }
@@ -589,26 +601,33 @@ class GraphSampler(GraphSamplerBase):
         ``sweep_backend`` and ``sweep_spatial_index``."""
         with open(path, 'rb') as f:
             data = pickle.load(f)
-        if not isinstance(data, dict) or data.get("version") != self.PICKLE_VERSION:
-            raise ValueError(f"{path}: not a version {self.PICKLE_VERSION} graph sampler pickle "
+        if not isinstance(data, dict) or data.get("version") not in (2, self.PICKLE_VERSION):
+            raise ValueError(f"{path}: not a version 2 or {self.PICKLE_VERSION} graph sampler pickle "
                              "(written by older code: rebuild the map)")
         self._load_from_dict(data, args)
 
     def _load_from_dict(self, data: dict, args: dict = {}, grid_from: "GraphSampler | None" = None):
-        """Restore the data ``save_graph_sampler`` writes (version 2: the settings, start / goal, obstacles
-        and the ``node_sampler`` / ``roadmap`` state dicts). ``grid_from``: a map with the same bounds,
-        resolution, start / goal, obstacles and inflation, whose grid is copied instead of rebuilt."""
+        """Restore the data ``save_graph_sampler`` writes: the settings, start / goal, the grid (version 3:
+        the type map; version 2: the obstacle list, re-marked and inflated) and the ``node_sampler`` /
+        ``roadmap`` state dicts. ``grid_from``: a map with the same bounds, resolution, start / goal,
+        obstacles and inflation, whose grid is copied instead (``data`` then needs no grid)."""
         self.use_discrete_space = data["use_discrete_space"]
         self.set_start(data["start"])
         self.set_goal(data["goal"])
 
         self.obs_size = data["obs_size"]
         self.inflation_radius = data["inflation_radius"]
-        if grid_from is None:
+        if grid_from is not None:
+            self._copy_grid(grid_from)
+        elif "type_map" in data:
+            type_map = _unpack_array(data["type_map"])
+            if type_map.shape != tuple(self.shape):
+                raise ValueError(f"saved type map {type_map.shape} does not match the map's shape {tuple(self.shape)}")
+            self._type_map = GridTypeMap(type_map)      # a fresh map: ESDF + connectivity recomputed on use
+            self.obstacles = None                        # read off the type map on first access
+        else:                                            # version 2
             self.set_obstacles(data["obstacles"])
             self.inflate_obstacles(self.inflation_radius)
-        else:
-            self._copy_grid(grid_from)
 
         self.node_sampler.load_state_dict(data["node_sampler"])       # plain-array state dicts: they carry
         self.roadmap = Roadmap(self, config=data["roadmap"].get("config"))   # the config and sampling parameters
@@ -625,19 +644,48 @@ class GraphSampler(GraphSamplerBase):
         if self.use_collision_sweep:
             self.set_collision_sweep()
 
-    def _copy_grid(self, source: "GraphSampler"):
+    def _copy_grid(self, source: "GraphSampler", keep_endpoints: bool = True):
         """Take ``source``'s obstacle grid as copies: its obstacles, type map (obstacles, inflation and the
         start / goal cells) and ESDF, as ``set_obstacles`` + ``inflate_obstacles`` would rebuild them, but
         without re-marking every obstacle or recomputing the distance field. The arrays are copied, not
-        shared: ``set_start`` / ``set_goal`` write cells in place."""
-        esdf = source.esdf                               # (brings the source's ESDF up to date first)
-        self.obstacles = list(source.obstacles)
+        shared: ``set_start`` / ``set_goal`` write cells in place. The ESDF keeps the source's lazy state: a
+        stale one (e.g. right after loading, where marking the inflation cells flags it) is recomputed on
+        first use, as it would be on the source, instead of here.
+
+        ``keep_endpoints=False`` drops the source's start / goal marks (for a map with its own endpoints):
+        each such cell becomes what the inflation would have made it, ``TYPES.INFLATION`` within
+        ``inflation_radius`` of an obstacle cell, else ``TYPES.FREE``, found from the obstacle cells around
+        it rather than the whole distance field."""
+        stale = source._esdf_lazy_flag_
+        self.obstacles = None if source._obstacles is None else list(source._obstacles)   # None: still derived
         self.inflation_radius = source.inflation_radius
-        self._type_map = GridTypeMap(source.type_map.data.copy())   # a fresh map: ESDF + connectivity dirty
-        self._esdf = esdf.copy()
-        self._esdf_lazy_flag_ = False                    # ... and the ESDF is current; connectivity stays lazy
-        if source._inflated_esdf_source is esdf:         # derived from the ESDF, never written in place
+        type_map = source.type_map.data.copy()
+        if not keep_endpoints:
+            self._unmark_endpoints(type_map)
+        self._type_map = GridTypeMap(type_map)           # a fresh map: ESDF + connectivity dirty
+        self._esdf = source._esdf.copy()
+        self._esdf_lazy_flag_ = stale                    # the source's ESDF state; connectivity stays lazy
+        if not stale and source._inflated_esdf_source is source._esdf:   # derived, never written in place
             self._inflated_esdf, self._inflated_esdf_source = source._inflated_esdf, self._esdf
+
+    def _unmark_endpoints(self, type_map: np.ndarray):
+        """Reset ``type_map``'s start / goal cells (in place) to inflation or free, as ``inflate_obstacles``
+        marks them: the ESDF (distance between cell centres to the nearest obstacle cell, as float32) is at
+        most ``inflation_radius``. Only obstacle cells within that radius are looked at."""
+        cells = np.argwhere((type_map == TYPES.START) | (type_map == TYPES.GOAL))
+        if len(cells) == 0:
+            return
+        reach = int(np.ceil(self.inflation_radius / self.resolution)) if self.inflation_radius > 0 else 0
+        shape = np.asarray(type_map.shape)
+        for cell in cells:
+            lo, hi = np.maximum(cell - reach, 0), np.minimum(cell + reach + 1, shape)
+            window = type_map[tuple(slice(a, b) for a, b in zip(lo, hi))]
+            obstacles = np.argwhere(window == TYPES.OBSTACLE) + lo
+            inflated = False
+            if len(obstacles) and self.inflation_radius > 0:
+                dist = np.sqrt((((obstacles - cell) * self.resolution) ** 2).sum(axis=1)).min()
+                inflated = np.float32(dist) <= self.inflation_radius
+            type_map[tuple(cell)] = TYPES.INFLATION if inflated else TYPES.FREE
 
     def rotate(self, k: int, axes: Tuple[int, int] = (0, 1)):
         """Rotate the map in place by ``k`` quarter turns counterclockwise in the plane of ``axes`` (two distinct
@@ -726,7 +774,6 @@ class GraphSampler(GraphSamplerBase):
             "goal": self.goal,
             "node_sampler": node_sampler,
             "roadmap": roadmap,
-            "obstacles": self.obstacles,
             "obs_size": self.obs_size,
             "inflation_radius": self.inflation_radius,
         }, grid_from=self)                              # same map: copy the grid rather than rebuild it
