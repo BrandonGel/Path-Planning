@@ -345,16 +345,6 @@ class CTopPRM:
             )
         return np.array(sorted(used), dtype=int)
 
-    def create_pruned_graph(self, results: Dict[PairKey, List[np.ndarray]]):
-        """GraphSampler copy keeping only the nodes used by these paths.
-
-        Wraps ``GraphSampler.create_pruned_copy`` with the node indices from
-        :meth:`used_node_indices`. With ``shortening_mode="none"`` every
-        consecutive waypoint pair is a roadmap edge, so all planned paths
-        stay traversable in the pruned copy.
-        """
-        return self.map.create_pruned_copy(self.used_node_indices(results))
-
     # ------------------------------------------------------------------
     # Roadmap plumbing
     # ------------------------------------------------------------------

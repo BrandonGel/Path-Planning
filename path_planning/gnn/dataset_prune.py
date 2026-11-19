@@ -303,7 +303,7 @@ def prune_map(map_: GraphSampler, prune_value: np.ndarray, k_hop: int = 0) -> Gr
     )
 
     # Create and save pruned graph sampler
-    pruned_map = map_.create_pruned_copy(kept_indices)
+    pruned_map = map_.pruned(kept_indices)      # in place: map_ itself is pruned (kept_indices are its old numbering)
     return pruned_map, kept_indices
 
 def process_single_case_gnn_task(task: Tuple[Path, str, str], config: Dict):
@@ -378,6 +378,7 @@ def process_gnn_task_batch(
         threshold_value = threshold_values[ii] if threshold_values is not None else 0
         t0 = time.perf_counter()
         prune_value = prune_fn(unbatched_pred, threshold_value)
+        num_nodes = len(map_.nodes)
         map_pruned, _ = prune_map(map_, prune_value, prune_mechanism.get('k_hop', 0))
         t_prune = time.perf_counter() - t0
 
@@ -410,7 +411,7 @@ def process_gnn_task_batch(
                 "device": str(device),
                 "num_nodes": len(map_pruned.nodes),
                 "num_edges": len(map_pruned.edges),
-                "source_num_nodes": len(map_.nodes),
+                "source_num_nodes": num_nodes,
             },
         )
 
