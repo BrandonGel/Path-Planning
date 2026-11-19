@@ -75,3 +75,51 @@ def test_in_place_rebinds_sweep_and_plans_like_copy(block_map):
 def test_empty_kept_raises(block_map):
     with pytest.raises(ValueError):
         block_map.pruned(np.array([], dtype=int))
+
+
+def test_copy_of_freshly_loaded_map(block_map, tmp_path):
+    """A just-loaded map has a stale ESDF (marking the inflation cells flags it): the copy keeps it lazy
+    and still matches a full rebuild once read, without computing the source's ESDF."""
+    from path_planning.common.environment.map.graph_sampler import GraphSampler
+    path = tmp_path / "graph_map.pkl"
+    block_map.save_graph_sampler(str(path))
+    loaded = GraphSampler(bounds=block_map.bounds, resolution=block_map.resolution, start=[], goal=[])
+    loaded.load_graph_sampler(str(path), args={"use_collision_sweep": False})
+    stale = loaded._esdf_lazy_flag_
+    kept = kept_of(loaded)
+    copy = loaded.pruned(kept, return_copy=True)
+    assert loaded._esdf_lazy_flag_ == stale              # the copy did not compute the source's ESDF
+    rebuilt = GraphSampler(bounds=block_map.bounds, resolution=block_map.resolution, start=[], goal=[])
+    rebuilt.load_graph_sampler(str(path), args={"use_collision_sweep": False})
+    rebuilt.pruned(kept)
+    assert state(copy) == state(rebuilt)
+
+
+def _load(m, path):
+    from path_planning.common.environment.map.graph_sampler import GraphSampler
+    out = GraphSampler(bounds=m.bounds, resolution=m.resolution, start=[], goal=[])
+    out.load_graph_sampler(str(path), args={"use_collision_sweep": False})
+    return out
+
+
+def test_pickle_restores_grid_as_rebuilt(block_map, tmp_path):
+    """Version 3 saves the type map (no obstacle list); loading it gives the grid a rebuild from the obstacle
+    list gives (version 2), including the lazily recomputed ESDF and the derived obstacle cells."""
+    import pickle
+    path = tmp_path / "graph_map.pkl"
+    block_map.save_graph_sampler(str(path))
+    with open(path, "rb") as f:
+        data = pickle.load(f)
+    assert data["version"] == 3 and "obstacles" not in data and "type_map" in data
+    v2 = {k: v for k, v in data.items() if k != "type_map"}
+    v2.update(version=2, obstacles=np.asarray(block_map.obstacles, dtype=np.int64))
+    path2 = tmp_path / "graph_map_v2.pkl"
+    with open(path2, "wb") as f:
+        pickle.dump(v2, f)
+    loaded, rebuilt = _load(block_map, path), _load(block_map, path2)
+    assert loaded._obstacles is None                    # not derived until asked for
+    assert state(loaded) == state(rebuilt) == state(block_map)
+    assert sorted(loaded.obstacles) == sorted(map(tuple, block_map.obstacles))
+    assert np.array_equal(loaded.inflated_esdf, rebuilt.inflated_esdf)
+    copy = loaded.pruned(kept_of(loaded), return_copy=True)
+    assert sorted(copy.obstacles) == sorted(loaded.obstacles)

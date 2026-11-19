@@ -38,6 +38,20 @@ class GraphSamplerBase(Grid):
         return "Graph Sampler"
 
     @property
+    def obstacles(self) -> List[tuple]:
+        """Obstacle cells (grid indices), as given to ``set_obstacles``. ``None`` is stored when they are not
+        kept (a map loaded with its grid, or a copy of one): they are then read off the type map's
+        ``TYPES.OBSTACLE`` cells on first access, in row-major order (an obstacle cell under a start / goal
+        mark is left out)."""
+        if self._obstacles is None:
+            self._obstacles = [tuple(c) for c in np.argwhere(self.type_map.data == TYPES.OBSTACLE).tolist()]
+        return self._obstacles
+
+    @obstacles.setter
+    def obstacles(self, value):
+        self._obstacles = value
+
+    @property
     def size(self) -> int:
         return int(np.prod(self.type_map.shape))
 

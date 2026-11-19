@@ -71,9 +71,9 @@ def _build_setup_sampler(source_map: GraphSampler) -> GraphSampler:
         sampling_dist_dict=source_map.node_sampler.sampling_dist_dict,
     )
     fresh.obs_size = source_map.obs_size
-    if len(source_map.obstacles):
-        fresh.set_obstacles(np.asarray(source_map.obstacles, dtype=np.int64))
-    fresh.inflate_obstacles(source_map.inflation_radius)
+    # The source's grid, copied rather than rebuilt from its obstacles (a loaded version 3 map keeps no obstacle
+    # list, and rebuilding recomputes the distance field), without its start / goal marks: the caller sets its own.
+    fresh._copy_grid(source_map, keep_endpoints=False)
     return fresh
 
 
