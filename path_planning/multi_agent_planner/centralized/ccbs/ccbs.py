@@ -1,256 +1,345 @@
-"""
-Conflict-based search for multi-agent path planning
-author: Brandon Ho
-original author: Ashwin Bose (@atb033)
-description: This file implements the Conflict-based search algorithm for multi-agent path planning. Modified from the original implementation to work with the new common environment.
-"""
+"""Continuous-time Conflict-Based Search (CCBS) on a roadmap, for agents with bodies.
 
+Follows the reference implementation (github.com/PathPlanning/Continuous-CBS; Andreychuk et al.,
+"Multi-Agent Pathfinding with Continuous Time" and "Improving Continuous-time Conflict Based Search"),
+with the bodies generalised from equal discs to each agent's ``Agent``.
+"""
 import heapq
 import time
-from path_planning.multi_agent_planner.centralized.ccbs.graph_generation import Conflict, Constraints, Environment
-from path_planning.multi_agent_planner.centralized.sipp.graph_generation import SippNode
-from itertools import count, combinations
-from copy import deepcopy
+from itertools import count
 
-class HighLevelNode(object):
-    def __init__(self):
-        self.solution = {}
-        self.solution_action_cost = {}
-        self.solution_cost = {}
-        self.constraint_dict = {}
-        self.cost = 0
+import numpy as np
 
-    def __eq__(self, other):
-        if not isinstance(other, type(self)): return NotImplemented
-        return self.solution == other.solution and self.cost == other.cost
+from path_planning.multi_agent_planner.centralized.cbs.data_types import start_heading
+from path_planning.multi_agent_planner.centralized.cbs.routing import RoadmapCosts
+from path_planning.multi_agent_planner.centralized.ccbs.conflicts import ContinuousConflicts
+from path_planning.multi_agent_planner.centralized.ccbs.data_types import (   # noqa: F401  (the types are re-exported)
+    EPS, INF, Conflict, Constraint, Constraints, CTNode, Move)
+from path_planning.multi_agent_planner.centralized.ccbs.low_level import SIPP
+from path_planning.multi_agent_planner.sweep_cache import shared_sweep_cache
 
-    def __hash__(self):
-        return hash(self.cost)
 
-    def __lt__(self, other):
-        return self.cost < other.cost
+class Environment(RoadmapCosts, ContinuousConflicts):
+    """The roadmap, the agents and their bodies, as CCBS uses them.
 
-class CCBS(object):
-    def __init__(
-        self,
-        environment: Environment,
-        time_limit: float | None = None,
-        max_iterations: int | None = None,
-        verbose: bool = False,
-        get_first_conflict: bool = True,
-        find_num_conflicts: bool = True,
-    ):
-        """
-        :param environment: IEnvironment instance
-        :param time_limit: Optional wall-clock time limit (in seconds) for the
-                           high-level CBS search. If None, no time limit is
-                           enforced. If exceeded, the search terminates early
-                           and returns an empty solution.
-        :param get_first_conflict: If True, conflict detection returns as soon
-                           as the first conflict is found (standard CBS). If
-                           False, all conflicts are collected (used by ICCBS
-                           for cardinal-conflict prioritization).
-        :param find_num_conflicts: If True, the low-level SIPP search performs
-                           conflict-aware tie-breaking against the other
-                           agents' current paths, which tends to reduce the
-                           number of high-level expansions.
-        """
+    ``agents`` is a list of dicts: ``name``, ``start``, ``goal`` (roadmap nodes), ``agent`` (an ``Agent``:
+    the body) and optionally ``yaw`` / ``pitch`` (the start heading, degrees; default 0). Everything about a body comes
+    from its ``Agent``:
+
+    - Size: its shape (2D or 3D) and ``clearance``. Every agent needs one: point particles never meet
+      in continuous time.
+    - Timing: a move takes ``length / max_speed``; ``max_speed=None`` means 1 time unit per move. Waits
+      can have any length.
+    - Turning is instant (``max_rotation`` is not used yet): a body faces along each move and keeps that
+      heading while it waits.
+
+    ``precision``: how finely the end of an unsafe interval is located.
+    """
+
+    def __init__(self, graph_map, agents, sipp_max_iterations: int = 200_000, precision: float = 1e-6):
+        missing = [a["name"] for a in agents if a.get("agent") is None]
+        if missing:
+            raise ValueError(f'CCBS: every agent dict needs an "agent" (an Agent); missing for {missing}')
+        self.graph_map, self.precision = graph_map, float(precision)
+        # Turns are instant here, so the bodies carry no turning rate.
+        self.bodies = {a["name"]: a["agent"].replace(max_rotation=None)
+                       for a in agents}
+        graph_map.set_collision_sweep()
+        self.cache = shared_sweep_cache(graph_map, "ccbs")
+
+        # The roadmap by node index (RoadmapCosts).
+        self._moves_cache, self._links = {}, None
+        self.links = self._roadmap_links()               # (successors, predecessors): [(node, heading, length)]
+        self.xyz = np.array([n.current for n in graph_map.nodes], dtype=float)
+        self.length = {(u, v): length for u, out in enumerate(self.links[0]) for v, _, length in out}
+        self.facing = {(u, v): facing for u, out in enumerate(self.links[0]) for v, facing, _ in out}
+        self._time_maps = {}                             # (target node, speed) -> {node: quickest time to it}
+        self._moves = {}                                 # (agent, path) -> its Moves and their arrays (moves_of)
+        self._successors = {}                            # speed -> per node [(next node, duration)]
+        self._pairs = {}                                 # (agent, path, agent, path) -> first contact or None
+
+        self.endpoints, self.start_ori = {}, {}
+        for a in agents:
+            ends = self._node_index(a["start"]), self._node_index(a["goal"])
+            if None in ends:
+                raise ValueError(f"CCBS: the start and goal of {a['name']} have to be roadmap nodes")
+            self.endpoints[a["name"]] = ends
+            self.start_ori[a["name"]] = start_heading(a)       # the given heading, else 0
+        self.sipp = SIPP(self, sipp_max_iterations)
+
+    def duration(self, agent, length: float) -> float:
+        """How long ``agent`` takes over a move of ``length``."""
+        speed = self.bodies[agent].max_speed
+        return 1.0 if speed is None else length / speed
+
+    def successors(self, agent) -> list:
+        """Per node, the moves out of it for ``agent``: ``[(next node, duration)]``, built once per speed."""
+        speed = self.bodies[agent].max_speed
+        out = self._successors.get(speed)
+        if out is None:
+            out = self._successors[speed] = [[(v, self.duration(agent, length)) for v, _, length in moves]
+                                             for moves in self.links[0]]
+        return out
+
+    def time_to(self, agent, target: int) -> list:
+        """Per node, the quickest time from it to ``target`` for ``agent`` (ignoring the other agents;
+        ``inf`` when it cannot get there). The exact estimate the low-level search uses."""
+        key = (target, self.bodies[agent].max_speed)
+        times = self._time_maps.get(key)
+        if times is None:
+            pred = self.links[1]
+            times, heap = [INF] * len(pred), [(0.0, target)]
+            times[target] = 0.0
+            while heap:
+                d, v = heapq.heappop(heap)
+                if d > times[v]:
+                    continue
+                for u, _, length in pred[v]:
+                    nd = d + self.duration(agent, length)
+                    if nd < times[u]:
+                        times[u] = nd
+                        heapq.heappush(heap, (nd, u))
+            self._time_maps[key] = times
+        return times
+
+
+class CCBS:
+    """The high-level search. Options, as in the reference implementation:
+
+    - ``use_cardinal``: classify each conflict by replanning its two agents with their constraints, and
+      branch first on a cardinal one (both costs rise), then a semi-cardinal one (one rises).
+    - ``disjoint``: disjoint splitting. One child forbids an agent its move in the unsafe window; the
+      other makes that agent take it there (a landmark) and forbids the other agent its move.
+    - ``hlh``: a lower bound on what the cardinal conflicts still cost, added to a node's cost:
+      ``"lp"`` (a small linear program) or ``"greedy"`` (a matching). Needs ``use_cardinal``.
+
+    ``search()`` returns ``(plan, solution_info)``; the plan is empty when none was found in the budget.
+    """
+
+    def __init__(self, environment: Environment, time_limit=None, max_iterations=None, verbose: bool = False,
+                 use_cardinal: bool = False, disjoint: bool = False, hlh: "str | None" = None):
+        if hlh not in (None, "lp", "greedy"):
+            raise ValueError(f"hlh must be None, 'lp' or 'greedy', got {hlh!r}")
+        if hlh is not None and not use_cardinal:
+            raise ValueError("hlh needs use_cardinal=True: the bound is built from the cardinal conflicts")
         self.env = environment
-        self.counter = count()
-        self.open_list = []
-        self.closed_set = set()
-        self.time_limit = time_limit if time_limit is not None and time_limit > 0 else float('inf')
-        self.max_iterations = max_iterations if max_iterations is not None and max_iterations > 0 else float('inf')
-        self.verbose = verbose
-        self.get_first_conflict = get_first_conflict
-        self.find_num_conflicts = find_num_conflicts
-        self.total_time = 0
-        self.total_iterations = 0
-        self._reset_stats()
+        self.time_limit = time_limit if time_limit and time_limit > 0 else INF
+        self.max_iterations = max_iterations if max_iterations and max_iterations > 0 else INF
+        self.verbose, self.use_cardinal, self.disjoint, self.hlh = verbose, use_cardinal, disjoint, hlh
+        self._lp_cache = {}                              # cardinal conflict set -> LP bound
 
-    def _reset_stats(self):
-        """Reset the per-search conflict/expansion statistics."""
-        self.total_conflicts = 0
-        self.nodes_expanded = 0
-        self.cardinal_count = 0
-        self.semi_cardinal_count = 0
-        self.non_cardinal_count = 0
+    # ------------------------------------------------------------------ search
+    def search(self):
+        env, sipp = self.env, self.env.sipp
+        started = time.time()
+        self._stop_at = started + self.time_limit
+        self._ids, self._generated, self._capped = count(1), 0, 0
+        self._branched = dict.fromkeys(self.KINDS, 0)
+        expanded_before, iterations, solved, open_list = sipp.expanded, 0, None, []
 
-    def _conflict_stats(self):
-        """Return the conflict/expansion statistics as a dict for solution_info."""
+        root = CTNode()
+        for agent in env.endpoints:
+            path, cost = self._plan(agent, ())
+            if path is None:
+                return {}, self._report(started, iterations, expanded_before, None)
+            root.paths[agent], root.costs[agent] = path, cost
+        root.cost = sum(root.costs.values())
+        if self._add_conflicts(root, env.find_conflicts(root.paths)):
+            self._push(open_list, root)
+
+        while open_list and time.time() < self._stop_at and iterations < self.max_iterations:
+            node = heapq.heappop(open_list)[-1]
+            iterations += 1
+            if not node.conflicts:
+                solved = node
+                break
+            conflict, kind = self._pick(node)
+            self._branched[kind] += 1
+            replans = self._replans(node, conflict)
+            if time.time() >= self._stop_at:
+                break
+            positive = {}                                # agent whose child also gets a landmark -> the landmark
+            if self.disjoint:
+                landmark = self._landmark(node, replans)
+                if landmark is not None:                 # the child that constrains the other agent carries it
+                    a1, a2 = replans
+                    positive[a2 if landmark.agent == a1 else a1] = landmark
+            for agent, (constraint, path, cost, _) in replans.items():
+                if path is None:
+                    continue
+                child = CTNode(node, constraint, positive.get(agent))
+                child.paths[agent], child.costs[agent] = path, cost
+                child.cost = node.cost + cost - node.cost_of(agent)
+                if not self._consistent(child):
+                    continue
+                for kind in self.KINDS:                  # the other agents' conflicts carry over
+                    setattr(child, kind, [c for c in getattr(node, kind) if agent not in (c.agent_1, c.agent_2)])
+                if self._add_conflicts(child, env.find_conflicts(child.all_paths(), only=agent)):
+                    self._push(open_list, child)
+        if self.verbose:
+            print("solution found" if solved else "no solution found")
+        return (self.generate_plan(solved.all_paths()) if solved else {}), self._report(started, iterations, expanded_before, solved)
+
+    def _plan(self, agent, constraints):
+        path, cost = self.env.sipp.find_path(agent, constraints, self._stop_at)
+        self._capped += self.env.sipp.timed_out and time.time() < self._stop_at
+        return path, cost
+
+    def _push(self, open_list, node):
+        node.id = next(self._ids)
+        self._generated += 1
+        node.h = self._bound(node.cardinal)
+        # Cheapest first; then fewer conflicts, then more constraints (deeper nodes).
+        heapq.heappush(open_list, (node.cost + node.h, len(node.conflicts), -node.total_cons, node.id, node))
+
+    # ------------------------------------------------------------------ conflicts
+    def _replans(self, node, conflict) -> dict:
+        """For each agent of ``conflict``: ``(its constraint, its new path under its constraints in
+        ``node`` plus that one, the path's cost, how many constraints it had)``; the path is None when
+        there is none. Kept on the conflict and reused while the agent's constraints are the ones it was
+        planned under."""
+        moves = {conflict.agent_1: (conflict.move_1, conflict.agent_2, conflict.move_2),
+                 conflict.agent_2: (conflict.move_2, conflict.agent_1, conflict.move_1)}
+        kept, fresh = conflict.replans or {}, {}
+        for agent, (move, other, other_move) in moves.items():
+            held = node.constraints_of(agent)
+            if agent in kept and kept[agent][3] == len(held):
+                fresh[agent] = kept[agent]
+            else:
+                constraint = self.env.constraint_for(agent, move, other, other_move, conflict.t)
+                path, cost = self._plan(agent, held + [constraint])
+                fresh[agent] = (constraint, path, cost, len(held))
+        conflict.replans = fresh
+        return fresh
+
+    def _add_conflicts(self, node, conflicts) -> bool:
+        """File ``conflicts`` under the node's lists (by kind with ``use_cardinal``). False: one of them
+        cannot be resolved by either agent, so the node is a dead end."""
+        for conflict in conflicts:
+            if not self.use_cardinal:
+                node.non_cardinal.append(conflict)
+                continue
+            replans = self._replans(node, conflict)
+            if time.time() >= self._stop_at:
+                return True                              # out of time: the search loop stops next
+            rises = [None if path is None else cost - node.cost_of(agent) for agent, (_, path, cost, _) in replans.items()]
+            if rises[0] is None and rises[1] is None:
+                return False
+            possible = [r for r in rises if r is not None]
+            if len(possible) == 1 or min(possible) > EPS:
+                conflict.overcost = min(possible)
+                node.cardinal.append(conflict)
+            elif max(possible) > EPS:
+                node.semi_cardinal.append(conflict)
+            else:
+                node.non_cardinal.append(conflict)
+        return True
+
+    KINDS = ("cardinal", "semi_cardinal", "non_cardinal")
+
+    @classmethod
+    def _pick(cls, node):
+        """The conflict to branch on: a cardinal one if any, else semi-cardinal, else any; among those the
+        largest ``overcost``, then the latest (as the reference implementation does)."""
+        for kind in cls.KINDS:
+            conflicts = getattr(node, kind)
+            if conflicts:
+                return max(conflicts, key=lambda c: (c.overcost, c.t)), kind
+
+    def _bound(self, cardinal) -> float:
+        """A lower bound on the cost the cardinal conflicts still add (0 without ``hlh``)."""
+        if self.hlh is None or not cardinal:
+            return 0.0
+        if self.hlh == "greedy":                         # disjoint pairs, costliest first
+            used, total = set(), 0.0
+            for c in sorted(cardinal, key=lambda c: -c.overcost):
+                if c.agent_1 not in used and c.agent_2 not in used:
+                    used.update((c.agent_1, c.agent_2))
+                    total += c.overcost
+            return total
+        need = {}                                        # per agent pair, the largest overcost
+        for c in cardinal:
+            pair = (c.agent_1, c.agent_2) if c.agent_1 < c.agent_2 else (c.agent_2, c.agent_1)
+            need[pair] = max(need.get(pair, 0.0), c.overcost)
+        agents = [a for pair in need for a in pair]
+        if len(agents) == len(set(agents)):              # the pairs share no agent: the LP's optimum is the sum
+            return sum(need.values())
+        key = frozenset(need.items())
+        known = self._lp_cache.get(key)
+        if known is None:                                # minimise sum x, x_a + x_b >= overcost per pair
+            from scipy.optimize import linprog
+            index = {a: k for k, a in enumerate(sorted(set(agents)))}
+            rows = np.zeros((len(need), len(index)))
+            for r, (a1, a2) in enumerate(need):
+                rows[r, index[a1]] = rows[r, index[a2]] = -1.0
+            result = linprog(np.ones(len(index)), A_ub=rows, b_ub=[-w for w in need.values()], bounds=(0, None), method="highs")
+            known = self._lp_cache[key] = float(result.fun) if result.success else 0.0
+        return known
+
+    # ------------------------------------------------------------------ disjoint splitting
+    def _landmark(self, node, replans):
+        """The positive constraint for this split, or None: one agent has to start its move inside its
+        unsafe window (it does so now, so it is not replanned). Chosen as in the reference implementation:
+        agent 1 when agent 2 already has more landmarks, else agent 2, else agent 1; never for a wait, for
+        an agent that could not give way, or a window nested with one of its landmarks."""
+        (a1, (c1, path1, *_)), (a2, (c2, path2, *_)) = replans.items()
+        held = {a: [c for c in node.constraints_of(a) if c.positive] for a in (a1, a2)}
+
+        def usable(agent, constraint, path):
+            if constraint.is_wait or path is None:
+                return None
+            for c in held[agent]:                        # no window inside another for the same move
+                if (c.a, c.b) == (constraint.a, constraint.b) and (
+                        (c.t1 - EPS <= constraint.t1 and constraint.t2 <= c.t2 + EPS)
+                        or (constraint.t1 - EPS <= c.t1 and c.t2 <= constraint.t2 + EPS)):
+                    return None
+            return constraint._replace(positive=True)
+
+        if len(held[a2]) > len(held[a1]):
+            return usable(a1, c1, path1) or usable(a2, c2, path2)
+        return usable(a2, c2, path2) or usable(a1, c1, path1)
+
+    @staticmethod
+    def _consistent(node) -> bool:
+        """Whether no landmark of the node's agents is wholly forbidden by a negative constraint on the
+        same move."""
+        for agent in {c.agent for c in (node.constraint, node.positive) if c is not None}:
+            held = node.constraints_of(agent)
+            for p in (c for c in held if c.positive):
+                if any(not c.positive and (c.a, c.b) == (p.a, p.b) and c.t1 - EPS <= p.t1 and p.t2 <= c.t2 + EPS
+                       for c in held):
+                    return False
+        return True
+
+    # ------------------------------------------------------------------ results
+    def _report(self, started, iterations, expanded_before, solved) -> dict:
         return {
-            "total_conflicts": self.total_conflicts,
-            "high_level_nodes_expanded": self.nodes_expanded,
-            "cardinal_conflicts": self.cardinal_count,
-            "semi_cardinal_conflicts": self.semi_cardinal_count,
-            "non_cardinal_conflicts": self.non_cardinal_count,
+            "runtime": min(time.time() - started, self.time_limit),
+            "total_iterations": iterations,
+            "success": solved is not None,
+            "total_conflicts": sum(self._branched.values()),
+            "high_level_nodes_expanded": iterations,
+            "high_level_nodes_generated": self._generated,
+            "cardinal_conflicts": self._branched["cardinal"],
+            "semi_cardinal_conflicts": self._branched["semi_cardinal"],
+            "non_cardinal_conflicts": self._branched["non_cardinal"],
+            "low_level_expanded": self.env.sipp.expanded - expanded_before,
+            "low_level_capped": int(self._capped),
+            "cost": solved.cost if solved is not None else None,
         }
 
-    def _record_conflict_class(self, score):
-        """Record a conflict's cardinality (0=cardinal, 1=semi, 2=non-cardinal)."""
-        if score == 0:
-            self.cardinal_count += 1
-        elif score == 1:
-            self.semi_cardinal_count += 1
-        elif score == 2:
-            self.non_cardinal_count += 1
-
-    def _finalize(self, solution, solution_info, st, iterations, success):
-        """Populate solution_info and timing/iteration counters, then return."""
-        self.total_time = min(self.time_limit, time.time() - st)
-        self.total_iterations = min(self.max_iterations, iterations)
-        solution_info["runtime"] = self.total_time
-        solution_info["total_iterations"] = self.total_iterations
-        solution_info["success"] = success
-        solution_info.update(self._conflict_stats())
-        return solution, solution_info
-
-    def validate_solution(self, plan=None):
-        """
-        Validate a CCBS plan (the dict returned by ``generate_plan``/``search``)
-        for time, velocity and collision anomalies.
-
-        Returns a dict with keys ``no_time_anomaly``, ``no_velocity_anomaly``,
-        ``collisions`` and ``conflict_free``.
-        """
-        from path_planning.utils.checker import check_solution_full
-        if not plan:
-            return {
-                "conflict_free": False,
-                "no_time_anomaly": False,
-                "no_velocity_anomaly": False,
-                "collisions": {},
-            }
-        result = check_solution_full(
-            plan,
-            self.env.radius,
-            is_using_constant_speed=False,
-            verbose=self.verbose,
-        )
-        result["conflict_free"] = (len(result["collisions"]) == 0)
-        return result
-
-    def _get_state_key(self, node):
-        """Generate a hashable state key for closed set checking."""
-        # Create a frozen representation of the solution
-        solution_tuple = tuple(
-            (agent, tuple((s.time, s.position, s.interval) for s in path))
-            for agent, path in sorted(node.solution.items())
-        )
-        return solution_tuple
-
-    def search(self):
-        st = time.time()
-        iterations = 1
-        success = False
-        self._reset_stats()
-        start = HighLevelNode()
-        start.constraint_dict = {}
-        solution = {}
-        solution_info = {}
-        for agent in self.env.agent_dict.keys():
-            start.constraint_dict[agent] = deepcopy(Constraints())
-
-        start.solution, start.solution_action_cost, start.solution_cost = self.env.compute_solution(
-            find_num_conflicts=self.find_num_conflicts,
-        )
-        if not start.solution:
-            if self.verbose:
-                print("No initial solution found")
-            return self._finalize({}, solution_info, st, iterations, success)
-
-        start.cost = sum(start.solution_cost.values())
-
-        # Add start node to heap
-        heapq.heappush(self.open_list, (start.cost, next(self.counter), start))
-        while self.open_list:
-            iterations += 1
-            if (time.time() - st) > self.time_limit:
-                if self.verbose:
-                    print(
-                        f"Search terminated: time limit of {self.time_limit} seconds exceeded."
-                    )
-                break
-
-            if iterations >= self.max_iterations:
-                if self.verbose:
-                    print(
-                        f"Search terminated: max iterations of {self.max_iterations} reached."
-                    )
-                break
-
-            _, _, P = heapq.heappop(self.open_list)
-            state_key = self._get_state_key(P)
-            if state_key in self.closed_set:
-                continue
-            self.closed_set.add(state_key)
-            self.nodes_expanded += 1
-
-            self.env.constraint_dict = P.constraint_dict
-
-            conflict_list = self.env.get_conflicts(P.solution, P.solution_action_cost, self.get_first_conflict)
-            if not conflict_list:
-                if self.verbose:
-                    print("solution found")
-                success = True
-                solution = self.generate_plan(P.solution, P.solution_action_cost)
-                break
-            self.total_conflicts += len(conflict_list)
-
-            constraint_dict = self.env.create_constraints_from_conflict(conflict_list[0])
-            for agent in constraint_dict.keys():
-                new_node = HighLevelNode()
-                new_node.solution = P.solution.copy()
-                new_node.solution_cost = P.solution_cost.copy()
-                new_node.solution_action_cost = P.solution_action_cost.copy()
-                # Selective deep copy only for affected agent's constraints
-                new_node.constraint_dict = {}
-                for i, a in enumerate(self.env.agent_dict.keys()):
-                    if a == agent:
-                        # Deep copy only the modified agent's constraints (copy SippNode values)
-                        new_constraints = Constraints()
-                        new_constraints.wait_constraints = {
-                            k: v.copy() for k, v in P.constraint_dict[a].wait_constraints.items()
-                        }
-                        new_constraints.move_constraints = {
-                            k: v.copy() for k, v in P.constraint_dict[a].move_constraints.items()
-                        }
-                        new_constraints.add_constraint(constraint_dict[agent])
-                        new_node.constraint_dict[a] = new_constraints
-                    else:
-                        # Share unchanged constraints
-                        new_node.constraint_dict[a] = P.constraint_dict[a]
-
-                self.env.constraint_dict = new_node.constraint_dict
-                new_node.solution, new_node.solution_action_cost, new_node.solution_cost = self.env.compute_solution(
-                    affected_agent=agent,
-                    base_solution=P.solution,
-                    base_action_cost=P.solution_action_cost,
-                    base_cost=P.solution_cost,
-                    find_num_conflicts=self.find_num_conflicts,
-                )
-                if not new_node.solution:
-                    continue
-                new_node.cost = sum(new_node.solution_cost.values())
-                heapq.heappush(self.open_list, (new_node.cost, next(self.counter), new_node))
-
-        return self._finalize(solution, solution_info, st, iterations, success)
-
-    def generate_plan(self, solution, solution_action_cost):
-        plan = {}
-        for agent, path in solution.items():
-            path_dict_list = []
-            for i, (state, action) in enumerate(zip(path, solution_action_cost[agent])):
-                wait_time, move_time = action
-                if len(state.position) == 2:
-                    path_dict_list.append({'t':state.time, 'x':state.position[0], 'y':state.position[1]})
-                    if wait_time > 0:
-                        path_dict_list.append({'t':state.time+wait_time, 'x':state.position[0], 'y':state.position[1]})
-                elif len(state.position) == 3:
-                    path_dict_list.append({'t':state.time, 'x':state.position[0], 'y':state.position[1], 'z':state.position[2]})
-                    if wait_time > 0:
-                        path_dict_list.append({'t':state.time+wait_time, 'x':state.position[0], 'y':state.position[1], 'z':state.position[2]})
-                else:
-                    raise ValueError(f"Invalid position dimension: {len(state.position)}")
-            plan[agent] = path_dict_list
+    def generate_plan(self, paths: dict) -> dict:
+        """``{agent: [{t, x, y[, z], yaw[, pitch]}, ...]}``: a wait is the same position at a later ``t``.
+        The heading is that of the last move made (before the first: the start heading, given or 0)."""
+        env, plan = self.env, {}
+        for agent, path in paths.items():
+            facing = env.start_ori[agent]
+            rows = []
+            for k, (v, t) in enumerate(path):
+                if k and path[k - 1][0] != v:
+                    facing = env.facing[(path[k - 1][0], v)]
+                row = {"t": float(t), **dict(zip("xyz", map(float, env.xyz[v])))}
+                row.update(zip(("yaw", "pitch"), facing) if isinstance(facing, tuple) else {"yaw": facing})
+                rows.append(row)
+            plan[agent] = rows
         return plan

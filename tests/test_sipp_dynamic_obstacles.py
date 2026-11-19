@@ -10,11 +10,12 @@ import unittest
 
 import numpy as np
 
+from path_planning.agent import Agent
 from path_planning.multi_agent_planner.centralized.sipp.graph_generation import SippGraph
 from path_planning.multi_agent_planner.decentralized.neural_attf.neural_attf import NeuralATTF
 from path_planning.utils.util import read_graph_sampler_from_yaml, set_global_seed
+from tests.helpers import MAP_2D
 
-MAP_YAML = "path_planning/maps/2d/2d.yaml"
 RADIUS = 1.0
 VELOCITY = 1.0
 # Two free grid cells 3 apart in the lower-left room of 2d.yaml, addressed by their
@@ -26,18 +27,23 @@ Q = (8.5, 5.5)
 def _build_grid_map():
     """Discrete 4-neighbour grid roadmap on 2d.yaml (same build as run_sipp.py)."""
     set_global_seed(42)
-    map_ = read_graph_sampler_from_yaml(MAP_YAML, use_discrete_space=True)
+    map_ = read_graph_sampler_from_yaml(MAP_2D, use_discrete_space=True)
     map_.inflate_obstacles(radius=RADIUS + np.sqrt(2) / 2)
-    map_.set_parameters(sample_num=0, num_neighbors=4.0, min_edge_len=0.0, max_edge_len=1.1)
+    map_.set_roadmap_config(sample_num=0, num_neighbors=4.0, min_edge_length=0.0, max_edge_length=1.1)
     map_.set_start([P])
     map_.set_goal([Q])
     nodes = map_.generateRandomNodes(generate_grid_nodes=True)
-    map_.generate_roadmap(nodes)
+    map_.generate_roadmap("prm")
     return map_
 
 
 def _point(p, t):
     return {"x": float(p[0]), "y": float(p[1]), "t": float(t)}
+
+
+def _edge_from(graph, p):
+    """Key of a roadmap edge record leaving ``p`` in a ``SippGraph``."""
+    return next(k for k in graph.sipp_graph if isinstance(k[0], tuple) and k[0] == p and k[1] != p)
 
 
 def _safe_at(node, t):
@@ -112,6 +118,7 @@ class TestOtherAgentSchedules(unittest.TestCase):
         obj = NeuralATTF.__new__(NeuralATTF)
         obj.timestep_duration = 1.0
         obj.token = {"agents": agents}
+        obj.bodies = {name: None for name in agents}       # point particles
         return obj
 
     def test_idle_agent_blocks_forever(self):
@@ -167,15 +174,15 @@ class TestReachSegmentSafe(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.map_ = _build_grid_map()
-        cls.map_.set_constraint_sweep()  # NeuralATTF.__init__ does this on the real roadmap
+        cls.map_.set_collision_sweep()  # NeuralATTF.__init__ does this on the real roadmap
 
     def _obj(self):
         obj = NeuralATTF.__new__(NeuralATTF)
         obj.graph_map = self.map_
-        obj.agent_radius = RADIUS
+        obj.bodies = {name: Agent.disc(RADIUS, VELOCITY) for name in ("me", "o")}
+        obj._max_reach = RADIUS
         obj.sipp_clearance_margin = 0.0
         obj.timestep_duration = 1.0
-        obj.velocity = VELOCITY
         return obj
 
     A = (6.0, 5.5)      # mid-edge actual position
@@ -185,25 +192,25 @@ class TestReachSegmentSafe(unittest.TestCase):
     def test_oncoming_agent_on_the_same_edge_is_unsafe(self):
         # "o" drives Q -> P over [0, 3]: its footprint sweeps our edge in the window.
         sched = {"o": [_point(Q, 0.0), _point(P, 3.0)]}
-        self.assertFalse(self._obj()._reach_segment_safe(self.A, self.START, self.OTHER, 0.5, sched, {"o": 1.0}))
+        self.assertFalse(self._obj()._reach_segment_safe(self.A, self.START, self.OTHER, 0.5, sched, {"o": 1.0}, "me"))
 
     def test_agent_that_passes_later_is_safe(self):
         # Same sweep, but it only reaches the edge's neighbourhood after t_reach.
         sched = {"o": [_point((12.5, 5.5), 0.0), _point((9.5, 5.5), 3.0), _point(P, 7.0)]}
-        self.assertTrue(self._obj()._reach_segment_safe(self.A, self.START, self.OTHER, 0.5, sched, {"o": 1.0}))
+        self.assertTrue(self._obj()._reach_segment_safe(self.A, self.START, self.OTHER, 0.5, sched, {"o": 1.0}, "me"))
 
     def test_resting_agent_on_the_edge_is_unsafe_and_moving_away_from_one_is_safe(self):
         sched = {"o": [_point((7.5, 5.5), 0.0)]}  # rests forever 1 unit past START: inside 2r of the edge
-        self.assertFalse(self._obj()._reach_segment_safe(self.A, self.START, self.OTHER, 0.5, sched, {"o": None}))
+        self.assertFalse(self._obj()._reach_segment_safe(self.A, self.START, self.OTHER, 0.5, sched, {"o": None}, "me"))
         # Held 0.5 from an idle agent at P and driving away toward START: allowed.
         sched = {"o": [_point(P, 0.0)]}
-        self.assertTrue(self._obj()._reach_segment_safe(self.A, self.START, self.OTHER, 0.5, sched, {"o": None}))
+        self.assertTrue(self._obj()._reach_segment_safe(self.A, self.START, self.OTHER, 0.5, sched, {"o": None}, "me"))
 
     def test_resting_agent_touching_the_edge_but_not_the_driven_part_is_safe(self):
         # (4.5,5.5) rests forever: its 2r footprint covers the edge's P end, which the sweep
         # reports, but not the sub-segment (6,5.5) -> (6.5,5.5) we actually drive.
         sched = {"o": [_point((4.5, 5.5), 0.0)]}
-        self.assertTrue(self._obj()._reach_segment_safe(self.A, self.START, self.OTHER, 0.5, sched, {"o": None}))
+        self.assertTrue(self._obj()._reach_segment_safe(self.A, self.START, self.OTHER, 0.5, sched, {"o": None}, "me"))
 
 
 class TestStaticRoute(unittest.TestCase):
@@ -242,11 +249,8 @@ class TestSippGoalSafeUntil(unittest.TestCase):
         # before t=4 and after t=7.
         planner = SippPlanner(
             self.map_,
+            [{"name": "a", "start": P, "goal": Q, "agent": Agent.disc(RADIUS, VELOCITY)}],
             dynamic_obstacles={"other": [_point(Q, 4.0), _point(Q, 6.0)]},
-            agents=[{"name": "a", "start": P, "goal": Q}],
-            radius=RADIUS,
-            velocity=VELOCITY,
-            use_constraint_sweep=True,
             heuristic_type="euclidean",
             time_limit=10.0,
             sipp_max_iterations=100000,
@@ -270,7 +274,7 @@ class TestSippGoalSafeUntil(unittest.TestCase):
 
 class TestPlanTaskRouteJoin(unittest.TestCase):
     def test_join_keeps_the_vias_of_the_tick_that_reaches_a_waypoint(self):
-        from path_planning.multi_agent_planner.decentralized.neural_attf.neural_attf import _SegState, _Waypoint
+        from path_planning.multi_agent_planner.decentralized.neural_attf.neural_attf import _Waypoint
 
         obj = NeuralATTF.__new__(NeuralATTF)
         obj.num_goal_wait_steps = 1
@@ -279,7 +283,7 @@ class TestPlanTaskRouteJoin(unittest.TestCase):
             ((0.0, 0.0), (2.0, 0.0)): [_Waypoint((0.0, 0.0)), _Waypoint((2.0, 0.0), via=[(1.0, 0.0)], via_t=[0.4])],
             ((2.0, 0.0), (2.0, 2.0)): [_Waypoint((2.0, 0.0)), _Waypoint((2.0, 2.0), via=[(2.0, 1.0)], via_t=[0.5])],
         }
-        obj.plan = lambda name, s, g, *a, **k: {name: [_SegState(p) for p in legs[(tuple(s), tuple(g))]]}
+        obj.plan = lambda name, s, g, *a, **k: {name: list(legs[(tuple(s), tuple(g))])}
         joined, n = obj._plan_task_route("a", (0.0, 0.0), [(2.0, 0.0), (2.0, 2.0)], {}, [])
         self.assertEqual(n, 2)
         self.assertEqual([tuple(p) for p in joined], [(0.0, 0.0), (2.0, 0.0), (2.0, 0.0), (2.0, 2.0), (2.0, 2.0)])
@@ -292,17 +296,15 @@ class TestPlanTaskRouteJoin(unittest.TestCase):
         self.assertEqual(getattr(joined[4], "via", ()), ())
 
 
-class TestSimulationRadiusBackstop(unittest.TestCase):
+class TestSimulationBodyBackstop(unittest.TestCase):
     def _sim_and_algo(self, paths, delay_names=()):
         from path_planning.multi_agent_planner.decentralized.neural_attf.neural_attf import _Waypoint
         from path_planning.multi_agent_planner.decentralized.neural_attf.simulation import Simulation
 
-        agents = [{"name": n, "start": tuple(p[0])} for n, p in paths.items()]
-        sim = Simulation(tasks=[], agents=agents, agent_radius=0.5, rng=random.Random(0))
+        agents = [{"name": n, "start": tuple(p[0]), "agent": Agent.disc(0.5)} for n, p in paths.items()]
+        sim = Simulation(tasks=[], agents=agents, rng=random.Random(0))
 
         class _Algo:
-            agent_radius = 0.5
-
             def __init__(self):
                 self.token = {"agents": {n: [_Waypoint(q) for q in p] for n, p in paths.items()}}
                 self.seen_delayed = []
@@ -352,7 +354,8 @@ class TestSimulationExecutesTimedWaypoints(unittest.TestCase):
 
         # Arc budget 10 would swallow both short samples; time-sampled waypoints must
         # still be consumed exactly one per tick, stamped at their via_t fractions.
-        sim = Simulation(tasks=[], agents=[{"name": "a", "start": (0.0, 0.0)}], velocity=10.0, timestep_duration=1.0)
+        sim = Simulation(tasks=[], agents=[{"name": "a", "start": (0.0, 0.0), "agent": Agent.disc(0.1, 10.0)}],
+                         timestep_duration=1.0)
         path = [
             _Waypoint((0.0, 0.0)),
             _Waypoint((2.0, 0.0), via=[(1.0, 0.0), (1.0, 0.0)], via_t=[0.5, 0.75]),
@@ -375,7 +378,7 @@ class TestSimulationExecutesTimedWaypoints(unittest.TestCase):
         got = [(p["t"], p["x"]) for p in sim.actual_paths["a"]]
         self.assertEqual(got, [(0, 0.0), (0.5, 1.0), (0.75, 1.0), (1.0, 2.0)])
         sim.time_forward(algo)
-        self.assertEqual(sim.actual_paths["a"][-1], {"t": 2.0, "x": 3.0, "y": 0.0})
+        self.assertEqual(sim.actual_paths["a"][-1], {"t": 2.0, "x": 3.0, "y": 0.0, "yaw": 0.0})
 
 
 
@@ -388,9 +391,7 @@ class TestSippGraphDynamicObstacles(unittest.TestCase):
         return SippGraph(
             self.map_,
             dynamic_obstacles={"other": schedule},
-            radius=RADIUS,
-            velocity=VELOCITY,
-            use_constraint_sweep=True,
+            agent=Agent.disc(RADIUS, VELOCITY),
             obstacle_horizon=horizon,
         )
 
@@ -417,10 +418,12 @@ class TestSippGraphDynamicObstacles(unittest.TestCase):
         self.assertTrue(math.isinf(q.interval_list[-1][1]))
         self.assertLessEqual(q.interval_list[-1][0], 5.0 + 1e-6)
 
-        # The resting footprint also blocks edges (self-loop at Q) for the hold only.
-        self_loop = g.sipp_graph[(Q, Q)]
-        self.assertTrue(self_loop.is_in_unsafe_interval(4.5, 4.5))
-        self.assertFalse(self_loop.is_in_unsafe_interval(7.0, 7.0))
+        # The resting footprint also blocks the edges at Q for the hold only (no (Q, Q)
+        # wait edge: waiting at Q is governed by Q's vertex intervals above).
+        self.assertNotIn((Q, Q), g.sipp_graph)
+        out_of_q = g.sipp_graph[_edge_from(g, Q)]
+        self.assertTrue(out_of_q.is_in_unsafe_interval(4.5, 4.5))
+        self.assertFalse(out_of_q.is_in_unsafe_interval(7.0, 7.0))
 
     def test_scalar_none_rests_forever(self):
         schedule = [_point(P, 0.0), _point(P, 2.0), _point(Q, 4.0)]
@@ -428,7 +431,7 @@ class TestSippGraphDynamicObstacles(unittest.TestCase):
         q = g.sipp_graph[Q]
         self.assertTrue(_safe_at(q, 0.5))
         self.assertFalse(any(math.isinf(b) for _, b in q.interval_list))
-        self.assertTrue(g.sipp_graph[(Q, Q)].is_in_unsafe_interval(100.0, 100.0))
+        self.assertTrue(g.sipp_graph[_edge_from(g, Q)].is_in_unsafe_interval(100.0, 100.0))
         # The bounded wait at P is unaffected by the horizon: P is free again later.
         self.assertTrue(math.isinf(g.sipp_graph[P].interval_list[-1][1]))
 
@@ -438,7 +441,3 @@ class TestSippGraphDynamicObstacles(unittest.TestCase):
         g2 = self._graph([_point(Q, 0.0)], {"other": 1.0})
         self.assertFalse(_safe_at(g2.sipp_graph[Q], 0.5))
         self.assertTrue(_safe_at(g2.sipp_graph[Q], 2.0))
-
-
-if __name__ == "__main__":
-    unittest.main()

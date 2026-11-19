@@ -3,6 +3,11 @@ Run Theta* for 2D and 3D maps.
 python scripts/roadmaps/run_thetastar.py
 """
 
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))   # this repo, ahead of any installed copy
+
 from path_planning.utils.util import read_grid_from_yaml
 from python_motion_planning.common import *
 from python_motion_planning.path_planner import *

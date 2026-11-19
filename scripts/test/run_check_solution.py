@@ -1,12 +1,15 @@
-import argparse
-import os
+import sys
 from pathlib import Path
 
-import numpy as np
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))   # this repo, ahead of any installed copy
+
+import argparse
+
 import yaml
 from multiprocessing import Pool, cpu_count
 from tqdm import tqdm
 
+from path_planning.multi_agent_planner.mapf_solver import MAPF_SOLVERS
 from path_planning.utils.checker import check_solution_full
 
 
@@ -37,7 +40,7 @@ def check_solution_worker(args):
     sol_file, radius, velocity, verbose = args
     try:
         with open(sol_file, "r") as f:
-            data = yaml.safe_load(f)
+            data = yaml.load(f, Loader=getattr(yaml, "CSafeLoader", yaml.SafeLoader))
         if not data or "schedule" not in data:
             return True, sol_file, {"error": "Missing 'schedule' in YAML"}
 
@@ -80,7 +83,7 @@ if __name__ == "__main__":
         "--solver",
         type=str,
         default="all",
-        choices=["all", "cbs", "icbs", "lacam", "lacam_random", "sipp", "ccbs"],
+        choices=["all", *MAPF_SOLVERS],
         help="solver to check (all = every solver under perm directories)",
     )
     parser.add_argument(

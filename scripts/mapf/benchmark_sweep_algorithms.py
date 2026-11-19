@@ -27,6 +27,7 @@ for _p in (_PROJECT_ROOT, _SCRIPT_DIR):
 
 import numpy as np
 
+from path_planning.agent import Agent
 from path_planning.multi_agent_planner.mapf_solver import solve_mapf
 from path_planning.multi_agent_planner.decentralized.neural_attf.neural_attf import NeuralATTF
 from path_planning.multi_agent_planner.decentralized.neural_attf.simulation import Simulation
@@ -49,7 +50,7 @@ BACKENDS = ["cgal", "shapely"]
 
 def _sweep_query_count(map_) -> int:
     """Number of distinct sweep queries cached by the backend (0 ⇒ never used)."""
-    cs = getattr(map_, "constraint_sweep", None)
+    cs = getattr(map_, "collision_sweep", None)
     if cs is None:
         return 0
     return len(getattr(cs, "overlapping_sweep", {})) + len(getattr(cs, "overlapping_interval_sweep", {}))
@@ -61,15 +62,15 @@ def _build_mapf_map(backend: str, agent_radius: float):
     map_ = read_graph_sampler_from_yaml(MAPF_YAML, use_discrete_space=False, sweep_backend=backend)
     agents = read_agents_from_yaml(MAPF_YAML)
     map_.inflate_obstacles(radius=agent_radius + np.sqrt(2) / 2)
-    map_.set_parameters(sample_num=800, num_neighbors=10.0, min_edge_len=0.0, max_edge_len=4.0)
+    map_.set_roadmap_config(sample_num=800, num_neighbors=10.0, min_edge_length=0.0, max_edge_length=4.0)
     map_.set_start([a["start"] for a in agents])
     map_.set_goal([a["goal"] for a in agents])
     nodes = map_.generateRandomNodes(generate_grid_nodes=False)
-    map_.generate_roadmap(nodes)
-    start = [s.current for s in map_.get_start_nodes()]
-    goal = [g.current for g in map_.get_goal_nodes()]
+    map_.generate_roadmap("prm")
+    start = [s.current for s in map_.start_nodes]
+    goal = [g.current for g in map_.goal_nodes]
     agents = [{"start": start[i], "name": a["name"], "goal": goal[i]} for i, a in enumerate(agents)]
-    map_.set_constraint_sweep()
+    map_.set_collision_sweep()
     return map_, agents
 
 
@@ -109,10 +110,11 @@ def run_neural_attf(backend: str, agent_radius: float, velocity: float, horizon:
         point_fn=lambda p: points_to_roadmap_frame(map_, [p])[0],
     )
     parking = points_to_roadmap_frame(map_, mapd["non_task_endpoints"])
+    if agent_radius > 0:
+        agents = [dict(a, agent=Agent.disc(agent_radius, velocity or None)) for a in agents]
     planner = NeuralATTF(
         graph_map=map_, agents=agents, non_task_endpoints=parking, a_star_max_iter=4000,
-        alpha=0.001, heuristic_type="euclidean", agent_radius=agent_radius, velocity=velocity,
-        low_level="sipp",
+        alpha=0.001, heuristic_type="euclidean", low_level="sipp",
     )
     sim = Simulation(tasks=[], agents=agents, delay_probability=0.0, rng=rng)
     target = len(tasks)

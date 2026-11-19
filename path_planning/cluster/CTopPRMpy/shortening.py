@@ -1,7 +1,7 @@
 """Continuous-space path geometry utilities for topological planning.
 
-Ports the geometric layer of CTopPRM (Novosad, Penicka, Vonasek, RA-L 2023;
-C++ reference in ``path_planning/cluster/CTopPRM/``) onto ``GraphSampler``:
+Ports the geometric layer of CTopPRM (Novosad, Penicka, Vonasek, RA-L 2023)
+onto ``GraphSampler``:
 equal-arclength resampling, segment clearance checks, ESDF-gradient path
 shortening (``shorten_path``), the straight-line-homotopy deformability test
 (``is_deformable``), and the two path filters used by the pipeline.
@@ -9,7 +9,7 @@ shortening (``shorten_path``), the straight-line-homotopy deformability test
 Frame convention: all paths and points are in the same frame as
 ``GraphSampler`` node coordinates (``node.current``), which the rest of the
 repo passes directly into the world-coordinate predicates ``in_collision`` /
-``min_wall_distance`` (see e.g. ``sipp/graph_generation.py``). Paths are
+``wall_distance``. Paths are
 ``np.ndarray`` of shape ``(M, dim)``; inserted push-out waypoints are free
 continuous points even when the roadmap itself is discrete.
 """
@@ -24,6 +24,8 @@ from typing import List, Optional, Tuple
 
 import numpy as np
 from python_motion_planning.common import TYPES
+
+from path_planning.common.environment.map.numbaUtil import _world_min_wall_distance
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +43,7 @@ class GeometryConfig:
             it to ``0.25 * map.resolution`` (~4 samples per cell).
         min_clearance: Required ESDF clearance. ``<= 0`` means "rely on the
             grid's obstacle inflation": segment checks use the exact DDA
-            ``in_collision`` instead of sampled ``min_wall_distance``. The
+            ``in_collision`` instead of sampled ``wall_distance``. The
             C++ default of 0.3 would double-count inflation on this repo's
             inflated grids, hence 0.0 here.
         push_out_max_factor: Push-out probes run over
@@ -115,22 +117,32 @@ def point_free(map_, point: np.ndarray, cfg: GeometryConfig) -> bool:
     return bool(points_free(map_, np.asarray(point, dtype=float)[None, :], cfg)[0])
 
 
+def wall_distance(map_, pts) -> np.ndarray:
+    """World-unit distance of each ``(N, dim)`` world point to the nearest
+    obstacle-or-inflation cell (ESDF, multilinear interpolation; 0 outside the
+    map)."""
+    pts = np.ascontiguousarray(np.atleast_2d(np.asarray(pts, dtype=np.float64)))
+    return _world_min_wall_distance(
+        pts, map_._esdf_flat(), float(map_.inflation_radius), np.asarray(map_.bounds, dtype=np.float64),
+        float(map_.resolution), map_._shape_array)
+
+
 def points_free(map_, pts: np.ndarray, cfg: GeometryConfig) -> np.ndarray:
     """Vectorized free-point check over an (N, dim) batch.
 
-    The inflation-mode branch does the ``in_collision_point``-style
+    The inflation-mode branch does the ``in_collision``-style
     OBSTACLE/INFLATION type-map lookup in one numpy pass, but is
     **boundary-inclusive**: a point lying exactly on a cell boundary touches
     up to ``2^dim`` cells and counts as free if ANY of them is free.
-    ``generate_planar_map`` (CDT) places roadmap nodes exactly on the
+    The CDT roadmap places roadmap nodes exactly on the
     free/blocked cell boundary (e.g. corner vertices like (49.0, 2.0)), and
-    plain ``in_collision_point`` rounding drops them into the blocked cell —
+    plain ``in_collision`` rounding drops them into the blocked cell —
     while the map's DDA edge checks accept them. Out-of-bounds points count
     as not free.
     """
     pts = np.atleast_2d(np.asarray(pts, dtype=float))
     if cfg.min_clearance > 0.0:
-        return np.asarray(map_.min_wall_distance(pts)) >= cfg.min_clearance
+        return wall_distance(map_, pts) >= cfg.min_clearance
     bounds_lo = np.asarray(map_.bounds, dtype=float)[:, 0]
     shape = np.asarray(map_.shape, dtype=int)
     grid = _get_free_grid(map_)
@@ -202,11 +214,11 @@ def segment_free(map_, p1: np.ndarray, p2: np.ndarray, cfg: GeometryConfig) -> b
         # boundary, i.e. its sampled points all pass the boundary-inclusive
         # ``points_free`` check. This makes the verdict direction-independent
         # and consistent with the boundary-inclusive point predicate.
-        if getattr(map_, "use_discrete_space", False):
+        if map_.use_discrete_space:
             return False
         return _segment_free_sampled(map_, p1, p2, cfg)
     pts = _segment_samples(p1, p2, cfg.collision_distance_check)
-    return bool(np.all(map_.min_wall_distance(pts) >= cfg.min_clearance))
+    return bool(np.all(wall_distance(map_, pts) >= cfg.min_clearance))
 
 
 def _segment_free_sampled(map_, p1: np.ndarray, p2: np.ndarray, cfg: GeometryConfig) -> bool:
@@ -279,20 +291,20 @@ def segment_first_collision(
 def get_esdf_gradients(map_) -> List[np.ndarray]:
     """Per-axis gradients of the map's signed ESDF (world units).
 
-    Computed once per map and cached on the map object; the signed field
+    Computed once per ESDF and cached on the map object; the signed field
     (negative inside obstacles, see ``Grid.update_esdf``) makes the gradient
-    point out of obstacles even when evaluated inside one.
+    point out of obstacles even when evaluated inside one. ``map_.esdf`` is
+    lazy and recomputes after any obstacle change, producing a new array, so
+    the cache is keyed on the array's identity.
     """
-    if not getattr(map_, "_esdf_initialized", False):
-        map_.update_esdf()
-        map_._esdf_initialized = True
+    esdf = map_.esdf
     cached = getattr(map_, "_ctopprm_esdf_gradients", None)
-    if cached is not None and cached[0] is map_._esdf:
+    if cached is not None and cached[0] is esdf:
         return cached[1]
-    grads = np.gradient(np.asarray(map_._esdf, dtype=float), float(map_.resolution))
+    grads = np.gradient(np.asarray(esdf, dtype=float), float(map_.resolution))
     if map_.dim == 1:  # np.gradient returns a bare array for 1-D input
         grads = [grads]
-    map_._ctopprm_esdf_gradients = (map_._esdf, list(grads))
+    map_._ctopprm_esdf_gradients = (esdf, list(grads))
     return map_._ctopprm_esdf_gradients[1]
 
 
@@ -334,8 +346,7 @@ def _perpendicular_fallback(map_, s_hat: np.ndarray, center: np.ndarray,
         axis[int(np.argmin(np.abs(s_hat)))] = 1.0
         v = np.cross(s_hat, axis)
         v = v / max(np.linalg.norm(v), _EPS)
-    d_plus = float(map_.min_wall_distance(center + v * probe))
-    d_minus = float(map_.min_wall_distance(center - v * probe))
+    d_plus, d_minus = wall_distance(map_, np.stack([center + v * probe, center - v * probe])).tolist()
     return v if d_plus >= d_minus else -v
 
 

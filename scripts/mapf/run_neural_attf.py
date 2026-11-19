@@ -1,15 +1,15 @@
 """
 Run Neural-ATTF (multi-agent pickup-and-delivery via token passing + Neural
-STA*) across several random task frequencies, in both discrete (grid) and
-continuous (PRM) graph modes.
+STA*) on one life-long MAPD instance: agents, parking endpoints and tasks are
+read from the map YAML. run_neural_attf_random.py and
+run_neural_attf_continous.py reuse the helpers defined here.
 
 Usage:
     python scripts/mapf/run_neural_attf.py [--map path/to/mapd.yaml]
 
 Outputs:
-    figs/neural_attf/neural_attf_<mode>_freq<f>.png
-    figs/neural_attf/neural_attf_<mode>_freq<f>.gif
-    path_planning/maps/2d/neural_attf/solution_<mode>_freq<f>.yaml
+    figs/neural_attf/neural_attf_mapd_<mode>.png
+    path_planning/maps/2d/neural_attf/solution_mapd_<mode>.yaml
 """
 
 from __future__ import annotations
@@ -17,7 +17,6 @@ from __future__ import annotations
 import os
 import random
 import sys
-import time
 from copy import deepcopy
 
 # Make the source tree importable when the package is installed non-editably:
@@ -29,9 +28,9 @@ if _PROJECT_ROOT not in sys.path:
 
 import numpy as np
 
+from path_planning.agent import Agent
 from path_planning.common.visualizer.visualizer_2d import Visualizer2D
-from path_planning.multi_agent_planner.decentralized.neural_attf.neural_attf import NeuralATTF
-from path_planning.multi_agent_planner.decentralized.neural_attf.simulation import Simulation
+from path_planning.multi_agent_planner.mapf_solver import solve_mapd
 from path_planning.multi_agent_planner.decentralized.neural_attf.tasks_generator import (
     convert_mapd_tasks,
 )
@@ -88,7 +87,7 @@ def _make_map_mapd(map_yaml: str, use_discrete_space: bool, agent_radius: float,
     ``register_task_endpoints=True`` to add the candidate task/parking points to the
     graph (with their exact coords) before the roadmap is built.
 
-    ``roadmap_type`` selects the roadmap (``GraphSampler.generate_map``):
+    ``roadmap_type`` selects the roadmap (``GraphSampler.generate_roadmap``):
     ``"grid"``, ``"prm"``, ``"rrg"``, ``"cdt"``, ``"voronoi"``, ``"midpoints"``,
     ``"centroids"``, ``"dt"``, or ``"halton..."``. Defaults to ``"grid"`` in discrete
     mode and ``"prm"`` in continuous mode. NOTE for MAPD: ``prm`` connects the
@@ -110,12 +109,12 @@ def _make_map_mapd(map_yaml: str, use_discrete_space: bool, agent_radius: float,
     map_.inflate_obstacles(radius=agent_radius + np.sqrt(2) / 2)
 
     if use_discrete_space:
-        map_.set_parameters(sample_num=0, num_neighbors=4.0, min_edge_len=0.0, max_edge_len=1.1)
+        map_.set_roadmap_config(sample_num=0, num_neighbors=4.0, min_edge_length=0.0, max_edge_length=1.1)
     else:
         # Sparser PRM with shorter edges: the SIPP low-level planner rebuilds its
         # per-node/edge interval graph each call, so fewer nodes/edges keeps it fast
         # while staying dense enough for radius-aware connectivity.
-        map_.set_parameters(sample_num=400, num_neighbors=8.0, min_edge_len=0.0, max_edge_len=3.0)
+        map_.set_roadmap_config(sample_num=400, num_neighbors=8.0, min_edge_length=0.0, max_edge_length=3.0)
 
     # World-frame starts so generateRandomNodes registers them as roadmap nodes.
     agents_rt = mapd_agents_to_roadmap_frame(map_, mapd["agents"])
@@ -135,15 +134,15 @@ def _make_map_mapd(map_yaml: str, use_discrete_space: bool, agent_radius: float,
         map_.set_goal([])
 
     # Sample nodes for the requested roadmap, then connect them via the matching
-    # builder. generate_map dispatches per type; rrg/planar rebuild the node set, so
+    # builder. generate_roadmap dispatches per type; rrg/planar rebuild the node set, so
     # read the authoritative nodes/road_map back from the map afterwards.
     nodes = map_.generateRandomNodes(generate_grid_nodes=use_discrete_space, roadmap_type=roadmap_type)
-    map_.generate_map(roadmap_type, nodes)
+    map_.generate_roadmap(roadmap_type)
     nodes = map_.nodes
     road_map = map_.road_map
 
     if register_task_endpoints:
-        map_.set_goal([])  # nodes persist in node_index_dict; keep the figure clean
+        map_.set_goal([])  # nodes persist in pos_index_dict; keep the figure clean
 
     return map_, agents_rt, mapd, nodes, road_map
 
@@ -226,61 +225,31 @@ def _solve_and_save(
     low_level: str = "grid",
     delay_probability: float = 0.0,
     extra_summary: dict | None = None,
+    agent: Agent | None = None,
 ):
     """
     Shared tail for the Neural-ATTF runners: simulate the token-passing planner
     over the given task stream, write the YAML solution summary, and render the
     static PNG (+ optional GIF). Used by :func:`_run_mapd` (predefined MAPD tasks)
-    and the random/continuous runners. ``agent_radius``/``velocity`` give the planner
-    a radius-aware (CGAL swept) agent–agent footprint; ``delay_probability`` is the
-    per-step probability that an agent is held in place by ``Simulation``.
+    and the random/continuous runners. Every agent gets the body ``agent`` (an
+    ``Agent``, any shape), by default a disc of ``agent_radius`` moving at
+    ``velocity`` (0: one time unit per move); ``agent_radius`` 0 and no ``agent``:
+    point particles. ``delay_probability`` is the per-step probability that an agent
+    is held in place by ``Simulation``.
     """
-    planner = NeuralATTF(
-        graph_map=map_,
-        agents=agents,
-        non_task_endpoints=parking_pts,
-        a_star_max_iter=4000,
-        encoder=None,
-        grid_overlay=None,
-        alpha=0.001,
-        heuristic_type="manhattan" if use_discrete_space else "euclidean",
-        agent_radius=agent_radius,
-        velocity=velocity,
-        low_level=low_level,
-    )
-    sim = Simulation(tasks=[], agents=agents, delay_probability=delay_probability, rng=rng)
-
-    target = len(tasks)
-    t0 = time.time()
-    while planner.get_completed_tasks() < target and sim.get_time() < horizon:
-        new_tasks = [t for t in tasks if int(t["start_time"]) == sim.get_time()]
-        if new_tasks:
-            planner.update_tasks(sim.get_time(), new_tasks)
-        sim.time_forward(planner)
-    wall = time.time() - t0
-
-    completed = planner.get_completed_tasks()
-    print(
-        f"  completed {completed}/{target} tasks in {sim.get_time()} steps "
-        f"(planner: {sim.get_algo_time():.2f}s, wall: {wall:.2f}s)"
-    )
-
-    summary = {
-        "mapf_solver_name": "neural_attf",
-        "schedule": sim.get_actual_paths(),
-        "completed_tasks": completed,
-        "n_tasks": target,
-        "n_replans": planner.get_n_replans(),
-        "completed_tasks_times": planner.get_completed_tasks_times(),
-        "tasks": tasks,
-        "horizon": horizon,
-        "use_discrete_space": use_discrete_space,
-        "agent_radius": agent_radius,
-        "num_nodes": len(map_.nodes),
-        "num_edges": len(map_.edges),
-        "runtime": wall,
-        "algo_time": sim.get_algo_time(),
+    config = {
+        "agent": agent, "agent_radius": agent_radius, "agent_velocity": velocity,
+        "heuristic_type": "manhattan" if use_discrete_space else "euclidean",
+        "low_level": low_level, "horizon": horizon, "delay_probability": delay_probability,
     }
+    summary = solve_mapd(map_, agents, tasks, parking_pts, config, rng=rng)
+    print(
+        f"  completed {summary['completed_tasks']}/{summary['n_tasks']} tasks in {summary['steps']} steps "
+        f"(planner: {summary['algo_time']:.2f}s, wall: {summary['runtime']:.2f}s)"
+        + (" | COLLISION" if summary["collision"] else "")
+    )
+    summary["tasks"] = tasks
+    summary["use_discrete_space"] = use_discrete_space
     if extra_summary:
         summary.update(extra_summary)
 

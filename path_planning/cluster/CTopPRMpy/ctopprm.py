@@ -2,8 +2,7 @@
 
 Python reimplementation of CTopPRM (Novosad, Penicka, Vonasek, "CTopPRM:
 Clustering Topological PRM for Planning Multiple Distinct Paths in 3D
-Environments", RA-L 2023; C++ reference in ``path_planning/cluster/CTopPRM/``),
-generalized to multiple starts/goals:
+Environments", RA-L 2023), generalized to multiple starts/goals:
 
 - ONE shared clustering: every requested start and goal seeds a cluster of a
   single graph-Voronoi partition of the shared roadmap, refined once by the
@@ -28,8 +27,9 @@ import heapq
 import logging
 import math
 from typing import Dict, List, Optional, Sequence, Tuple, Union
-from path_planning.cluster.kmeans.graph_kmeans import GraphKMeans
+from path_planning.cluster.kmeans.graph_kmeans import GraphKMeans, has_roadmap, roadmap_adjacency
 from path_planning.cluster.em.graph_em import GraphEM
+from path_planning.common.environment.map.graph_sampler import snap_to_cell_centers
 import numpy as np
 
 from path_planning.cluster.CTopPRMpy.shortening import (
@@ -43,7 +43,6 @@ from path_planning.cluster.CTopPRMpy.shortening import (
     remove_too_long_paths,
     shorten_path,
 )
-from path_planning.common.environment.node import Node
 
 logger = logging.getLogger(__name__)
 
@@ -127,7 +126,7 @@ class CTopPRM:
             raise ValueError(
                 "custom_seeds must be provided iff clustering == 'custom'"
             )
-        if not getattr(graph_map, "nodes", None) or not getattr(graph_map, "road_map", None):
+        if not has_roadmap(graph_map):
             raise ValueError(
                 "graph_map has no roadmap; generate one first "
                 "(e.g. generateRandomNodes + generate_roadmap)"
@@ -159,7 +158,7 @@ class CTopPRM:
         )
 
         self._points = np.asarray([n.current for n in graph_map.nodes], dtype=float)
-        self._adj = self._build_symmetric_adjacency()
+        self._adj = roadmap_adjacency(graph_map)   # undirected, like the paper's roadmap
         self._grads = (
             get_esdf_gradients(graph_map) if shortening_mode == "gradient" else None
         )
@@ -184,7 +183,7 @@ class CTopPRM:
     # Public API
     # ------------------------------------------------------------------
 
-    def set_up_distinct_paths(self, pairs: List[Tuple[Endpoint, Endpoint]]) -> None:
+    def set_up_distinct_paths(self, pairs: List[Tuple[Endpoint, Endpoint]]) -> Tuple[List[PairKey], dict]:
         resolved = [
             (self.resolve_endpoint(s), self.resolve_endpoint(g)) for s, g in pairs
         ]
@@ -264,7 +263,7 @@ class CTopPRM:
         Args:
             pairs: (start, goal) pairs; each endpoint is a node index or a
                 coordinate in the roadmap-node frame (resolved exactly via
-                ``node_index_dict``, else snapped to the nearest node).
+                ``pos_index_dict``, else snapped to the nearest node).
 
         Returns:
             ``{(start_idx, goal_idx): [path, ...]}`` with paths as
@@ -300,17 +299,13 @@ class CTopPRM:
                 raise IndexError(f"endpoint node index {idx} out of range")
             return idx
         coord = tuple(endpoint)
-        node = Node(coord, None, 0, 0)
-        idx = self.map.node_index_dict.get(node)
+        idx = self.map.pos_index_dict.get(coord)
         if idx is not None:
             return int(idx)
         if self._kd_tree is None:
-            tree = getattr(self.map, "sample_kd_tree", None)
-            if tree is None:
-                from scipy.spatial import cKDTree
+            from scipy.spatial import cKDTree
 
-                tree = cKDTree(self._points)
-            self._kd_tree = tree
+            self._kd_tree = cKDTree(self._points)
         _, nn = self._kd_tree.query(np.asarray(coord, dtype=float))
         return int(nn)
 
@@ -350,49 +345,9 @@ class CTopPRM:
             )
         return np.array(sorted(used), dtype=int)
 
-    def create_pruned_graph(self, results: Dict[PairKey, List[np.ndarray]]):
-        """GraphSampler copy keeping only the nodes used by these paths.
-
-        Wraps ``GraphSampler.create_pruned_copy`` with the node indices from
-        :meth:`used_node_indices`. With ``shortening_mode="none"`` every
-        consecutive waypoint pair is a roadmap edge, so all planned paths
-        stay traversable in the pruned copy.
-        """
-        return self.map.create_pruned_copy(self.used_node_indices(results))
-
     # ------------------------------------------------------------------
     # Roadmap plumbing
     # ------------------------------------------------------------------
-
-    def _build_symmetric_adjacency(self) -> List[List[Tuple[int, float]]]:
-        """Undirected adjacency (like the C++ roadmap) from ``road_map``.
-
-        k-NN roadmaps can be asymmetric (j in adj[i] without i in adj[j]);
-        every edge is inserted in both directions here. Weights come from
-        ``road_map_edge_weights`` when aligned, else Euclidean distance.
-        """
-        n = len(self._points)
-        road_map = self.map.road_map
-        weights = getattr(self.map, "road_map_edge_weights", None)
-        aligned = (
-            weights is not None
-            and len(weights) == len(road_map)
-            and all(len(weights[i]) == len(road_map[i]) for i in range(len(road_map)))
-        )
-        adj: List[Dict[int, float]] = [dict() for _ in range(n)]
-        for u in range(min(len(road_map), n)):
-            for k, v in enumerate(road_map[u]):
-                if not 0 <= v < n or v == u:
-                    continue
-                w = (
-                    float(weights[u][k])
-                    if aligned
-                    else float(np.linalg.norm(self._points[u] - self._points[v]))
-                )
-                if w < adj[u].get(v, np.inf):
-                    adj[u][v] = w
-                    adj[v][u] = w
-        return [sorted(d.items()) for d in adj]
 
     def _single_source_dist(self, source: int) -> np.ndarray:
         """Dijkstra distances from ``source`` over the symmetrized roadmap."""
@@ -816,14 +771,13 @@ class CTopPRM:
         else:
             result = shorten_path(self.map, path, self.geometry, forward=forward,
                                   grads=self._grads)
-        if not getattr(self.map, "use_discrete_space", False):
+        if not self.map.use_discrete_space:
             return result
-        # Discrete maps: generate_custom_nodes snaps stored waypoints to cell
-        # centres (cluster_map._snap_points), silently changing the geometry
+        # Discrete maps: cluster_map.install_roadmap snaps stored waypoints to
+        # cell centres (cluster_map._snap_points), silently changing the geometry
         # the shorteners validated — snapped shortcuts can cut through
         # obstacles. Snap here and re-validate exactly; fall back to the
         # unshortened path (roadmap nodes, snap-stable) if it collides.
-        from path_planning.common.environment.map.graph_sampler import snap_to_cell_centers
         snapped = snap_to_cell_centers(self.map, result)
         keep = np.ones(len(snapped), dtype=bool)  # drop snap-collapsed duplicates
         keep[1:] = np.any(np.diff(snapped, axis=0) != 0, axis=1)

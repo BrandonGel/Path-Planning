@@ -1,3 +1,8 @@
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))   # this repo, ahead of any installed copy
+
 import argparse
 import os
 import yaml
@@ -9,7 +14,7 @@ from path_planning.data_generation.dataset_visualize_graph import (
 )
 from path_planning.utils.util import set_map_config
 from path_planning.data_generation.dataset_util import create_path_parameter_directory
-from path_planning.gnn.dataset_prune import get_prune_function,get_gnn_paths
+from path_planning.gnn.dataset_prune import get_gnn_paths
 from path_planning.gnn.dataset_prune import get_prune_mechanism_folder,read_prune_mechanism_from_yaml
 
 if __name__ == "__main__":
@@ -30,7 +35,6 @@ if __name__ == "__main__":
     parser.add_argument("-cp_path","--checkpoint_path",type=str, help="checkpoint path")
     parser.add_argument("-cfg_path","--config_path",type=str, help="config path")
     parser.add_argument("-run_id","--run_id",type=str, help="run_id")
-    parser.add_argument("-gf","--graph_file_name",type=str, help="gnn folder name")
     parser.add_argument("-g","--ground_truth_graph_file_name",type=str, default="graph_map.pkl", help="ground truth graph file name")
     parser.add_argument("-rmtgt","--ground_truth_road_map_type",type=str, default="grid", help="ground truth roadmap type")
     parser.add_argument("-prune_config","--prune_config",type=str, default='config/prune_config.yaml', help="prune config file")
@@ -59,7 +63,6 @@ if __name__ == "__main__":
 
     prune_mechanism = read_prune_mechanism_from_yaml(args.prune_config)
     prune_name = get_prune_mechanism_folder(prune_mechanism)
-    k_hop = prune_mechanism.get('k_hop', 0)
     if len(prune_name) == 0:
         graph_file_name = "graph_map.pkl"
         target_space = 'predictions'

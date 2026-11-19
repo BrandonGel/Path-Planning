@@ -17,9 +17,7 @@ Generate a dataset of MAPF instances and their solutions with multiple provided 
 Generate 1000 random samples + the start/goal samples
 Generate edges based on the number of neighbors of each nodes with a minimum edge length of 1e-10 and a maximum edge length of 5+1e-10
 Create 1 new (generate_new_graph True) graph sample with the prm roadmap type and the convolution_binary target space as a labeler
-Let the generator know that the start and goal are discrete (is_start_goal_discrete True)
 Useing Weighted sampling (weighted_sampling True) and sample from the target space with a probability of 50% of the times (samp_from_prob_map_ratio 0.5)
-python scripts/generate/run_generate.py -s benchmark/train/map32.0x32.0_resolution1.0/agents4_obst0.1 --num_samples 1000 --num_neighbors 13.0 --min_edge_len 1e-10 --max_edge_len 5.0000001 --num_graph_samples 1 --road_map_type prm --target_space convolution_binary --generate_new_graph True --is_start_goal_discrete True --weighted_sampling True --samp_from_prob_map_ratio 0.5
 '''
 
 
@@ -35,7 +33,6 @@ if str(repo_root) not in sys.path:
     sys.path.insert(0, str(repo_root))
 
 from path_planning.data_generation.dataset_generate import generate_graph_samples
-from multiprocessing import cpu_count
 
 if __name__ == "__main__":
     """Main entry point for dataset generation."""
@@ -53,23 +50,19 @@ if __name__ == "__main__":
     parser.add_argument("-rmt_gt","--road_map_type_gt",type=str, default='grid', help="road map type for ground truth")
     parser.add_argument("-ggn","--generate_grid_nodes",action="store_true", help="generate grid nodes")
     parser.add_argument("-gbn","--generate_boundary_nodes",action="store_true", help="also register obstacle/map boundary vertices as roadmap nodes")
-    parser.add_argument("-bns","--boundary_node_spacing",type=float, default=None, help="resample obstacle/map boundary nodes every this many world units (e.g. the resolution for one node per boundary cell); default: corners/junctions only")
     parser.add_argument("-av","--agent_velocity",type=float, default=0.0, help="agent velocity")
     parser.add_argument("-ts","--target_space",type=str, default='convolution_binary', help="target space")
     parser.add_argument("-gng","--generate_new_graph",dest="generate_new_graph",action="store_true", help="generate new graph")
     parser.add_argument("-gfn","--graph_file_name",type=str, default=None, help="graph file name")
-    parser.add_argument("-isg","--is_start_goal_discrete",dest="is_start_goal_discrete",action="store_true", help="use discrete space for start and goal")
-    parser.add_argument("--no-is-start-goal-discrete",dest="is_start_goal_discrete",action="store_false", help="disable discrete space for start and goal")
-    parser.add_argument("-w","--num_workers",type=int, default=1, help="number of parallel workers for cases (default: auto-detect CPU cores)")
+    parser.add_argument("-w","--num_workers",type=int, default=1, help="number of parallel workers for cases (default: 1)")
     parser.add_argument("-ws","--weighted_sampling",dest="weighted_sampling",action="store_true", help="weighted sampling")
     parser.add_argument("-spfr","--samp_from_prob_map_ratio",type=float, default=0.5, help="sample from prob map ratio")
     parser.add_argument("-num_hops","--num_hops",type=int, default=5, help="number of hops")
-    parser.set_defaults(is_start_goal_discrete=True)
     args = parser.parse_args()
     
     
     folder_path = [Path(p) for p in args.path]
-    num_workers = args.num_workers if args.num_workers is not None else cpu_count()
+    num_workers = args.num_workers
     config = {
             "seed": args.seed,
             "use_discrete_space": args.use_discrete_space,
@@ -82,12 +75,10 @@ if __name__ == "__main__":
             "road_map_type_gt": args.road_map_type_gt,
             "generate_grid_nodes": args.generate_grid_nodes,
             "generate_boundary_nodes": args.generate_boundary_nodes,
-            "boundary_node_spacing": args.boundary_node_spacing,
             "agent_velocity": args.agent_velocity,
             "target_space": args.target_space,
             "generate_new_graph": args.generate_new_graph,
             "graph_file_name": args.graph_file_name,
-            "is_start_goal_discrete": args.is_start_goal_discrete,
             "weighted_sampling": args.weighted_sampling,
             "samp_from_prob_map_ratio": args.samp_from_prob_map_ratio,
             "num_hops": args.num_hops,

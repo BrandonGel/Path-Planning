@@ -57,7 +57,7 @@ def get_cluster_graph_name(method: str, source_graph_name: str = "graph_map.pkl"
 
 def _build_setup_sampler(source_map: GraphSampler) -> GraphSampler:
     """Fresh, node-free GraphSampler sharing the source map's world/obstacle
-    setup, ready for generate_custom_nodes/generate_custom_roadmap.
+    setup, ready for ``install_roadmap``.
 
     Built from the loaded source map (not input.yaml) so use_discrete_space
     and the coordinate frame always match the roadmap being clustered."""
@@ -67,27 +67,52 @@ def _build_setup_sampler(source_map: GraphSampler) -> GraphSampler:
         start=[],
         goal=[],
         use_discrete_space=source_map.use_discrete_space,
-        sample_num=0,
-        min_edge_len=source_map.min_edge_length,
-        max_edge_len=source_map.max_edge_length,
-        num_neighbors=source_map.num_neighbors,
-        sampling_dist_dict=source_map.sampling_dist_dict,
+        roadmap_config={**source_map.roadmap_config.as_dict(), "sample_num": 0},
+        sampling_dist_dict=source_map.node_sampler.sampling_dist_dict,
     )
     fresh.obs_size = source_map.obs_size
-    if len(source_map.obstacles):
-        fresh.set_obstacles(np.asarray(source_map.obstacles, dtype=np.int64))
-    fresh.set_inflation_radius(source_map.inflation_radius)
+    # The source's grid, copied rather than rebuilt from its obstacles (a loaded version 3 map keeps no obstacle
+    # list, and rebuilding recomputes the distance field), without its start / goal marks: the caller sets its own.
+    fresh._copy_grid(source_map, keep_endpoints=False)
     return fresh
 
 
 def _snap_points(sampler: GraphSampler, points: np.ndarray) -> np.ndarray:
-    """Node coordinates generate_custom_nodes will store for ``points``
-    (identity in continuous space, cell-centre snap in discrete space, matching
+    """Node coordinates ``install_roadmap`` stores for ``points`` (identity in
+    continuous space, cell-centre snap in discrete space, matching
     map_to_world(world_to_map(p, discrete=True)))."""
     pts = np.asarray(points, dtype=float)
     if not sampler.use_discrete_space:
         return pts
     return snap_to_cell_centers(sampler, pts)
+
+
+def install_roadmap(sampler: GraphSampler, points: np.ndarray, edges) -> GraphSampler:
+    """Make ``points`` (``(N, dim)``) the nodes of ``sampler`` and ``edges``
+    (index pairs into ``points``) its roadmap: node ``i`` is ``points[i]``
+    (snapped to its cell centre in discrete space), and a start / goal that is
+    not one of them is appended as an isolated node. Set the sampler's start
+    and goal first.
+
+    Every point and edge is kept as given: the points come from a validated
+    roadmap, which may legally hold nodes ``in_collision`` rejects (e.g. RRG
+    nodes slightly outside the bounds), and the edges are not held to the
+    source roadmap's edge-length band or re-tested for line of sight."""
+    pts = _snap_points(sampler, points).reshape(-1, sampler.dim)
+    sampler.node_sampler.set_nodes(sampler.node_sampler.make_points(pts))
+    sampler.generate_roadmap(
+        "custom",
+        config={"sample_num": len(pts), "min_edge_length": 0.0, "max_edge_length": float("inf")},
+        edge_indices=np.asarray(edges, dtype=np.int64).reshape(-1, 2),
+        filter_collision=False,
+    )
+    got = np.asarray([n.current for n in sampler.nodes[: len(pts)]], dtype=float).reshape(-1, sampler.dim)
+    if len(sampler.nodes) < len(pts) or not np.allclose(got, pts, atol=1e-9):
+        raise RuntimeError(
+            f"install_roadmap: {len(sampler.nodes)} nodes for {len(pts)} points; "
+            "refusing a roadmap with misaligned edge indices"
+        )
+    return sampler
 
 
 def build_cluster_map(
@@ -125,23 +150,9 @@ def build_cluster_map(
     t_distill = time.perf_counter()
 
     fresh = _build_setup_sampler(source_map)
-    fresh.set_start(starts)  # before generate_custom_nodes: it appends/dedupes
-    fresh.set_goal(goals)    # endpoint nodes against start/goal itself
-    # filter_points=False: the points come from the source map's validated
-    # roadmap, which may legally hold nodes point_expandable rejects (e.g.
-    # RRG nodes slightly outside the bounds); dropping any would shift every
-    # later index and corrupt the edge list.
-    nodes = fresh.generate_custom_nodes(points, filter_points=False)
-    # Safety net: verify the positional alignment anyway.
-    expected = _snap_points(fresh, points)
-    got = np.asarray([n.current for n in nodes[: len(points)]], dtype=float)
-    if len(nodes) < len(points) or not np.allclose(got, expected, atol=1e-9):
-        raise RuntimeError(
-            f"{method}: distilled points rejected by point_expandable "
-            f"({len(nodes)} nodes for {len(points)} points); refusing to save "
-            f"a roadmap with misaligned edge indices"
-        )
-    fresh.generate_custom_roadmap(edges)
+    fresh.set_start(starts)  # before install_roadmap: endpoints that are not
+    fresh.set_goal(goals)    # distilled points are appended as nodes
+    install_roadmap(fresh, points, edges)
     t_build = time.perf_counter()
 
     stats = {
@@ -159,23 +170,10 @@ def build_cluster_map(
             "build": t_build - t_distill,
         },
     }
-    em_model = getattr(planner, "cluster_model", None)
-    if CLUSTER_METHODS[method] == "em" and em_model is not None:
-        stats["em_iterations"] = int(getattr(em_model, "n_iter_", 0))
-        stats["em_timed_out"] = bool(getattr(em_model, "timed_out_", False))
+    if CLUSTER_METHODS[method] == "em":
+        stats["em_iterations"] = int(planner.cluster_model.n_iter_)
+        stats["em_timed_out"] = bool(planner.cluster_model.timed_out_)
     return fresh, stats
-
-
-def save_cluster_map(cluster_map: GraphSampler, graph_file: Path) -> None:
-    """Save a distilled sampler so load_graph_sampler round-trips cleanly."""
-    # grid_points must be a subset of nodes on load; the distilled roadmap
-    # keeps none of the source grid nodes as such.
-    cluster_map.grid_points = []
-    # _load_from_dict recomputes num_total_nodes = sample_num + #start + #goal.
-    cluster_map.sample_num = (
-        len(cluster_map.nodes) - len(cluster_map.start) - len(cluster_map.goal)
-    )
-    cluster_map.save_graph_sampler(graph_file)
 
 
 def process_single_case_cluster(args: Tuple) -> List[Tuple[int, str, str]]:
@@ -208,7 +206,7 @@ def process_single_case_cluster(args: Tuple) -> List[Tuple[int, str, str]]:
     t0 = time.perf_counter()
     source_map = create_map(
         inpt, graph_file=source_graph_file, verbose=False,
-        args={"use_constraint_sweep": False},
+        args={"use_collision_sweep": False},
     )
     t_load = time.perf_counter() - t0
 
@@ -221,7 +219,7 @@ def process_single_case_cluster(args: Tuple) -> List[Tuple[int, str, str]]:
                 source_map, inpt["agents"], method, cluster_fraction
             )
             t_save0 = time.perf_counter()
-            save_cluster_map(cluster_map, graph_file)
+            cluster_map.save_graph_sampler(graph_file)
             t_save = time.perf_counter() - t_save0
             stats["source_graph"] = str(source_graph_file)
             stats["cluster_fraction"] = cluster_fraction
@@ -323,12 +321,10 @@ def summarize_cluster_runtimes(
                 continue
             with open(runtime_file, "r") as f:
                 data = yaml.safe_load(f) or {}
-            if "runtime" not in data:
-                continue
             runtime = float(data["runtime"])
             cases[f"case_{case_id}"] = round(runtime, 6)
             runtimes.append(runtime)
-            breakdowns.append(data.get("runtime_breakdown", {}) or {})
+            breakdowns.append(data["runtime_breakdown"])
         if not runtimes:
             continue
         arr = np.asarray(runtimes, dtype=float)

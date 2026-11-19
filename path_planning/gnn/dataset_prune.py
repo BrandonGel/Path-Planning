@@ -1,61 +1,30 @@
-"""
-"""
+"""GNN pruning of roadmaps: load a trained score model (and its threshold model), score every node of a
+saved ``GraphSampler``, keep the nodes the prune mechanism selects and save the pruned roadmap."""
 
 import os
-from pathlib import Path
-import yaml
-import numpy as np
-from typing import Dict, List, Tuple, Optional
-from path_planning.multi_agent_planner.mapf_solver import solve_mapf
-from path_planning.common.environment.map.graph_sampler import GraphSampler
-from path_planning.common.environment.node import Node
-from path_planning.utils.util import set_global_seed
-from path_planning.gnn.train import normalize_threshold
-import math
-from tqdm import tqdm
-from multiprocessing import Pool, cpu_count
-import shutil
-import copy
-
-
-from path_planning.common.visualizer.visualizer_2d import Visualizer2D
-from path_planning.utils.util import write_to_yaml, set_global_seed
-from path_planning.utils.util import read_graph_sampler_from_yaml, read_agents_from_yaml
-from path_planning.multi_agent_planner.centralized.cbs.cbs import Environment, CBS
-from path_planning.multi_agent_planner.centralized.icbs.icbs import Environment as ICBS_Environment, CBS as ICBS
-from path_planning.multi_agent_planner.centralized.lacam.lacam import LaCAM
-from path_planning.multi_agent_planner.centralized.lacam.lacam_random import LaCAM as LaCAM_Random
-from path_planning.multi_agent_planner.centralized.lacam.utility import set_starts_goals_config, is_valid_mapf_solution
-from path_planning.multi_agent_planner.centralized.sipp.sipp import SippPlanner
-from path_planning.gnn.dataloader import get_graph_dataset_file_paths, GraphDataset
-from path_planning.gnn.train import get_threshold_x_dict
-
 import time
-import numpy as np
-import os
-from copy import deepcopy
-from path_planning.utils.checker import check_time_anomaly, check_velocity_anomaly, check_collision
-import yaml
 from pathlib import Path
-import torch
-from torch_geometric.nn import to_hetero
-import yaml
-import os
-from path_planning.gnn.model import get_model
-from torch_geometric.data import HeteroData, Batch
-from path_planning.data_generation.dataset_util import generate_base_case_path, generate_roadmap_path, generate_ground_truth_path, get_graph_file_path, generate_gnn_sampler_path,get_prediction_file_path, get_graph_runtime_file_path, write_runtime_yaml
-from torch_geometric.utils import unbatch
+from typing import Dict, List, Optional, Tuple
 
-# example: 
-# prune_mode = "mean_std0.5_0.5" 
-# prune_mode = "mean_0.5" 
-# prune_mode = "median_std0.5_value0.5" 
-# prune_mode = "median_0.5" 
-# prune_setting = {mode: 'mean', std_scale: 0.5, value: 0.5}
-prune_mechanism = {'mode': None, 'std_scale': None, 'value': None}
+import numpy as np
+import torch
+import yaml
+from torch_geometric.data import Batch, HeteroData
+from torch_geometric.nn import to_hetero
+from tqdm import tqdm
+
+from path_planning.common.environment.map.graph_sampler import GraphSampler
+from path_planning.data_generation.dataset_util import (
+    generate_gnn_sampler_path, get_graph_file_path, get_graph_runtime_file_path, get_prediction_file_path,
+    write_runtime_yaml,
+)
+from path_planning.gnn.dataloader import build_graph_data
+from path_planning.gnn.model import get_model
+from path_planning.gnn.train import get_threshold_x_dict, normalize_threshold
+
+# A prune mechanism: {mode: 'mean' | 'median' | None, std_scale, value, prune_gnn, threshold_scale, k_hop},
+# e.g. mean - 0.5 std, capped at value 0.5: {mode: 'mean', std_scale: 0.5, value: 0.5}.
 PRUNE_MECHANISMS_MODES = ["mean", "median"]
-PRUNE_MECHANISMS_SETTINGS = ["std", "std_scale"]
-PRUNE_MECHANISMS_VALUES = ["value"]
 
 def read_prune_mechanism_from_yaml(prune_mechanism_yaml: Path):
     with open(prune_mechanism_yaml, 'r') as f:
@@ -196,6 +165,7 @@ def get_gnn_paths(
     with open(config_path, "r") as f:
         train_config = yaml.load(f, Loader=yaml.FullLoader)
     train_config = _flatten_wandb_config(train_config)
+    # (Existing runs: the model block sits under "evaluator", in the oldest ones at the top level.)
     model_config = dict(train_config.get("model", {}))
     if not model_config:
         model_config = dict(train_config.get("evaluator", {}).get("model", {}))
@@ -210,8 +180,6 @@ def load_gnn_model(
     run_id: Optional[str] = None,
     sample_data: Optional[HeteroData] = None,
     model_name_suffix: str = "",
-    device: Optional[str] = None,
-    compile_model: Optional[bool] = None,
     ):
     """
     Load GNN model from either a wandb run folder or explicit checkpoint + config paths.
@@ -222,10 +190,7 @@ def load_gnn_model(
         config_path: Path to config.yaml (used when run_folder is None).
         run_id: Optional run ID for gnn_folder_name; inferred from run_folder name if not provided.
         sample_data: HeteroData from normalize_data(map_) to get metadata and node feature dim.
-        device: Override the inference device (e.g. "cpu" for deterministic inference). Default:
-            cuda if available else cpu.
-        compile_model: Override torch.compile (None -> use the config's device.compile). Set False
-            for deterministic, warmup-free inference.
+        model_name_suffix: "threshold" loads the run's threshold model (``epoch_<n>_threshold.pth``).
 
     Returns:
         Tuple of (model, config, device, gnn_folder_name).
@@ -245,10 +210,7 @@ def load_gnn_model(
     if sample_data is None:
         raise ValueError("sample_data (HeteroData) is required to build model metadata and in_channels")
 
-    if device is not None:
-        device = torch.device(device)
-    else:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     if 'threshold' in model_name_suffix:
         node_in_channels = sample_data["node"].x.shape[1] + 1
@@ -268,8 +230,7 @@ def load_gnn_model(
         aggr=model_config.get("to_hetero_aggr", "sum"),
     ).to(device)
     device_config = train_config.get("device", {})
-    do_compile = device_config.get("compile", False) if compile_model is None else bool(compile_model)
-    if do_compile:
+    if device_config.get("compile", False):
         model = torch.compile(model, dynamic=device_config.get("compile_dynamic", False))
 
     state_dict = torch.load(checkpoint_path, map_location=device)
@@ -298,231 +259,29 @@ def load_gnn_model(
 
     return model, train_config, device, gnn_folder_name
 
-def _to_native_yaml(obj):
-    """Convert numpy scalars/arrays in nested structures to native Python for YAML serialization."""
-    if isinstance(obj, dict):
-        return {k: _to_native_yaml(v) for k, v in obj.items()}
-    if isinstance(obj, (list, tuple)):
-        return [_to_native_yaml(v) for v in obj]
-    if isinstance(obj, (np.floating, np.float32, np.float64)):
-        return float(obj)
-    if isinstance(obj, (np.integer, np.int32, np.int64)):
-        return int(obj)
-    if isinstance(obj, np.ndarray):
-        return obj.tolist()
-    return obj
-
-def normalize_data(map_: GraphSampler):
+def normalize_data(map_: GraphSampler) -> HeteroData:
+    """``map_`` as the model's input graph, built by the same ``build_graph_data`` the training loader
+    uses: node features ``[position | start/goal | other]``, the roadmap edges and the start / goal ->
+    node edges with their lengths."""
     dims = map_.dim
-
-    # Get Edges & Edge Weights
-    edge_weights = map_.edge_weights
-    start_goal_edges_dict = {**map_.get_start_nodes_with_all_edges(), **map_.get_goal_nodes_with_all_edges()}
-    start_goal_nodes = map_.get_start_nodes() + map_.get_goal_nodes()
-
-
-    # Generate Node Data ('node')
-    pos = np.array([node.current for node in map_.get_nodes()])
-    # Concatenate Position & zero class vector
-    ndata = np.concatenate((pos, np.zeros((pos.shape[0], 2))), axis=1)
-    start_goal_mask = np.full(len(ndata),fill_value=0).astype(bool)
-    start_goal_idx = [map_.get_node_index(node) for node in start_goal_nodes]
-    start_goal_mask[start_goal_idx] = True
-    # Specify Start & Goal Nodes to have the one class value
+    pos = np.array([node.current for node in map_.get_nodes()], dtype=float).reshape(-1, dims)
+    ndata = np.concatenate((pos, np.zeros((len(pos), 2))), axis=1)
+    start_goal_mask = np.zeros(len(ndata), dtype=bool)
+    start_goal_mask[list(map_.start_nodes_index.values()) + list(map_.goal_nodes_index.values())] = True
     ndata[start_goal_mask, dims] = 1
-    ndata[~start_goal_mask, dims+1] = 1
+    ndata[~start_goal_mask, dims + 1] = 1
 
-    # Generate Edges ('node', 'to', 'node')
-    edges = np.array(map_.edges)
-    edata = np.array(edge_weights)
-
-    # Generate Start & Goal Edges ('node', 'approx', 'node')
-    start_goal_edges_list = []
-    start_goal_weights_list = []
-    for u_idx, u_to_v_edge in start_goal_edges_dict.items():
+    start_goal_edges, start_goal_weights = [], []
+    for u_idx, u_to_v_edge in {**map_.get_start_nodes_with_all_edges(), **map_.get_goal_nodes_with_all_edges()}.items():
         for v_idx, edge_weight in u_to_v_edge:
-            start_goal_edges_list.append((u_idx, v_idx))
-            start_goal_weights_list.append(edge_weight)
-    
-    # Convert to numpy arrays and save as compressed npz (much smaller than pickle)
-    ndata = ndata.astype(np.float32)
-    node_to_node_edges_arr = edges.astype(np.int32)
-    node_to_node_weights_arr = edata.astype(np.float32)
-    start_goal_edges_arr = np.array(start_goal_edges_list, dtype=np.int32)
-    start_goal_weights_arr = np.array(start_goal_weights_list, dtype=np.float32)
+            start_goal_edges.append((u_idx, v_idx))
+            start_goal_weights.append(edge_weight)
 
-    dims = len(map_.bounds)
-    # Origin-aware, aspect-preserving position normalization: shift by the per-axis min
-    # (map origin) then divide by the largest axis extent (a single uniform scale). For
-    # origin-0 maps this is identical to coords/max(bounds); for maps with a non-zero
-    # origin (e.g. the plant map, origin [-220,-142]) it keeps coords in [0,1] instead of
-    # feeding the GNN out-of-distribution negative coordinates.
-    b = np.asarray(map_.bounds, dtype=float)
-    lo = b[:, 0]
-    scale = float(np.max(b[:, 1] - b[:, 0]))
-    if scale <= 0:
-        scale = 1.0
-    ndata[:, :dims] = (ndata[:, :dims] - lo) / scale
-    # Convert to PyG expected shapes: edge_index (2, E), edge_attr (E, F)
-    node_to_node_edges_arr = node_to_node_edges_arr.T
-    node_to_node_weights_arr = node_to_node_weights_arr.reshape(len(node_to_node_weights_arr), -1)
-    if node_to_node_weights_arr.size > 0:
-        nn_min = node_to_node_weights_arr.min(axis=0, keepdims=True)
-        nn_max = node_to_node_weights_arr.max(axis=0, keepdims=True)
-        nn_denom = np.where(nn_max > 0, nn_max, 1.0)
-        node_to_node_weights_arr = (node_to_node_weights_arr - nn_min) / nn_denom
+    return build_graph_data(ndata, map_.bounds, np.asarray(map_.edges, dtype=np.int64),
+                            np.asarray(map_.edge_weights, dtype=np.float32),
+                            np.asarray(start_goal_edges, dtype=np.int64),
+                            np.asarray(start_goal_weights, dtype=np.float32))
 
-    start_goal_edges_arr = start_goal_edges_arr.T
-    start_goal_weights_arr = start_goal_weights_arr.reshape(len(start_goal_weights_arr), -1)
-    if start_goal_weights_arr.size > 0:
-        sg_min = start_goal_weights_arr.min(axis=0, keepdims=True)
-        sg_max = start_goal_weights_arr.max(axis=0, keepdims=True)
-        sg_denom = np.where(sg_max > 0, sg_max, 1.0)
-        start_goal_weights_arr = (start_goal_weights_arr - sg_min) / sg_denom
-
-    data = HeteroData()
-    data['node'].x = torch.tensor(ndata, dtype=torch.float)
-    data['node','to','node'].edge_index = torch.tensor(node_to_node_edges_arr, dtype=torch.long)
-    data['node','to','node'].edge_attr = torch.tensor(node_to_node_weights_arr, dtype=torch.float)
-    data['node','to','node'].edge_weight = None
-    data['node','approx','node'].edge_index = torch.tensor(start_goal_edges_arr, dtype=torch.long)
-    data['node','approx','node'].edge_attr = torch.tensor(start_goal_weights_arr, dtype=torch.float)
-    data['node','approx','node'].edge_weight = None
-    
-    return data
-
-def heterodata_to_graph_sampler(
-        data: HeteroData,
-        bounds: np.ndarray,
-        resolution: float = 1.0,
-    ) -> GraphSampler:
-    """
-    Reconstruct a GraphSampler from a PyG HeteroData graph.
-
-    Assumptions:
-    - `data` was produced by `normalize_data(map_)` (or follows the same schema).
-    - `data['node'].x[:, :dims]` are normalized coordinates where normalization used
-      `np.max(bounds)` as in `normalize_data`.
-    - `data['node','to','node'].edge_index` provides node indices (0..N-1).
-
-    This function preserves node ordering so that `edge_index` indices remain valid.
-    """
-    if "node" not in data.node_types:
-        raise ValueError("HeteroData must contain node type 'node'.")
-
-    bounds_arr = np.asarray(bounds)
-    if bounds_arr.ndim != 2 or bounds_arr.shape[1] != 2:
-        raise ValueError("bounds must have shape (dims, 2) like [[min,max], ...].")
-    dims = int(bounds_arr.shape[0])
-
-    x = data["node"].x.detach().cpu().numpy()
-    if x.shape[1] < dims:
-        raise ValueError(f"data['node'].x must have at least {dims} columns for positions.")
-
-    scale = float(np.max(bounds_arr))
-    coords = x[:, :dims] * scale
-    num_nodes = int(coords.shape[0])
-
-    # Identify start/goal nodes via the one-hot columns (if present)
-    start_indices: List[int] = []
-    goal_indices: List[int] = []
-    if x.shape[1] >= dims + 2:
-        start_indices = np.where(x[:, dims] > 0.5)[0].astype(int).tolist()
-        goal_indices = np.where(x[:, dims + 1] > 0.5)[0].astype(int).tolist()
-
-    start = [tuple(coords[i]) for i in start_indices]
-    goal = [tuple(coords[i]) for i in goal_indices]
-
-    # Build Node list preserving order (critical for edge_index alignment)
-    nodes = [Node(tuple(coords[i]), None, 0, 0) for i in range(num_nodes)]
-
-    # Build undirected adjacency and weights (mirror generate_custom_roadmap)
-    road_map: List[List[int]] = [[] for _ in range(num_nodes)]
-    road_map_edge_weights: List[List[float]] = [[] for _ in range(num_nodes)]
-    edge_set = set()
-
-    if ("node", "to", "node") not in data.edge_types:
-        raise ValueError("HeteroData must contain edge type ('node','to','node').")
-    edge_index = data["node", "to", "node"].edge_index.detach().cpu().numpy()
-    if edge_index.shape[0] != 2:
-        raise ValueError("edge_index must have shape (2, E).")
-
-    for u, v in edge_index.T.tolist():
-        u = int(u)
-        v = int(v)
-        if u == v:
-            continue
-        if u < 0 or v < 0 or u >= num_nodes or v >= num_nodes:
-            continue
-        e = (u, v)
-        if e in edge_set or (v, u) in edge_set:
-            continue
-        edge_set.add(e)
-        edge_set.add((v, u))
-
-        w = float(np.linalg.norm(coords[u] - coords[v]))
-        road_map[u].append(v)
-        road_map[v].append(u)
-        road_map_edge_weights[u].append(w)
-        road_map_edge_weights[v].append(w)
-
-    # Treat non-start/goal nodes as sampled/grid points for bookkeeping
-    start_goal_set = set(start_indices) | set(goal_indices)
-    grid_points = [tuple(coords[i]) for i in range(num_nodes) if i not in start_goal_set]
-
-    sampler_data = {
-        "start": start,
-        "goal": goal,
-        "sample_num": len(grid_points),
-        "num_neighbors": 0.0,
-        "min_edge_length": 0.0,
-        "max_edge_length": 0.0,
-        "use_discrete_space": True,
-        "grid_points": grid_points,
-        "nodes": nodes,
-        "obstacles": [],
-        "inflation_radius": 0.0,
-        "track_with_link": False,
-        "road_map": road_map,
-        "road_map_edge_weights": road_map_edge_weights,
-        "use_constraint_sweep": False,
-        "record_sweep": False,
-        "use_exact_collision_check": True,
-    }
-
-    sampler = GraphSampler(bounds=bounds_arr, resolution=resolution, start=[], goal=[])
-    sampler._load_from_dict(sampler_data)
-    return sampler
-
-def unnormalize_data(data: HeteroData, map_: GraphSampler) -> GraphSampler:
-    """
-    Project node features in a HeteroData object back into the GraphSampler.
-
-    This is the inverse of the coordinate scaling done in normalize_data:
-    - data['node'].x[:, :dims] stores normalized positions in [0, 1]
-      (divided by max(map_.bounds)).
-    - Here we rescale them back to world coordinates and write them into
-      the corresponding GraphSampler nodes (in-place).
-
-    Args:
-        data: HeteroData produced by normalize_data(map_) (possibly modified).
-        map_: Original GraphSampler to update.
-
-    Returns:
-        The same GraphSampler instance with updated node coordinates.
-    """
-    dims = map_.dim
-    bounds = np.max(map_.bounds)
-
-    # Extract (possibly modified) normalized positions and unscale
-    x = data["node"].x.detach().cpu().numpy()
-    coords = x[:, :dims] * bounds
-
-    # Update GraphSampler node coordinates to match unnormalized positions
-    for idx, node in enumerate(map_.get_nodes()):
-        node.current = tuple(coords[idx])
-
-    return map_
 
 def prune_map(map_: GraphSampler, prune_value: np.ndarray, k_hop: int = 0) -> GraphSampler:
     # Get indices with prune_value == 1
@@ -531,10 +290,9 @@ def prune_map(map_: GraphSampler, prune_value: np.ndarray, k_hop: int = 0) -> Gr
     if k_hop > 0:
         for _ in range(k_hop):
             nodes_idx_set = set(nodes_idx.tolist())
-            for node_i in nodes_idx:
-                if node_i < len(map_.road_map):
-                    nodes_idx_set.update(map_.road_map[node_i])
-            nodes_idx = np.array(list(nodes_idx_set))
+            for node_i in nodes_idx.tolist():
+                nodes_idx_set.update(map_.neighbors(node_i).tolist())
+            nodes_idx = np.array(sorted(nodes_idx_set), dtype=int)
 
     # Always keep start and goal nodes
     start_indices = set(map_.start_nodes_index.values())
@@ -545,106 +303,22 @@ def prune_map(map_: GraphSampler, prune_value: np.ndarray, k_hop: int = 0) -> Gr
     )
 
     # Create and save pruned graph sampler
-    pruned_map = map_.create_pruned_copy(kept_indices)
+    pruned_map = map_.pruned(kept_indices)      # in place: map_ itself is pruned (kept_indices are its old numbering)
     return pruned_map, kept_indices
 
-def remove_disconnected_islands(map_: GraphSampler, verbose: bool = False):
-    """Drop every connected component of ``map_.road_map`` that contains no start/goal node.
+def process_single_case_gnn_task(task: Tuple[Path, str, str], config: Dict):
+    """Load one task's roadmap and turn it into the model's input graph.
 
-    Pruning (e.g. ``prune_map``) thresholds nodes independently and never checks connectivity, so an
-    aggressive cut can leave small components / isolated nodes ("islands") detached from the main
-    network. Islands with no start and no goal node are unreachable dead weight; this removes them
-    while keeping every component that holds at least one start/goal anchor.
-
-    Returns ``(pruned_map, kept_indices)``. Falls back to keeping the single largest component (with
-    a warning) when the graph has no start/goal anchors at all. No-op (returns ``map_`` unchanged)
-    when every node already lies in an anchored component.
-    """
-    n = len(map_.nodes)
-    if n == 0:
-        return map_, np.array([], dtype=int)
-
-    # Undirected adjacency (road_map is symmetric, but mirror defensively).
-    adj = [set() for _ in range(n)]
-    for i, nbrs in enumerate(map_.road_map):
-        for j in nbrs:
-            if 0 <= j < n:
-                adj[i].add(j)
-                adj[j].add(i)
-
-    # Connected components via iterative BFS/stack.
-    comp_id = [-1] * n
-    components = []
-    for s in range(n):
-        if comp_id[s] != -1:
-            continue
-        cid = len(components)
-        stack = [s]
-        comp_id[s] = cid
-        members = []
-        while stack:
-            x = stack.pop()
-            members.append(x)
-            for w in adj[x]:
-                if comp_id[w] == -1:
-                    comp_id[w] = cid
-                    stack.append(w)
-        components.append(members)
-
-    anchors = set(map_.start_nodes_index.values()) | set(map_.goal_nodes_index.values())
-
-    if anchors:
-        keep_cids = {comp_id[a] for a in anchors if 0 <= a < n}
-    else:
-        # No start/goal anchors: keep the single largest component.
-        largest = max(range(len(components)), key=lambda c: len(components[c]))
-        keep_cids = {largest}
-        print("  WARNING: remove_disconnected_islands found no start/goal anchors; "
-              "keeping the largest component only.")
-
-    kept_indices = sorted(i for i in range(n) if comp_id[i] in keep_cids)
-
-    if verbose:
-        dropped = [len(c) for ci, c in enumerate(components) if ci not in keep_cids]
-        print(f"  islands: {len(components)} components; keeping {len(keep_cids)} "
-              f"(anchored), dropping {len(dropped)} (sizes {sorted(dropped, reverse=True)[:10]}"
-              f"{'...' if len(dropped) > 10 else ''}); nodes {n} -> {len(kept_indices)}")
-
-    if len(kept_indices) == n:
-        return map_, np.arange(n, dtype=int)
-
-    pruned_map = map_.create_pruned_copy(np.asarray(kept_indices, dtype=int))
-    return pruned_map, np.asarray(kept_indices, dtype=int)
-
-def process_single_case_gnn_task(
-        task: Tuple[Path, str],
-        config: Dict,
-    ) -> int:
-    """
-    Load graph_sampler.pkl for one case, run GNN inference for each permutation, save predictions.
-
-    Args:
-        task: Tuple[Path, str].
-        model: Loaded GNN model (eval mode).
-        config: Config with bounds, resolution, etc.
-        device: Device to run inference on.   
-        gnn_folder_name: Output folder name (e.g. gatv2_z447mk1j).
-        prune_mechanism: Prune mechanism.
-        k_hop: Number of hops to prune.
-
-    Returns:
-        Number of tasks processed.
-    """
-    input_file, graph_dir, graph_file_name = task[0], task[1], task[2]
-    graph_file = get_graph_file_path(graph_dir, graph_file_name)
+    ``task``: ``(input_file, graph_dir, graph_file_name)``; ``config``: the map config (``bounds``,
+    ``resolution``). Returns ``(graph_file, data, map_, (load_seconds, normalize_seconds))``, or None when
+    the graph file does not exist."""
+    graph_file = get_graph_file_path(task[1], task[2])
     if not graph_file.exists():
-        return 0
+        return None
 
-    bounds = config.get("bounds", [[0, 32.0], [0, 32.0]])
-    resolution = config.get("resolution", 1.0)
     t0 = time.perf_counter()
-    map_ = GraphSampler(bounds=bounds, resolution=resolution, start=[], goal=[])
-    map_.load_graph_sampler(str(graph_file), args={"use_constraint_sweep": False})
+    map_ = GraphSampler(bounds=config["bounds"], resolution=config["resolution"], start=[], goal=[])
+    map_.load_graph_sampler(str(graph_file), args={"use_collision_sweep": False})
     t_load = time.perf_counter() - t0  # unpickle the source roadmap
     t0 = time.perf_counter()
     data = normalize_data(map_)
@@ -660,107 +334,86 @@ def process_gnn_task_batch(
     gnn_folder_name: str,
     prune_mechanism: Optional[dict] = None,
     load_time_list: Optional[List[Tuple[float, float]]] = None,
+    threshold_model: Optional[torch.nn.Module] = None,
     ):
     """Run GNN inference on a batch of graphs and save predictions / pruned roadmaps.
 
+    ``threshold_model`` (the run's threshold GNN) gives each graph its own cut-off, used when the prune
+    mechanism has ``prune_gnn``; it is applied as in training (``normalize_threshold``).
     ``load_time_list`` (per graph, ``(load_seconds, normalize_seconds)`` measured in
     process_single_case_gnn_task) feeds the ``<pruned pickle stem>_runtime.yaml`` sidecar
     written next to every pruned roadmap. Batched forward passes are attributed to the
     graphs as an even share of the batch time (``batch_size`` is recorded so it can be undone).
     """
     n_graphs = len(data_list)
-    data = Batch.from_data_list(data_list)
-    data = data.to(device)
-    edge_attr_dict = data.edge_attr_dict
+    data = Batch.from_data_list(data_list).to(device)
     t0 = time.perf_counter()
     with torch.no_grad():
-        try:
-            out = model(data.x_dict, data.edge_index_dict, edge_attr_dict)
-        except TypeError:
-            out = model(data.x_dict, data.edge_index_dict)
+        out = model(data.x_dict, data.edge_index_dict, data.edge_attr_dict, data.batch_dict)
     t_infer = time.perf_counter() - t0
-    t_thr = 0.0
+    pred = out["node"].cpu().numpy()
 
-    if isinstance(out, dict):
-        pred = out["node"].cpu().numpy()
-    else:
-        pred = out.cpu().numpy()    
-
-    prune_gnn = prune_mechanism.get('prune_gnn', False)
-    threshold_values = None
-    if prune_gnn:
+    prune_name = get_prune_mechanism_folder(prune_mechanism) if prune_mechanism is not None else ""
+    threshold_values, t_thr = None, 0.0
+    if prune_name and prune_mechanism.get('prune_gnn', False):
+        if threshold_model is None:
+            raise ValueError("prune_gnn needs the run's threshold model")
         t0 = time.perf_counter()
-        x_dict = get_threshold_x_dict(data.x_dict,out)  
         with torch.no_grad():
-            threshold = prune_gnn(x_dict, data.edge_index_dict,data.edge_attr_dict,data.batch_dict)
-        # threshold = normalize_threshold(threshold, data.batch_dict, out, 'node')
+            threshold = threshold_model(get_threshold_x_dict(data.x_dict, out), data.edge_index_dict,
+                                        data.edge_attr_dict, data.batch_dict)
+            threshold = normalize_threshold(threshold, data.batch_dict, out, 'node')
         threshold_values = threshold.cpu().numpy()
         t_thr = time.perf_counter() - t0
 
-    unbatched_indices = []
-    unbatched_max_ind = 0
-    for ii in range(len(data_list)):
-        unbatched_indices.append(unbatched_max_ind+np.arange(len(data_list[ii]["node"]["x"])))
-        unbatched_max_ind += len(data_list[ii]["node"]["x"])
-    
-    for ii in range(len(unbatched_indices)):
-        unbatched_ind = unbatched_indices[ii]
-        unbatched_pred = pred[unbatched_ind]
-        graph_file = graph_file_list[ii]
-        map_ = map_list[ii]
-    
+    offsets = np.cumsum([0] + [len(d["node"]["x"]) for d in data_list])
+    for ii, (graph_file, map_) in enumerate(zip(graph_file_list, map_list)):
+        unbatched_pred = pred[offsets[ii]:offsets[ii + 1]]
         gnn_sampler_path = generate_gnn_sampler_path(graph_file.parent, gnn_folder_name)
-        prediction_file = get_prediction_file_path(gnn_sampler_path)
-        np.save(prediction_file, unbatched_pred)
+        np.save(get_prediction_file_path(gnn_sampler_path), unbatched_pred)
+        if not prune_name:                     # no prune mechanism (or an empty one): predictions only
+            continue
 
-        if prune_mechanism is not None:
-            # Get the prune function & value -> save as npy file
-            prune_name = get_prune_mechanism_folder(prune_mechanism)
-            if prune_name == "":
-                continue  # (was `return`, which silently skipped the rest of the batch)
-            prune_fn = get_prune_function(prune_mechanism)
-            k_hop = prune_mechanism.get('k_hop', 0)
-            threshold_value = threshold_values[ii] if threshold_values is not None else 0
+        prune_fn = get_prune_function(prune_mechanism)
+        threshold_value = threshold_values[ii] if threshold_values is not None else 0
+        t0 = time.perf_counter()
+        prune_value = prune_fn(unbatched_pred, threshold_value)
+        num_nodes = len(map_.nodes)
+        map_pruned, _ = prune_map(map_, prune_value, prune_mechanism.get('k_hop', 0))
+        t_prune = time.perf_counter() - t0
 
-            t0 = time.perf_counter()
-            prune_value = prune_fn(unbatched_pred, threshold_value)
-            map_pruned, kept_indices = prune_map(map_, prune_value, k_hop)
-            t_prune = time.perf_counter() - t0
+        t0 = time.perf_counter()
+        np.save(get_prediction_file_path(gnn_sampler_path, prune_name), prune_value)
+        pruned_graph_name = f"graph_sampler_{prune_name}.pkl"
+        map_pruned.save_graph_sampler(get_graph_file_path(gnn_sampler_path, pruned_graph_name))
+        t_save = time.perf_counter() - t0
 
-            t0 = time.perf_counter()
-            prediction_file = get_prediction_file_path(gnn_sampler_path, prune_name)
-            np.save(prediction_file, prune_value)
-            pruned_graph_name = f"graph_sampler_{prune_name}.pkl"
-            pruned_graph_file = get_graph_file_path(gnn_sampler_path, pruned_graph_name)
-            map_pruned.save_graph_sampler(pruned_graph_file)
-            t_save = time.perf_counter() - t0
-
-            t_load, t_normalize = (
-                (float(load_time_list[ii][0]), float(load_time_list[ii][1]))
-                if load_time_list is not None else (0.0, 0.0)
-            )
-            breakdown = {
-                "load": t_load,
-                "normalize": t_normalize,
-                "inference": t_infer / n_graphs,
-                "threshold": t_thr / n_graphs,
-                "prune": t_prune,
-                "save": t_save,
-            }
-            write_runtime_yaml(
-                get_graph_runtime_file_path(gnn_sampler_path, pruned_graph_name),
-                {
-                    "prune_name": prune_name,
-                    "source_graph": graph_file.name,
-                    "runtime": sum(breakdown.values()),
-                    "runtime_breakdown": breakdown,
-                    "batch_size": n_graphs,
-                    "device": str(device),
-                    "num_nodes": len(map_pruned.nodes),
-                    "num_edges": len(map_pruned.edges),
-                    "source_num_nodes": len(map_.nodes),
-                },
-            )
+        t_load, t_normalize = (
+            (float(load_time_list[ii][0]), float(load_time_list[ii][1]))
+            if load_time_list is not None else (0.0, 0.0)
+        )
+        breakdown = {
+            "load": t_load,
+            "normalize": t_normalize,
+            "inference": t_infer / n_graphs,
+            "threshold": t_thr / n_graphs,
+            "prune": t_prune,
+            "save": t_save,
+        }
+        write_runtime_yaml(
+            get_graph_runtime_file_path(gnn_sampler_path, pruned_graph_name),
+            {
+                "prune_name": prune_name,
+                "source_graph": graph_file.name,
+                "runtime": sum(breakdown.values()),
+                "runtime_breakdown": breakdown,
+                "batch_size": n_graphs,
+                "device": str(device),
+                "num_nodes": len(map_pruned.nodes),
+                "num_edges": len(map_pruned.edges),
+                "source_num_nodes": num_nodes,
+            },
+        )
 
 def create_gnn_map_tasks(
         tasks,
@@ -774,18 +427,18 @@ def create_gnn_map_tasks(
         verbose: bool = True,
     ) -> None:
     """
-    Load all graph_sampler.pkl under path, normalize to HeteroData, run GNN inference,
-    and save predictions into a folder named {model_type}_{run_id} alongside grid/prm/planar.
+    For every task's roadmap: run GNN inference, save the predictions and (with a prune mechanism) the
+    pruned roadmap, in a folder named {model_type}_{run_id} next to the source graph.
 
     Args:
-        path: Base path for dataset (e.g. .../map32.0x32.0_resolution1.0/agents4_obst0.1).
-        num_cases: Number of cases to process (case_0 .. case_{num_cases-1}).
-        map_config: Configuration with bounds, resolution, etc. (used for GraphSampler and sample_data).
+        tasks: ``(input_file, graph_dir, graph_file_name)`` per roadmap (``collect_graph_tasks``).
+        map_config: The map's ``bounds`` and ``resolution``.
         run_folder: Wandb run folder (e.g. logs/.../wandb/run-20260217_062327-z447mk1j).
         checkpoint_path: Path to model .pth (use with config_path when run_folder is None).
         config_path: Path to config.yaml (use with checkpoint_path when run_folder is None).
         run_id: Optional run ID for folder name; inferred from run_folder if not set.
-        road_map_type: Road map type to load graphs from (grid, prm, planar). Default from config.
+        prune_mechanism: See ``create_prune_mechanism``; None saves the predictions only.
+        batch_size: Graphs per forward pass.
         verbose: Whether to print progress.
     """
     if len(tasks) == 0:
@@ -793,69 +446,45 @@ def create_gnn_map_tasks(
             print("No tasks to process.")
         return
 
-    input_file, graph_dir, graph_file_name = tasks[0][0], tasks[0][1], tasks[0][2]
-    graph_file = get_graph_file_path(graph_dir, graph_file_name)
-
     if verbose:
         print("GNN evaluation: preparing model and task execution...")
 
-    if not graph_file.exists():
-        raise FileNotFoundError(f"Graph file not found: {graph_file}")
+    first = process_single_case_gnn_task(tasks[0], map_config)
+    if first is None:
+        raise FileNotFoundError(f"Graph file not found: {get_graph_file_path(tasks[0][1], tasks[0][2])}")
+    sample_data = first[1]
 
-    _, _, _, gnn_folder_name = get_gnn_paths(
-        run_folder=run_folder,
-        checkpoint_path=checkpoint_path,
-        config_path=config_path,
-        run_id=run_id,
-    )
+    load_args = dict(run_folder=run_folder, checkpoint_path=checkpoint_path, config_path=config_path,
+                     run_id=run_id, sample_data=sample_data)
+    model, train_config, device, gnn_folder_name = load_gnn_model(**load_args)
+    threshold_model = None
+    if prune_mechanism is not None and prune_mechanism.get('prune_gnn', False):
+        if not train_config.get('threshold', {}).get('use', False):
+            raise ValueError("prune_gnn is set, but this run was trained without a threshold model "
+                             "(threshold.use is off in its config)")
+        threshold_model, _, _, _ = load_gnn_model(**load_args, model_name_suffix="threshold")
 
     if verbose:
         print(f"GNN folder name: {gnn_folder_name}, processing {len(tasks)} tasks...")
 
-    bounds = map_config.get("bounds", [[0, 32.0], [0, 32.0]])
-    resolution = map_config.get("resolution", 1.0)
-    map_ = GraphSampler(bounds=bounds, resolution=resolution, start=[], goal=[])
-    map_.load_graph_sampler(str(graph_file))
-    sample_data = normalize_data(map_)
+    batch = []                                   # (graph_file, data, map_, load times) of the graphs waiting
 
-    model, train_config, device, gnn_folder_name = load_gnn_model(
-        run_folder=run_folder,
-        checkpoint_path=checkpoint_path,
-        config_path=config_path,
-        run_id=run_id,
-        sample_data=sample_data,
-    )
-    threshold_model = None
-    if train_config['threshold']['use']:
-        threshold_model, _, _, _ = load_gnn_model(
-            run_folder=run_folder,
-            checkpoint_path=checkpoint_path,
-            config_path=config_path,
-            run_id=run_id,
-            sample_data=sample_data,
-            model_name_suffix="threshold",
-        )
-        prune_gnn = prune_mechanism.get('prune_gnn', False)
-        if prune_gnn:
-            prune_mechanism['prune_gnn'] = threshold_model
-    merged_config = {**map_config, **train_config}
+    def flush():
+        if batch:
+            graph_files, data_list, map_list, load_times = map(list, zip(*batch))
+            process_gnn_task_batch(graph_files, data_list, map_list, model, device, gnn_folder_name,
+                                   prune_mechanism, load_time_list=load_times, threshold_model=threshold_model)
+            batch.clear()
 
-    data_list = []
-    map_list = []
-    graph_file_list = []
-    load_time_list = []
-    for task in tqdm(tasks, desc="GNN tasks", disable=not verbose):
-        graph_file, data, map_, t_load_norm = process_single_case_gnn_task(task, merged_config)
-        data_list.append(data)
-        graph_file_list.append(graph_file)
-        map_list.append(map_)
-        load_time_list.append(t_load_norm)
-        if len(data_list) >= batch_size or task == tasks[-1]:
-            process_gnn_task_batch(graph_file_list, data_list, map_list, model, device, gnn_folder_name, prune_mechanism, load_time_list=load_time_list)
-            data_list = []
-            map_list = []
-            graph_file_list = []
-            load_time_list = []
+    for k, task in enumerate(tqdm(tasks, desc="GNN tasks", disable=not verbose)):
+        loaded = first if k == 0 else process_single_case_gnn_task(task, map_config)
+        if loaded is None:
+            print(f"Graph file not found, skipped: {get_graph_file_path(task[1], task[2])}")
+            continue
+        batch.append(loaded)
+        if len(batch) >= batch_size:
+            flush()
+    flush()
 
     if verbose:
         print(f"GNN evaluation complete: {len(tasks)} tasks saved under */{gnn_folder_name}/")

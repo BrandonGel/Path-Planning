@@ -1,115 +1,214 @@
-from typing import Any, List, Tuple
-import heapq
+from typing import List, Tuple
+import os
 import numpy as np
-from path_planning.common.environment.map.halton import halton_sampling
-from scipy.spatial import KDTree, Delaunay
-from scipy.ndimage import map_coordinates
 from path_planning.common.environment.node import Node
-from python_motion_planning.common.env.map.grid import Grid, GridTypeMap
-from scipy.spatial.distance import cdist
-from itertools import product
+from python_motion_planning.common.env.map.grid import GridTypeMap
 from python_motion_planning.common import TYPES
-from path_planning.utils.cgal_sweep import CGAL_Sweep
-from path_planning.common.environment.map.cdt import get_boundary, get_planar_graph
-from path_planning.global_planner.sample_search.rrg import RRG
-import faiss
+from path_planning.agent import Agent
+from path_planning.common.world.collision_checking.collision_sweep import CollisionSweep
+from path_planning.common.world.collision_checking.sweep.disc_sweep import (
+    sweep_paths as _disc_sweep_paths, assemble as _assemble_hits, per_agent as _per_agent,
+    as_path_list)
+from path_planning.common.world.collision_checking.sweep.polytope_sweep import (
+    make_body, body_roadmap_hits, body_roadmap_hits_minkowski)
+from path_planning.common.environment.map.graph_sampler_base import GraphSamplerBase, ROADMAP_TYPES, validate_roadmap_type, snap_to_cell_centers  # re-exported: cluster_map, ctopprm, dataset_ground_truth_map import them from here
+from path_planning.common.environment.roadmap.roadmap_base import RoadmapConfig
+from path_planning.common.environment.node_sampler.node_sampler import NodeSampler
+from path_planning.common.utils.geometry import GeometryNumpy as Geometry
+from path_planning.common.environment.roadmap.roadmap import Roadmap
+
 import pickle
-
-ROADMAP_TYPES = set(["grid","prm","cdt","rrg","midpoints","centroids","voronoi","halton"])
-def validate_roadmap_type(roadmap_type: str):
-    if roadmap_type not in ROADMAP_TYPES:
-        return False
-    return True
-def snap_to_cell_centers(map_, points) -> np.ndarray:
-    """Vectorised map_to_world(world_to_map(p, discrete=True)): snap world points to
-    the centres of the cells containing them (clamped to the grid), the frame all
-    discrete-space roadmap nodes are stored in."""
-    pts = np.asarray(points, dtype=float)
-    b = np.asarray(map_.bounds, dtype=float)[:, 0]
-    res = float(map_.resolution)
-    idx = np.round((pts - b) / res - 0.5 + 1e-10)
-    idx = np.clip(idx, 0, np.asarray(map_.shape, dtype=float) - 1)
-    return b + res * (idx + 0.5)
+import zlib
 
 
-class GraphSampler(Grid):
-    def __init__(self,*args,start,goal,sample_num=0,num_neighbors = 13.0, min_edge_len = 1e-10, max_edge_len = 30.0,goal_sample_rate=0.1,use_discrete_space=True,use_constraint_sweep=True,record_sweep=True,use_exact_collision_check=True,use_dijkstra=True,sampling_dist_dict = {},sweep_backend="auto",**kwargs):
+def _pack_array(a: np.ndarray) -> dict:
+    """``a`` zlib-compressed (the type map is mostly free cells: ~200x smaller), for the pickle."""
+    a = np.ascontiguousarray(a)
+    return {"shape": a.shape, "dtype": a.dtype.str, "zlib": zlib.compress(a.tobytes(), 6)}
+
+
+def _unpack_array(d: dict) -> np.ndarray:
+    return np.frombuffer(zlib.decompress(d["zlib"]), dtype=np.dtype(d["dtype"])).reshape(d["shape"]).copy()
+
+
+def _agent_fields(agents):
+    """``(shapes, max_speeds, max_rotations, clearances)`` lists of ``agents``."""
+    return ([a.shape for a in agents], [a.max_speed for a in agents], [a.max_rotation for a in agents],
+            [a.clearance for a in agents])
+
+
+class GraphSampler(GraphSamplerBase):
+    def __init__(self, *args, start, goal, roadmap_config: "dict | RoadmapConfig | str | None" = None,
+                 use_discrete_space=True, use_collision_sweep=True, sampling_dist_dict: "dict | None" = None,
+                 sweep_backend="auto", sweep_spatial_index="grid", **kwargs):
         super().__init__(*args, **kwargs)
 
-        # Check if start and goal are lists, non-empty, and not None
-        assert start is not None, "Start must not be None"
-        assert goal is not None, "Goal must not be None"
         assert isinstance(start, list), "Start must be a list"
         assert isinstance(goal, list), "Goal must be a list"
-        self.start = start
-        self.goal = goal
-        self.grid_points = []
-        self.boundary_points = []
-        self.obstacles = []
-        self.obs_size = 0.5
-        self.inflation_radius = 0.0
-        self.sample_num = sample_num
-        self.num_total_nodes = self.sample_num + len(self.start) + len(self.goal)
-        self.num_neighbors = num_neighbors
-        self.min_edge_length = min_edge_len
-        self.max_edge_length = max_edge_len
-        self.goal_sample_rate = goal_sample_rate
-        self.cost_matrix = None
-        self.node_index_dict = {}
-        self.start_nodes_index = {}
-        self.goal_nodes_index = {}
-        self.grid_nodes_index = {}
-        self.boundary_nodes_index = {}
-        self.start_to_all_edges_dict = {}
-        self.goal_to_all_edges_dict = {}
-        self.nodes = []
+        self.set_start(start)
+        self.set_goal(goal)
+        # Roadmap parameters (sample_num, num_neighbors, edge band, RRG rates,
+        # ...) live in one RoadmapConfig: a dict, a RoadmapConfig or the path of
+        # a YAML file such as config/roadmap.yaml; see set_roadmap_config.
+        self.node_sampler = NodeSampler(self, sampling_dist_dict=sampling_dist_dict)      # reads the map live; see NodeSampler
+        self.roadmap = Roadmap(self, config=roadmap_config)
         self.obstacle_nodes = []
-        self.track_with_link = False
-        self.road_map = []
-        self.road_map_edge_weights = []
+
         self.use_discrete_space = use_discrete_space
-        self.edges = []
-        self.edge_indices_dict = {}
-        self.edge_weights = []
-        self.use_constraint_sweep = use_constraint_sweep
-        self.record_sweep = record_sweep
-        self.use_exact_collision_check = use_exact_collision_check
+
+        self._reset_edge_caches()
+
+        self.use_collision_sweep = use_collision_sweep
         self.sweep_backend = sweep_backend
-        self.constraint_sweep = self._make_constraint_sweep()
-        self.sample_kd_tree = None
-        self.use_dijkstra = use_dijkstra
-        self.sampling_dist_dict = sampling_dist_dict if sampling_dist_dict else {}
-        # Task endpoints, world coords. Visualization-only metadata (no roadmap
-        # side effects), populated via set_endpoints() for e.g. MAPD demos.
+        self.sweep_spatial_index = sweep_spatial_index
+        self.collision_sweep = self._make_collision_sweep()
+        self._collision_sweep_signature = None    # roadmap fingerprint the sweep is bound to
+        self._node_current_tuples = []            # node positions, for keying get_collision_sweep results
+        self.sweep_version = 0                    # bumped on every bind; planner sweep caches key on it
+
         self.pickups = []
         self.deliveries = []
         self.parking = []
 
-    def __str__(self) -> str:
-        return "Graph Sampler"
+    # ------------------------------------------------------------ Class Properties
 
     @property
-    def size(self) -> int:
-        return int(np.prod(self.type_map.shape))
+    def roadmap_config(self) -> RoadmapConfig:
+        """The roadmap parameters: the config of ``self.roadmap`` (one object,
+        so the sampler and its builders never disagree)."""
+        return self.roadmap.config
 
-    def set_parameters(self, sample_num, num_neighbors, min_edge_len=1e-10, max_edge_len=1.0+1e-10):
-        self.sample_num = sample_num
-        self.num_neighbors = num_neighbors
-        self.min_edge_length = min_edge_len
-        self.max_edge_length = max_edge_len
+    @property
+    def road_map_edge_weights(self) -> List[List[float]]:
+        return self.roadmap.roadmap_weights
+
+    @property
+    def roadmap_edges(self) -> List[List[int]]:
+        return self.roadmap.roadmap_edges
+
+    @property
+    def road_map(self) -> List[List[int]]:
+        """Alias of ``roadmap_edges``: the per-node neighbour lists under the
+        name planners, scripts and pickles read. Built afresh on every access
+        (callers may modify them): read it once, or use ``neighbors`` in loops."""
+        return self.roadmap_edges
+
+    def neighbors(self, u: int) -> np.ndarray:
+        """Node indices ``u`` has an edge to, in ``road_map[u]`` order: a read-only view of the adjacency,
+        costing nothing to build."""
+        return self.roadmap.neighbors(u)
+
+    @property
+    def edges(self) -> List[Tuple[int, int]]:
+        return self.roadmap.edges
+
+    @property
+    def edge_weights(self) -> List[float]:
+        return self.roadmap.edge_weights
+
+    @property
+    def nodes(self) -> List[Node]:
+        return self.node_sampler.nodes
+
+    @property
+    def position(self) -> np.ndarray:
+        return self.node_sampler.position
+
+    @property
+    def pos_index_dict(self) -> dict:
+        """Position tuple -> node index (the sampler's registry)."""
+        return self.node_sampler.pos_index_dict
+
+    @property
+    def points_index_dict(self) -> dict:
+        """Kind name -> ``Node -> index`` dict (the sampler's registry)."""
+        return self.node_sampler.points_index_dict
+
+    @property
+    def num_total_nodes(self) -> int:
+        return self.node_sampler.num_total_nodes
+
+    @property
+    def start_nodes_index(self) -> dict:
+        """``Node -> index`` of the start nodes: the sampler's ``'start_points'`` kind."""
+        return self.points_index_dict.get('start_points', {})
+
+    @property
+    def goal_nodes_index(self) -> dict:
+        """``Node -> index`` of the goal nodes: the sampler's ``'goal_points'`` kind."""
+        return self.points_index_dict.get('goal_points', {})
+
+    @property
+    def boundary_nodes_index(self) -> dict:
+        """``Node -> index`` of the boundary nodes: the sampler's ``'boundary_points'`` kind."""
+        return self.points_index_dict.get('boundary_points', {})
+
+    @property
+    def start_nodes(self) -> List[Node]:
+        return self.node_sampler.get_nodes(index_type='start_points')
+
+    @property
+    def goal_nodes(self) -> List[Node]:
+        return self.node_sampler.get_nodes(index_type='goal_points')
+
+    # ------------------------------------------------------------ Nodes Methods
+    def generateRandomNodes(self,sample_num: int = None, generate_grid_nodes = False, generate_boundary_nodes = False, prob_map = None, samp_from_prob_map_ratio = 0.5, roadmap_type: str = None):
+        """Reset ``node_sampler`` and sample this map's node set (see
+        ``NodeSampler.sample_nodes`` for the options); ``nodes``,
+        ``pos_index_dict`` and the index dicts are views over the sampler, so
+        nothing is copied here. ``sample_num`` (default
+        ``roadmap_config.sample_num``) random nodes: Halton when
+        ``roadmap_type`` contains ``halton``, prob-map weighted when
+        ``prob_map`` is given, uniform otherwise. Then, in order: every
+        expandable cell centre (``generate_grid_nodes``, into the sample
+        kind), the outline of free space (``generate_boundary_nodes``), the
+        start and goal positions, and when no outline was generated the
+        existing nodes next to a wall are marked as boundary nodes instead.
+        ``rrg`` roadmaps sample their own nodes, so nothing is generated for
+        them.
+
+        Returns:
+            nodes: the map's node list (``self.nodes``).
+        """
+        if roadmap_type == 'rrg':
+            return []
+        if roadmap_type is not None and 'halton' in roadmap_type:
+            sampling_type = 'halton'
+        elif prob_map is not None:
+            sampling_type = 'distributed'
+        else:
+            sampling_type = 'random'
+        self.node_sampler.reset()
+        self.node_sampler.sample_nodes(
+            n_samples=sample_num if sample_num is not None else self.roadmap_config.sample_num,
+            start_list=self.start,
+            goal_list=self.goal,
+            generate_grid_nodes=generate_grid_nodes,
+            generate_boundary_nodes=generate_boundary_nodes,
+            prob_map=prob_map,
+            samp_from_prob_map_ratio=samp_from_prob_map_ratio,
+            sampling_type=sampling_type,            # halton / distributed parameters: node_sampler.sampling_dist_dict
+        )
+        return self.nodes
+
+    def get_nodes(self, points: List[tuple] | np.ndarray | None = None, index_dict: dict | None = None, index_type: str = '') -> List[Node]:
+        return self.node_sampler.get_nodes(points, index_dict, index_type)
 
     def set_start(self, start):
+        """Set the start positions (world coordinates) and mark their cells ``TYPES.START``."""
         self.start = start
-        start_pixel = [self.world_to_map(s,discrete=True) for s in start]
-        for s in start_pixel:
-            self.type_map[tuple(s)] = TYPES.START
-        
+        self._mark_cells(start, TYPES.START)
+
     def set_goal(self, goal):
+        """Set the goal positions (world coordinates) and mark their cells ``TYPES.GOAL``."""
         self.goal = goal
-        goal_pixel =  [self.world_to_map(g,discrete=True) for g in goal]
-        for g in goal_pixel:
-            self.type_map[tuple(g)] = TYPES.GOAL
-    
+        self._mark_cells(goal, TYPES.GOAL)
+
+    def _mark_cells(self, points, cell_type):
+        """Set the type-map cell under each world point to ``cell_type``."""
+        for p in points:
+            self.type_map[tuple(self.world_to_map(p, discrete=True))] = cell_type
+
     def set_endpoints(self, pickups=None, deliveries=None, parking=None):
         """Store task endpoints (world coords) for visualization only.
 
@@ -121,1554 +220,598 @@ class GraphSampler(Grid):
         self.deliveries = list(deliveries) if deliveries is not None else []
         self.parking = list(parking) if parking is not None else []
 
-    def get_start_nodes(self) -> List[Node]:
-        return [self.nodes[i] for i in self.start_nodes_index.values()]
-    
-    def get_goal_nodes(self) -> List[Node]:
-        return [self.nodes[i] for i in self.goal_nodes_index.values()]
-    
-    def get_grid_nodes(self) -> List[Node]:
-        return [self.nodes[i] for i in self.grid_nodes_index.values()]
+    def _index_of(self, p) -> int:
+        """Node index of a world point (exact match in ``pos_index_dict``). An
+        integer passes through. Raises ``KeyError`` when the point is not a
+        roadmap node."""
+        if isinstance(p, (int, np.integer)):
+            return int(p)
+        idx = self.pos_index_dict.get(tuple(p) if isinstance(p, (list, np.ndarray)) else p)
+        if idx is not None:
+            return int(idx)
+        raise KeyError(f"point {tuple(float(x) for x in np.asarray(p).reshape(-1))} is not a roadmap node")
 
-    def get_boundary_nodes(self) -> List[Node]:
-        return [self.nodes[i] for i in self.boundary_nodes_index.values()]
+    # ------------------------------------------------------------ Roadmap  Methods
+    def set_roadmap_config(self, config: "dict | RoadmapConfig | str | None" = None, **fields) -> RoadmapConfig:
+        """Replace or update the roadmap parameters.
 
-    def get_obstacle_boundary(self):
-        """Obstacle/inflation boundary geometry from the CDT extraction
-        (path_planning.common.environment.map.cdt.get_boundary): merged wall
-        corners/junctions plus the enclosing map rectangle.
-
-        Returns (boundary_points (N,2), boundary_segments (M,2) index pairs,
-        holes: one interior point per obstacle component)."""
-        mask = (self.type_map.data == TYPES.OBSTACLE) | (self.type_map.data == TYPES.INFLATION)
-        return get_boundary(self, mask)
-
-    def get_inflated_obstacles(self):
-        return [tuple(int(p) for p in row) for row in np.argwhere(self.type_map.data == TYPES.INFLATION)]
-
-    @staticmethod
-    def resample_boundary(bnd_pts: np.ndarray, bnd_segs: np.ndarray, spacing: float) -> np.ndarray:
-        """Boundary vertices plus points every ``spacing`` along each segment.
-
-        Every segment of length L gets ``round(L / spacing)`` equal
-        subdivisions (at least one), so when ``spacing`` divides the wall
-        lengths (e.g. ``spacing == resolution`` on a rectilinear boundary)
-        the interior points land exactly on the cell corners. Corner /
-        junction vertices come first, in their original order, followed by
-        the interior points; duplicates (shared corners) are dropped.
+        A ``RoadmapConfig`` or a YAML path replaces the current config. A dict
+        and/or keyword fields (``sample_num``, ``num_neighbors``,
+        ``min_edge_length``, ``max_edge_length``, ``goal_sample_rate``, ...)
+        are applied on top of the current values. This is the one mutator:
+        ``roadmap_config`` is a read-only view of ``self.roadmap.config``.
+        (``num_total_nodes`` is the live node count, not ``sample_num``.)
         """
-        pts = np.asarray(bnd_pts, dtype=float)
-        out = [tuple(float(v) for v in p) for p in pts]
-        seen = {tuple(round(float(v), 8) for v in p) for p in out}
-        for u, v in np.asarray(bnd_segs, dtype=int).tolist():
-            a, b = pts[u], pts[v]
-            length = float(np.linalg.norm(b - a))
-            n = max(int(round(length / spacing)), 1)
-            for k in range(1, n):
-                q = a + (b - a) * (k / n)
-                key = tuple(round(float(x), 8) for x in q)
-                if key in seen:
-                    continue
-                seen.add(key)
-                out.append(tuple(float(x) for x in q))
-        return np.asarray(out, dtype=float)
-
-    def _rebuild_boundary_nodes_index(self):
-        """Re-point boundary_nodes_index at the current node registry (node
-        indices shift whenever nodes are re-registered); boundary points not
-        present as nodes are dropped from the index but kept in boundary_points."""
-        self.boundary_nodes_index = {}
-        for point in self.boundary_points:
-            node = Node(tuple(point), None, 0, 0)
-            if node in self.node_index_dict:
-                self.boundary_nodes_index[node] = self.node_index_dict[node]
-
-    def get_random_nodes(self) -> List[Node]:
-        if len(self.nodes) >= self.sample_num:
-            return self.nodes[:self.sample_num]
-        print("Warning: number of nodes is less than sample num")
-        return self.nodes
-
-    def get_nodes(self) -> List[Node]:
-        return self.nodes
-    
-    def get_node_index(self, node: Node) -> int:
-        return self.node_index_dict[node]
-
-    def _dijkstra(self, source: int) -> List[Tuple[int, float]]:
-        n = len(self.nodes)
-        INF = float("inf")
-        dist = [INF] * n
-        dist[source] = 0.0
-        heap = [(0.0, source)]
-        while heap:
-            d, u = heapq.heappop(heap)
-            if d > dist[u]:
-                continue
-            for v in self.road_map[u]:
-                key = (u, v)
-                if key not in self.edge_indices_dict:
-                    continue
-                w = self.edge_weights[self.edge_indices_dict[key]]
-                nd = d + w
-                if nd < dist[v]:
-                    dist[v] = nd
-                    heapq.heappush(heap, (nd, v))
-        return [(v, dist[v]) for v in range(n) if dist[v] < float("inf")]
-
-    def get_start_nodes_with_all_edges(self):
-        if len(self.start_to_all_edges_dict) > 0:
-            return self.start_to_all_edges_dict
-        if (
-            len(self.nodes) == 0
-            or self.road_map is None
-            or len(self.road_map) != len(self.nodes)
-        ):
-            raise ValueError("Edges have not been generated yet. Please generate the roadmap first.")
-        u_indices = [self.start_nodes_index[node] for node in self.get_start_nodes()]
-        if self.use_dijkstra:
-            self.start_to_all_edges_dict = {u: self._dijkstra(u) for u in u_indices}
+        if isinstance(config, (str, os.PathLike)):
+            config = RoadmapConfig.from_yaml(config)
+        if isinstance(config, RoadmapConfig):
+            if fields:
+                raise TypeError("set_roadmap_config: pass either a RoadmapConfig / YAML path or fields, not both")
+            self.roadmap.config = config
         else:
-            self.start_to_all_edges_dict = {u: [(v,self.get_cost(self.nodes[u],self.nodes[v])) for v in range(len(self.nodes))] for u in u_indices}
-        return self.start_to_all_edges_dict
+            merged = self.roadmap_config.as_dict()
+            merged.update(config or {})
+            merged.update(fields)
+            self.roadmap.config = RoadmapConfig(merged)
+        return self.roadmap_config
 
-    def get_goal_nodes_with_all_edges(self):
-        if len(self.goal_to_all_edges_dict) > 0:
-            return self.goal_to_all_edges_dict
-        if (
-            len(self.nodes) == 0
-            or self.road_map is None
-            or len(self.road_map) != len(self.nodes)    
-        ):
-            raise ValueError("Edges have not been generated yet. Please generate the roadmap first.")
-        u_indices = [self.goal_nodes_index[node] for node in self.get_goal_nodes()]
-        if self.use_dijkstra:
-            self.goal_to_all_edges_dict = {u: self._dijkstra(u) for u in u_indices}
-        else:
-            self.goal_to_all_edges_dict = {u: [(v,self.get_cost(self.nodes[u],self.nodes[v])) for v in range(len(self.nodes))] for u in u_indices}
-        return self.goal_to_all_edges_dict
+    def generate_roadmap(self, roadmap_type="prm", config=None, **options):
+        """Build a roadmap with ``path_planning.common.environment.roadmap`` and
+        install it here.
 
-    def calculate_edges(self,roadmap: List[List[int]],roadmap_edge_weights: List[List[float]] = None) -> Tuple[List[Tuple[int,int]], dict, List[float]]:
-        edges_seen = set()
-        edges = []  # list to preserve order so indices match edge_indices_dict and edge_weights
-        edge_indices_dict = {}
-        edge_weights = []
-        for ii in range(len(roadmap)):
-            for jj in roadmap[ii]:
-                if (ii, jj) not in edges_seen:
-                    edges_seen.add((ii, jj))
-                    idx = len(edges)
-                    edges.append((ii, jj))
-                    edge_indices_dict[(ii, jj)] = idx
-                    if roadmap_edge_weights is not None:
-                        edge_weights.append(roadmap_edge_weights[ii][roadmap[ii].index(jj)])
-        return edges, edge_indices_dict, edge_weights
-    
-    def set_obstacle_map(self, obstacles: np.ndarray):
-        obstacles = np.array(obstacles)
-        if len(obstacles) == 0:
-            return
-        if len(obstacles[0]) == 2:
-            self.type_map[obstacles[:,0], obstacles[:,1]] = TYPES.OBSTACLE
-        elif len(obstacles[0]) == 3:
-            self.type_map[obstacles[:,0], obstacles[:,1], obstacles[:,2]] = TYPES.OBSTACLE
-        else:
-            raise ValueError(f"Unsupported dimensions: {len(obstacles.shape)}")
-        for obstacle in obstacles:
-            pos = tuple(obstacle)
-            node = Node(pos,None,0,0)
-            self.obstacle_nodes.append(node)
-        self._esdf_initialized = False
+        ``roadmap_type`` is one of ``prm``, ``grid``, ``dt``, ``cdt``,
+        ``midpoints``, ``centroids``, ``voronoi``, ``rrg``, ``halton*`` (a
+        triangulation of the Halton samples) or ``custom`` (pass
+        ``edge_indices=...``). The nodes are ``self.nodes``, i.e. what ``node_sampler``
+        holds. Extra keyword arguments go to the builder (e.g.
+        ``anchor_points``, ``filter_collision``, ``k_query``). ``config`` is a
+        ``RoadmapConfig``, or a dict of overrides on top of this map's
+        ``roadmap_config`` (the default). Afterwards ``Roadmap.apply`` hands
+        the builder's nodes back to ``node_sampler`` (planar builders derive
+        new points; a snapped or missing start/goal is resolved or appended)
+        and clears the start/goal edge caches. The ``Roadmap`` (CSR adjacency
+        in ``.adj``) is ``self.roadmap``; ``edges``, ``edge_weights``,
+        ``road_map`` and ``road_map_edge_weights`` are views over it.
 
-    def get_obstacle_map(self) -> np.ndarray:
-        return self.type_map.data == TYPES.OBSTACLE
-
-    def get_obstacle_nodes(self) -> List[Node]:
-        return self.obstacle_nodes
-
-    def get_cost(self, p1_node: tuple, p2_node: tuple) -> float:
-        """
-        Get the cost between two nodes. (default: distance defined in the map)
-
-        Args:
-            p1: Start node.
-            p2: Goal node.
-        """
-        if self.cost_matrix is None:
-            return self.get_distance(p1_node.current, p2_node.current)
-        else:
-            p1_index = self.node_index_dict[p1_node]
-            p2_index = self.node_index_dict[p2_node]
-            return self.cost_matrix[p1_index, p2_index]
-
-    def get_neighbors(self, node: Node, **kwargs) -> List[Node]:
-        """
-        Get the neighbors of a node.
-        """
-        if self.road_map is None:
-            return []
-        idx = None
-        if node in self.node_index_dict:
-            idx = self.node_index_dict[node]
-        else:
-            try:
-                if getattr(self, "sample_kd_tree", None) is not None:
-                    dist, nn = self.sample_kd_tree.query(
-                        np.asarray(getattr(node, "current"), dtype=float).reshape(1, -1), k=1
-                    )
-                    dist = float(dist.reshape(-1)[0])
-                    nn = int(nn.reshape(-1)[0])
-                    if dist <= 1e-6 and 0 <= nn < len(self.nodes):
-                        idx = nn
-            except Exception:
-                idx = None
-        if idx is None:
-            return []
-        neighbors = [self.nodes[i] for i in self.road_map[int(idx)]]
-        if self.track_with_link:
-            neighbors = [neighbor.link(node) for neighbor in neighbors]
-        return neighbors
-
-    def line_of_sight(self, p1: Tuple[float, ...], p2: Tuple[float, ...]) -> bool:
-        """
-        Check if the line of sight between two points is in collision.
-
-        Args:
-            p1: Start point of the line.
-            p2: End point of the line.
-        """
-        dim = self.dim
-        if len(p1) != dim or len(p2) != dim:
-            raise ValueError(f"Points must have dimension {dim}")
-
-        # DDA runs in continuous grid-index space where each cell occupies the
-        # unit interval [k, k+1]. Transforming world coords up front keeps the
-        # existing integer-boundary traversal correct under non-unit resolution
-        # and non-zero bounds origin.
-        inv_res = 1.0 / float(self.resolution)
-        bounds_lo = np.asarray(self.bounds, dtype=float)[:, 0]
-        p1_arr = (np.array(p1, dtype=float) - bounds_lo) * inv_res
-        p2_arr = (np.array(p2, dtype=float) - bounds_lo) * inv_res
-
-        shape_arr = np.asarray(self.shape, dtype=int)
-        p1_grid = np.clip(np.floor(p1_arr).astype(int), 0, shape_arr - 1)
-        p2_grid = np.clip(np.floor(p2_arr).astype(int), 0, shape_arr - 1)
-        current_tile = p1_grid.copy()
-        
-        # Calculate deltas
-        delta = p2_arr - p1_arr
-        
-        # Calculate step direction
-        step = np.sign(delta).astype(int)
-        step[delta == 0] = 0
-        
-        # Calculate offsets to next grid boundary (vectorized)
-        # Need to account for how the map converts coordinates
-        # For DDA, we need the offset in world space to the next grid cell
-        offset = np.where(delta > 0, 
-                         np.ceil(p1_arr) - p1_arr,
-                         p1_arr - np.floor(p1_arr))
-        
-        # Calculate tMax and tDelta (vectorized)
-        abs_delta = np.abs(delta)
-        non_zero_mask = abs_delta > 1e-10
-        
-        tMax = np.full(dim, float('inf'), dtype=float)
-        tDelta = np.full(dim, float('inf'), dtype=float)
-        
-        tMax[non_zero_mask] = offset[non_zero_mask] / abs_delta[non_zero_mask]
-        tDelta[non_zero_mask] = 1.0 / abs_delta[non_zero_mask]
-        
-        # Calculate distance (Manhattan distance in grid space)
-        dist = int(np.sum(np.abs(p2_grid - p1_grid)))
-        
-        # Track seen tiles to avoid checking duplicates
-        seen = {tuple(current_tile)}
-        
-        # Traverse with early termination
-        for _ in range(dist):
-            # Find dimension with minimum tMax
-            valid_dims = np.isfinite(tMax)
-            if not np.any(valid_dims):
-                break
-            
-            valid_tMax = np.where(valid_dims, tMax, np.inf)
-            min_dim = np.argmin(valid_tMax)
-            
-            # Step in that dimension
-            current_tile[min_dim] += step[min_dim]
-            
-            # Update tMax
-            if tDelta[min_dim] != float('inf'):
-                tMax[min_dim] += tDelta[min_dim]
-            
-            # Check collision immediately (early termination)
-            tile_tuple = tuple(current_tile)
-            if tile_tuple not in seen:
-                seen.add(tile_tuple)
-                if not self.is_expandable(tile_tuple):
-                    break # Found collision, terminate early
-        seen_tiles = [tuple(int(x) for x in tile) for tile in seen]
-        return seen_tiles
-
-    def in_collision_point(self, point: Tuple[float, ...]) -> bool:
-        """
-        Check if the point is in collision.
-        """
-        return not self.is_expandable(self.world_to_map(point,discrete=True))
-
-    def point_expandable(self, point: Tuple[float, ...]) -> bool:
-        """
-        Check if the point is expandable.
-        """
-        inv_res = 1.0 / float(self.resolution)
-        eps = 1e-9
-        cands = []
-        for d in range(self.dim):
-            c = (float(point[d]) - float(self.bounds[d, 0])) * inv_res - 0.5
-            lo, hi = int(round(c - eps)), int(round(c + eps))
-            cands.append((lo,) if lo == hi else (lo, hi))
-        return any(self.is_expandable(idx) for idx in product(*cands))
-
-    def in_collision(self, p1: Tuple[float, ...], p2 : Tuple[float, ...] = None) -> bool:
-        """
-        Check if the line of sight between two continuous (world) points is in collision
-        using DDA (Digital Differential Analyzer) grid traversal to check all tiles the line crosses.
-        Optimized version with early termination on first collision.
-        
-        Args:
-            p1: Start point in continuous (world) coordinates
-            p2: End point in continuous (world) coordinates
-        
         Returns:
-            in_collision: True if any tile along the line is in collision, False otherwise
+            roadmap: the installed ``Roadmap``.
         """
-        
-        # Check if start point has the correct dimension
-        dim = self.dim
+        if not isinstance(roadmap_type, str):
+            raise TypeError(f"generate_roadmap takes the roadmap type (a str), got {type(roadmap_type).__name__}; "
+                            "the nodes are this map's own (generateRandomNodes)")
+        if config is None:                               # this sampler's roadmap_config
+            config = self.roadmap_config
+        if not isinstance(config, RoadmapConfig):      # dict: overrides on top of it
+            config = RoadmapConfig({**self.roadmap_config.as_dict(), **config})
+        self.roadmap = Roadmap(self, roadmap_type, config=config, **options)
+        self.roadmap.generate_roadmap(self.nodes)
+        self.roadmap.apply()
+        return self.roadmap
 
-        if p2 is None:
-            return not self.is_expandable(self.world_to_map(p1,discrete=True))
-        
-        # Check if end point has the correct dimension
-        if  len(p1) != dim and len(p2) != dim:
-            raise ValueError(f"End point must have dimension {dim}")
-
-        # DDA runs in continuous grid-index space where each cell occupies the
-        # unit interval [k, k+1]. Transforming world coords up front keeps the
-        # existing integer-boundary traversal correct under non-unit resolution
-        # and non-zero bounds origin.
-        inv_res = 1.0 / float(self.resolution)
-        bounds_lo = np.asarray(self.bounds, dtype=float)[:, 0]
-        p1_arr = (np.array(p1, dtype=float) - bounds_lo) * inv_res
-        p2_arr = (np.array(p2, dtype=float) - bounds_lo) * inv_res
-
-        shape_arr = np.asarray(self.shape, dtype=int)
-        p1_grid = np.clip(np.floor(p1_arr).astype(int), 0, shape_arr - 1)
-        p2_grid = np.clip(np.floor(p2_arr).astype(int), 0, shape_arr - 1)
-        
-        # Calculate deltas
-        delta = p2_arr - p1_arr
-        
-        # Calculate step direction
-        step = np.sign(delta).astype(int)
-        step[delta == 0] = 0
-        
-        # Calculate offsets to next grid boundary (vectorized)
-        # Need to account for how the map converts coordinates
-        # For DDA, we need the offset in world space to the next grid cell
-        offset = np.where(delta > 0, 
-                         np.ceil(p1_arr) - p1_arr,
-                         p1_arr - np.floor(p1_arr))
-        
-        # Calculate tMax and tDelta (vectorized)
-        abs_delta = np.abs(delta)
-        non_zero_mask = abs_delta > 1e-10
-        
-        tMax = np.full(dim, float('inf'), dtype=float)
-        tDelta = np.full(dim, float('inf'), dtype=float)
-        
-        tMax[non_zero_mask] = offset[non_zero_mask] / abs_delta[non_zero_mask]
-        tDelta[non_zero_mask] = 1.0 / abs_delta[non_zero_mask]
-        if np.all(np.abs(tMax) < 1e-10):
-            tMax = abs_delta*1e-10
-        
-        # Calculate distance (Manhattan distance in grid space)
-        dist = int(np.sum(np.abs(p2_grid - p1_grid)))
-        
-        # Track seen tiles to avoid checking duplicates
-        current_tile = p1_grid.copy()
-        seen = {tuple(current_tile)}
-        
-        # Traverse with early termination
-        for _ in range(dist):
-            # Find dimension with minimum tMax
-            valid_dims = np.isfinite(tMax)
-            if not np.any(valid_dims):
-                break
-            
-            valid_tMax = np.where(valid_dims, tMax, np.inf)
-            min_dim = np.argmin(valid_tMax)
-
-            tied_dims = np.where(np.abs(tMax - tMax[min_dim]) < 1e-10)[0]
-            if len(tied_dims) > 1:
-                diff = p2_grid - current_tile
-                min_dim = np.argmax(np.abs(diff))
-            
-            # Step in that dimension
-            current_tile[min_dim] += step[min_dim]
-            
-            # Update tMax
-            if tDelta[min_dim] != float('inf'):
-                tMax[min_dim] += tDelta[min_dim]
-            
-            # Check collision immediately (early termination)
-            tile_tuple = tuple(current_tile)
-            if tile_tuple not in seen:
-                seen.add(tile_tuple)
-                if not self.is_expandable(tile_tuple):
-                    return True  # Found collision, terminate early
-
-            if tile_tuple == tuple(p2_grid):
-                return False
-        
-        return False  # No collision found
-
-    # Sample points from the probability map if provided, and the rest from uniform distribution
-    # Cumulative sum of the probability map is 1
-    def sample_from_prob_map(self,prob_map=None,samp_from_prob_map_ratio=0.5):
-        bounds = np.array(self.bounds)
-        if prob_map is None:
-            normalized_points = np.random.random((self.sample_num,self.dim))
-            points = normalized_points * (bounds[:,1] - bounds[:,0]) + bounds[:,0]
-            return points,0
-        else:
-            num_prob_map_samples = int(self.sample_num * samp_from_prob_map_ratio)
-            weighted_normalized_points = np.clip(np.random.random((num_prob_map_samples,self.dim))-0.5,-0.5,0.5) + 1e-10
-            weighted_points = np.zeros((num_prob_map_samples,self.dim))
-
-            prob_map_flat = prob_map.flatten()
-            prob_map_flat /= np.sum(prob_map_flat)
-            if num_prob_map_samples > 0:
-                prob_map_indices = np.random.choice(len(prob_map_flat), size=num_prob_map_samples, p=prob_map_flat)
-                prob_map_points = np.array([np.unravel_index(idx, prob_map.shape) for idx in prob_map_indices])
-                # Convert to world coordinates
-                prob_map_points_world = np.array([self.map_to_world(tuple(point)) for point in prob_map_points])
-                weighted_points = prob_map_points_world + weighted_normalized_points
-
-            unchosen_prob_map_flat = 1 - prob_map_flat
-            unchosen_prob_map_flat /= np.sum(unchosen_prob_map_flat)
-            num_unchosen_samples = self.sample_num - num_prob_map_samples
-            unchosen_normalized_points = np.clip(np.random.random((num_unchosen_samples,self.dim))-0.5,-0.5,0.5) + 1e-10
-            unchosen_prob_map_indices = np.random.choice(len(prob_map_flat), size=num_unchosen_samples, p=unchosen_prob_map_flat)
-            unchosen_prob_map_points = np.array([np.unravel_index(idx, prob_map.shape) for idx in unchosen_prob_map_indices])
-            # Convert to world coordinates
-            unchosen_prob_map_points_world = np.array([self.map_to_world(tuple(point)) for point in unchosen_prob_map_points])
-            unchosen_prob_map_indices_weighted_points = unchosen_prob_map_points_world + unchosen_normalized_points
-            points = np.concatenate((weighted_points,unchosen_prob_map_indices_weighted_points))
-            return points,num_prob_map_samples
-
-    # Return the minimum distance from a point to the nearest obstacle or inflation
-    def min_wall_distance(self, p):
-        """
-        World-unit distance from a world-coordinate point (or batch of points) to
-        the nearest OBSTACLE-or-INFLATION cell.
-
-        Uses the precomputed Euclidean Signed Distance Field (`_esdf`).
-        `_esdf` is built with `sampling=self.resolution`, so values are already
-        in world units. Inflation cells are exactly the free cells with
-        0 < esdf <= inflation_radius, so subtracting `inflation_radius` and
-        clipping to >= 0 collapses both obstacles and inflation to distance 0.
-
-        The ESDF is sampled with **linear interpolation** (bilinear in 2D,
-        trilinear in 3D) at the point's continuous grid coordinate. This avoids
-        the up-to-`sqrt(dim) * resolution/2` quantization error of evaluating
-        at the containing cell center, and makes the rejection probability
-        used by the Halton sampler vary smoothly with position.
-
-        Out-of-bounds points are reported as distance 0.
-
-        Args:
-            p: a single world point as a tuple/1-D array of length `dim`,
-               or a (N, dim) array of points.
-        Returns:
-            float if `p` is 1-D, else (N,) numpy array of floats.
-        """
-        if not getattr(self, "_esdf_initialized", False):
-            self.update_esdf()
-            self._esdf_initialized = True
-
-        arr = np.asarray(p, dtype=float)
-        single = arr.ndim == 1
-        pts = np.atleast_2d(arr)
-
-        bounds_lo = np.asarray(self.bounds, dtype=float)[:, 0]
-        inv_res = 1.0 / float(self.resolution)
-        # Continuous grid coords; cell centers are at integer indices.
-        grid_f = (pts - bounds_lo) * inv_res - 0.5
-
-        shape = np.asarray(self.shape, dtype=int)
-        in_bounds = np.all(
-            (grid_f >= -0.5) & (grid_f <= shape.astype(float) - 0.5), axis=1
-        )
-
-        # map_coordinates wants (D, N); order=1 = linear, cval=0 -> outside is wall.
-        esdf_at_pts = map_coordinates(
-            self._esdf, grid_f.T, order=1, mode="nearest"
-        ).astype(float)
-        raw = esdf_at_pts - float(self.inflation_radius)
-        dists = np.where(in_bounds, np.clip(raw, 0.0, None), 0.0)
-
-        return float(dists[0]) if single else dists
-
-    def generateRandomNodes(self, generate_grid_nodes = False,generate_boundary_nodes = False,prob_map = None,samp_from_prob_map_ratio = 0.5,roadmap_type:str=None,boundary_node_spacing: float | None = None):
-        if roadmap_type == 'rrg':
-            return []
-
-        num_nodes = 0
-        num_weighted_samples = 0
-        bounds = np.array(self.bounds)
-        nodes = []
-        rejected_weighted_samples = []
-        halton_sampler = None
-        is_halton = roadmap_type is not None and 'halton' in roadmap_type
-        oversample = 1
-        max_outer_iters = 20
-        outer_iter = 0
-        while num_nodes < self.sample_num:
-            outer_iter += 1
-            if outer_iter > max_outer_iters:
-                print(
-                    f"Warning: generateRandomNodes hit max_outer_iters={max_outer_iters} "
-                    f"with {num_nodes}/{self.sample_num} nodes; continuing with what was collected."
-                )
-                break
-            if is_halton:
-                halton_cfg = self.sampling_dist_dict.get('halton', {})
-                needed = self.sample_num - num_nodes
-                points, halton_sampler = halton_sampling(
-                    needed,
-                    self.min_wall_distance,
-                    bounds,
-                    d_min=halton_cfg.get('d_min', 0.3),
-                    d_opt=halton_cfg.get('d_opt', 0.4),
-                    sigma=halton_cfg.get('sigma', 0.5),
-                    floor=halton_cfg.get('floor', 0.2),
-                    halton_sampler=halton_sampler,
-                    oversample=oversample,
-                )
-            else:
-                points,num_weighted_samples = self.sample_from_prob_map(prob_map,samp_from_prob_map_ratio)
-            n_points = len(points)
-            pixels = [self.world_to_map(point,discrete=True) for point in points]
-            accepted_this_round = 0
-            for ii in range(n_points):
-                if self.use_discrete_space:
-                    current = tuple(self.map_to_world(self.world_to_map(points[ii], discrete=True)))
-                else:
-                    current = tuple(points[ii])
-                node = Node(current,None,0,0)
-                if self.is_expandable(tuple(pixels[ii])):
-                    if node in self.node_index_dict:
-                        continue
-                    nodes.append(node)
-                    self.node_index_dict[node] = len(nodes) - 1
-                    num_nodes += 1
-                    accepted_this_round += 1
-                else:
-                    # Only track rejected WEIGHTED samples (indices 0 to num_weighted_samples-1)
-                    if ii >= num_weighted_samples:
-                        continue
-                    rejected_weighted_samples.append(points[ii])
-                if num_nodes == self.sample_num:
-                    break
-            # Update ratio / oversample for next outer iteration if still short.
-            if num_nodes < self.sample_num:
-                if is_halton:
-                    # Bump oversample so we draw enough Halton points next time.
-                    # We now request `needed` per round, so n_draw = needed * oversample;
-                    # to accept `needed_next` we need oversample ~= 1/rate.
-                    rate = accepted_this_round / max(1, n_points)
-                    if rate <= 0:
-                        oversample = min(64, max(2, oversample * 2))
-                    else:
-                        oversample = min(64, max(2, int(np.ceil(1.0 / rate))))
-                elif num_weighted_samples > 0:
-                    samp_from_prob_map_ratio = len(rejected_weighted_samples) / self.sample_num
-                    samp_from_prob_map_ratio = max(0.0, min(1.0, samp_from_prob_map_ratio))
-
-        if generate_grid_nodes:
-            # One node per free cell, placed at the cell CENTRE in world units
-            # (map_to_world); starts/goals and snapped samples use the same frame.
-            grid_shape = self.shape
-            grid_ranges = [np.arange(grid_shape[d]) for d in range(self.dim)]
-            grid_points = np.array(np.meshgrid(*grid_ranges, indexing='ij'))
-            grid_points = [tuple[int, ...](int(p) for p in pt) for pt in grid_points.reshape(self.dim,-1).T]
-            world_grid_points = [self.map_to_world(pt) for pt in grid_points]
-            
-            for grid_pt,world_pt in zip(grid_points,world_grid_points):
-                if self.is_expandable(grid_pt):
-                    node = Node(world_pt, None, 0, 0)
-                    nodes.append(node)
-                    self.node_index_dict[node] = len(nodes) - 1
-                    self.grid_nodes_index[node] = len(nodes)-1
-                    self.grid_points.append(world_pt)
-
-        want_spacing = boundary_node_spacing is not None and boundary_node_spacing > 0
-        if generate_boundary_nodes or want_spacing:
-            # Obstacle/map boundary vertices (merged wall corners/junctions)
-            # from the CDT boundary extraction. They lie ON the obstacle
-            # outline — same as the CDT roadmap's own boundary nodes — so no
-            # expandability filter is applied; edge-level collision checks in
-            # the roadmap builders decide connectivity.
-            # With ``boundary_node_spacing`` the merged wall segments are
-            # resampled every ``spacing`` world units (spacing == resolution
-            # -> one node per boundary cell), corners first.
-            bnd_pts, bnd_segs, _ = self.get_obstacle_boundary()
-            if want_spacing:
-                bnd_pts = self.resample_boundary(bnd_pts, bnd_segs, boundary_node_spacing)
-            for point in bnd_pts:
-                current = tuple(float(v) for v in point)
-                node = Node(current, None, 0, 0)
-                if node in self.node_index_dict:
-                    self.boundary_nodes_index[node] = self.node_index_dict[node]
-                    continue
-                nodes.append(node)
-                self.node_index_dict[node] = len(nodes) - 1
-                self.boundary_nodes_index[node] = len(nodes) - 1
-                self.boundary_points.append(current)
-
-        for start in self.start:
-            node = Node(tuple(start),None,0,0)
-            if node in self.node_index_dict:
-                self.start_nodes_index[node] = self.node_index_dict[node]
-                continue
-            nodes.append(node)
-            self.node_index_dict[node] = len(nodes) - 1
-            self.start_nodes_index[node] = len(nodes) - 1
-        for goal in self.goal:
-            node = Node(tuple(goal),None,0,0)
-            if node in self.node_index_dict:
-                self.goal_nodes_index[node] = self.node_index_dict[node]
-                continue
-            nodes.append(node)
-            self.node_index_dict[node] = len(nodes) - 1
-            self.goal_nodes_index[node] = len(nodes) - 1
-        
-        # Update total node count after all nodes are added
-        self.num_total_nodes = len(nodes)
-        self.cost_matrix = cdist(np.array([node.current for node in nodes]), np.array([node.current for node in nodes]), metric='euclidean')
-        self.nodes = nodes
-        return nodes
-
-    def generate_map(self, roadmap_type: str, samples: List[Node]):
-        if roadmap_type == 'grid':
-            self.generate_roadmap(samples)
-        elif roadmap_type == 'prm':
-            self.generate_roadmap(samples)
-        elif roadmap_type == 'cdt':
-            self.generate_planar_map(samples,use_option='cdt')
-        elif roadmap_type == 'midpoints':
-            self.generate_planar_map(samples,use_option='midpoints')
-        elif roadmap_type == 'centroids':
-            self.generate_planar_map(samples,use_option='centroids')
-        elif roadmap_type == 'voronoi':
-            self.generate_planar_map(samples,use_option='voronoi')
-        elif roadmap_type == 'dt':
-            self.generate_planar_map(samples, use_option='dt')
-        elif roadmap_type == 'rrg':
-            self.generate_rrg(samples)
-        elif 'halton' in roadmap_type:
-            use_option = 'cdt' if self.dim == 2 else 'dt'
-            self.generate_planar_map(samples, use_option=use_option)
-        else:
-            raise ValueError(f"Invalid roadmap type: {roadmap_type}")
-
-    def generate_roadmap(self, samples: List[Node]):
-        n = len(samples)
-        if n == 0:
-            self.road_map = []
-            self.road_map_edge_weights = []
-            self.edges, self.edge_indices_dict, self.edge_weights = self.calculate_edges([], [])
-            return []
-
-        points = np.asarray([samp.current for samp in samples], dtype=float)
-        sample_kd_tree = KDTree(points)
-        self.sample_kd_tree = sample_kd_tree
-
-        # One batched query: O(n log n) tree work vs n separate queries.
+    def get_neighbors(self, node: Node | int) -> List[Node]:
+        """The roadmap neighbours of ``node`` (a ``Node`` or a node index); ``[]`` when it is not a node."""
         try:
-            distances, indices = sample_kd_tree.query(points, k=n, workers=-1)
-        except TypeError:
-            distances, indices = sample_kd_tree.query(points, k=n)
+            idx = self._index_of(node if isinstance(node, (int, np.integer)) else node.current)
+        except KeyError:
+            return []
+        if not 0 <= idx < self.roadmap.num_nodes:
+            return []
+        return [self.nodes[i] for i in self.roadmap.neighbors(idx).tolist()]
 
-        cost_matrix = self.cost_matrix
-        road_map: List[List[int]] = []
-        edge_weights: List[List[float]] = []
+    def get_distance(self, p1, p2=None, type: str = 'Euclidean') -> float | List[Tuple[tuple, float]]:
+        """Distance between world points.
 
-        for i in range(n):
-            s_pos = samples[i].current
-            edge_id: List[int] = []
-            edge_weight: List[float] = []
-
-            for jj in range(1, n):
-                j = int(indices[i, jj])
-                if cost_matrix is not None:
-                    e_weight = float(cost_matrix[i, j])
-                else:
-                    e_weight = float(distances[i, jj])
-
-                if e_weight < self.min_edge_length:
-                    continue
-                if e_weight > self.max_edge_length:
-                    break
-
-                # Line-of-sight is symmetric; one check is enough.
-                if not self.in_collision(s_pos, samples[j].current):
-                    edge_id.append(j)
-                    edge_weight.append(e_weight)
-
-                if self.num_neighbors > 0 and len(edge_id) >= self.num_neighbors:
-                    break
-
-            road_map.append(edge_id)
-            edge_weights.append(edge_weight)
-
-        self.road_map = road_map
-        self.road_map_edge_weights = edge_weights
-        self.edges, self.edge_indices_dict, self.edge_weights = self.calculate_edges(road_map, edge_weights)
-        return road_map
-
-    def generate_planar_map(self, samples: List[Node], use_option: str = 'cdt'):
-        """Build a planar roadmap from CDT over obstacles or from sample-point Delaunay (`dt`)."""
-        if use_option == 'dt':
-            n = len(samples)
-            if n == 0:
-                self.road_map = []
-                self.road_map_edge_weights = []
-                self.edges, self.edge_indices_dict, self.edge_weights = self.calculate_edges([], [])
-                self.nodes = []
-                return []
-
-            planar_map: List[List[int]] = [[] for _ in range(n)]
-            edge_weights: List[List[float]] = [[] for _ in range(n)]
-            edge_list: dict = {}
-            pts = np.array([samp.current for samp in samples])
-            tri = Delaunay(pts)
-            self.sample_kd_tree = KDTree(pts)
-
-            edges = [
-                tuple(edge)
-                for edge in np.concatenate(
-                    [tri.simplices[:, [0, 1]], tri.simplices[:, [1, 2]], tri.simplices[:, [2, 0]]],
-                    axis=0,
-                ).tolist()
-            ]
-            selected_edges: List[Tuple[int, int]] = []
-            selected_weights: List[float] = []
-            for edge in edges:
-                if edge in edge_list:
-                    continue
-                edge_list[edge] = 1
-                edge_list[edge[::-1]] = 1
-                node_s = samples[edge[0]]
-                node_n = samples[edge[1]]
-                s_pos = pts[edge[0]]
-                n_pos = pts[edge[1]]
-                e_weight = self.get_cost(node_s, node_n)
-                if (
-                    not self.in_collision(s_pos, n_pos)
-                    and not self.in_collision(n_pos, s_pos)
-                    and e_weight >= self.min_edge_length
-                    and e_weight <= self.max_edge_length
-                ):
-                    selected_edges.append(edge)
-                    selected_weights.append(e_weight)
-
-            for edge, weight in zip(selected_edges, selected_weights):
-                planar_map[edge[0]].append(edge[1])
-                planar_map[edge[1]].append(edge[0])
-                edge_weights[edge[0]].append(weight)
-                edge_weights[edge[1]].append(weight)
-
-            self.nodes = samples
-            self.num_total_nodes = n
-            self.cost_matrix = cdist(pts, pts, metric='euclidean')
-            self.road_map = planar_map
-            self.road_map_edge_weights = edge_weights
-            self.edges, self.edge_indices_dict, self.edge_weights = self.calculate_edges(
-                planar_map, edge_weights
-            )
-            return planar_map
-
-        nodes = []
-        mask = (self.type_map.data == TYPES.OBSTACLE) | (self.type_map.data == TYPES.INFLATION)
-        points, planar_map = get_planar_graph(self, mask, use_option=use_option)
-        edge_weights = [[] for ii in range(len(planar_map))]
-
-        # Re-register the nodes after applying constrained delaunay triangulation
-        self.node_index_dict = {}
-        self.start_nodes_index = {}
-        self.goal_nodes_index = {}
-        self.grid_nodes_index = {}
-        self.boundary_nodes_index = {}
-        for point in points:
-            node = Node(tuple(point),None,0,0)
-            if node in self.node_index_dict:
-                continue
-            nodes.append(node)
-            self.node_index_dict[node] = len(nodes) - 1
-        for start in self.start:
-            node = Node(tuple(start),None,0,0)
-            if node in self.node_index_dict:
-                self.start_nodes_index[node] = self.node_index_dict[node]
-                continue
-            nodes.append(node)
-            self.node_index_dict[node] = len(nodes) - 1
-            self.start_nodes_index[node] = len(nodes) - 1
-        for goal in self.goal:
-            node = Node(tuple(goal),None,0,0)
-            if node in self.node_index_dict:
-                self.goal_nodes_index[node] = self.node_index_dict[node]
-                continue
-            nodes.append(node)
-            self.node_index_dict[node] = len(nodes) - 1
-            self.goal_nodes_index[node] = len(nodes) - 1
-        # Update total node count after all nodes are added
-        self.num_total_nodes = len(nodes)
-        self.cost_matrix = cdist(np.array([node.current for node in nodes]), np.array([node.current for node in nodes]), metric='euclidean')
-        self.nodes = nodes
-        self._rebuild_boundary_nodes_index()
-
-        # Filter the CDT edges the same way PRM / 'dt' do: drop any that are in collision
-        # or outside [min_edge_length, max_edge_length]. The constrained triangulation can
-        # still emit edges that hug or cross obstacle geometry (boundary nodes lie on the
-        # obstacle outline, and boundary simplification produces long constraint segments),
-        # so an explicit line-of-sight + length check keeps the roadmap valid.
-        filtered_map = [[] for _ in range(len(planar_map))]
-        edge_weights = [[] for _ in range(len(planar_map))]
-        for ii, edge_id in enumerate(planar_map):
-            s_pos = nodes[ii].current
-            for neighbor_id in edge_id:
-                w = self.get_cost(nodes[ii], nodes[neighbor_id])
-                if w < self.min_edge_length or w > self.max_edge_length:
-                    continue
-                if self.in_collision(s_pos, nodes[neighbor_id].current):
-                    continue
-                filtered_map[ii].append(neighbor_id)
-                edge_weights[ii].append(w)
-        planar_map = filtered_map
-
-        self.road_map = planar_map
-        self.road_map_edge_weights = edge_weights
-        self.edges, self.edge_indices_dict,self.edge_weights  = self.calculate_edges(planar_map,edge_weights)
-        return planar_map
-
-    def generate_rrg(self, samples: List[Node]):
-        # Re-register the nodes after applying constrained delaunay triangulation
-        self.rrg = RRG(map_=self,start=self.start,goal=self.goal,sample_num=self.sample_num,min_dist=self.min_edge_length,max_dist=self.max_edge_length,goal_sample_rate=self.goal_sample_rate,discrete=self.use_discrete_space,use_faiss=True)
-        self.nodes = []
-        self.node_index_dict = {}
-        self.start_nodes_index = {}
-        self.goal_nodes_index = {}
-        self.grid_nodes_index = {}
-        self.boundary_nodes_index = {}
-
-        # Initialize graph structure
-        nodes = []
-        road_map = []  # Graph structure: list of adjacency lists
-        edge_weights = []
-        start_nodes = []  # List to hold all start nodes
-        goal_nodes = []  # List to hold all goal nodes
-
-        # Add start node to the graph and necessary lists
-        for start_node_coord in self.start:
-            start_node = Node(tuple(start_node_coord), None, 0, 0)
-            start_nodes.append(start_node)
-            nodes.append(start_node)
-            self.node_index_dict[start_node] = len(nodes) - 1
-            self.start_nodes_index[start_node] = len(nodes) - 1
-            road_map.append([])  # Initialize empty adjacency list for this node
-            edge_weights.append([])
-
-        # Add goal node to graph if not already present
-        for goal_node_coord in self.goal:
-            goal_node = Node(tuple(goal_node_coord), None, 0, 0)
-            goal_nodes.append(goal_node)
-            if goal_node not in self.node_index_dict:
-                nodes.append(goal_node)
-                self.node_index_dict[goal_node] = len(nodes) - 1
-                self.goal_nodes_index[goal_node] = len(nodes) - 1
-                road_map.append([])
-                edge_weights.append([])
-            else:
-                self.goal_nodes_index[goal_node] = self.node_index_dict[goal_node]
-                
-        # Initialize FAISS index for efficient nearest neighbor search
-        faiss_index = faiss.IndexFlatL2(self.dim)
-        faiss_nodes = []
-        for node in nodes:
-            self.rrg._faiss_add_node(node, faiss_index, faiss_nodes)
-
-        # Main RRG sampling loop
-        num_samples = 0
-        while num_samples < self.sample_num:
-            node_rand = self.rrg._generate_random_node()
-
-            # Skip if node already exists
-            if node_rand in self.node_index_dict:
-                continue
-
-            # Find nearest node in graph
-            node_near = self.rrg._get_nearest_node(
-                nodes, node_rand, faiss_index, faiss_nodes
-            )
-
-            # Create new node towards random sample
-            node_new = self.rrg._steer(node_near, node_rand)
-            if node_new is None:
-                continue
-            if self.in_collision(node_new.current):
-                continue
-            if node_new in self.node_index_dict:
-                continue
-
-            # Check if edge from nearest to new node is collision-free
-            if self.in_collision(
-                node_new.current,
-                node_near.current,
-            ):
-                continue
-
-            # Add new node to graph
-            nodes.append(node_new)
-            self.node_index_dict[node_new] = len(nodes) - 1
-            road_map.append([])  # Initialize empty adjacency list for this node
-            edge_weights.append([])
-
-            if self.rrg.use_faiss:
-                self.rrg._faiss_add_node(node_new, faiss_index, faiss_nodes)
-            num_samples += 1
-        # Connect node pairs within radius if collision-free (without duplicates)
-        edge_set = set()
-        for ii in range(len(nodes)):
-             # RRG key step: Find ALL nearby nodes within max_dist radius
-            node_new = nodes[ii]
-            nearby_nodes = self.rrg._get_nearby_nodes(
-                nodes, node_new, faiss_index, faiss_nodes
-            )
-
-            # Connect new node to all nearby nodes if collision-free
-            for nearby_node in nearby_nodes:
-                # Check if edge is collision-free
-                if not self.in_collision(
-                    node_new.current,
-                    nearby_node.current,
-                ):
-                    # Add bidirectional edge in graph
-                    node_new_idx = self.node_index_dict[node_new]
-                    nearby_idx = self.node_index_dict[nearby_node]
-                    if node_new_idx == nearby_idx:
-                        continue
-                    e = (node_new_idx, nearby_idx) if node_new_idx < nearby_idx else (nearby_idx, node_new_idx)
-                    if e in edge_set:
-                        continue
-                    edge_set.add(e)
-                    road_map[node_new_idx].append(nearby_idx)
-                    road_map[nearby_idx].append(node_new_idx)
-                    edge_weights[node_new_idx].append(self.get_cost(nodes[node_new_idx],nodes[nearby_idx]))
-                    edge_weights[nearby_idx].append(self.get_cost(nodes[nearby_idx],nodes[node_new_idx]))
-
-        # Update total node count after all nodes are added
-        self.num_total_nodes = len(nodes)
-        self.cost_matrix = cdist(np.array([node.current for node in nodes]), np.array([node.current for node in nodes]), metric='euclidean')
-        self.nodes = nodes
-        self.road_map = road_map
-        self.road_map_edge_weights = edge_weights
-        self.edges, self.edge_indices_dict,self.edge_weights  = self.calculate_edges(road_map,edge_weights)
-        return road_map
-
-    def generate_custom_nodes(self,points: List[int],filter_points: bool = True):
-        # filter_points=False keeps every point (preserving the caller's edge
-        # indexing) -- for points taken from an already-validated roadmap,
-        # which may legally contain nodes point_expandable rejects (e.g. RRG
-        # nodes slightly outside the bounds); load_graph_sampler never
-        # filters such nodes either.
-        num_nodes = 0
-        nodes = []
-        points = np.array(points)
-        for ii in range(len(points)):
-            pos = points[ii]
-            if self.use_discrete_space:
-                # Snap to the cell centre, the frame grid nodes are generated on.
-                current = tuple(self.map_to_world(self.world_to_map(tuple(pos), discrete=True)))
-            else:
-                current = tuple(points[ii])
-            node = Node(current,None,0,0)
-            if not filter_points or self.point_expandable(tuple(pos)):
-                nodes.append(node)
-                self.node_index_dict[node] = len(nodes) - 1
-                num_nodes += 1
-        if len(nodes) < len(points):
-            print(f"Warning: number of nodes is less than number of points")
-        for start in self.start:
-            node = Node(tuple(start),None,0,0)
-            if node in self.node_index_dict:
-                self.start_nodes_index[node] = self.node_index_dict[node]
-                continue
-            nodes.append(node)
-            self.node_index_dict[node] = len(nodes) - 1
-            self.start_nodes_index[node] = len(nodes) - 1
-        for goal in self.goal:
-            node = Node(tuple(goal),None,0,0)
-            if node in self.node_index_dict:
-                self.goal_nodes_index[node] = self.node_index_dict[node]
-                continue
-            nodes.append(node)
-            self.node_index_dict[node] = len(nodes) - 1
-            self.goal_nodes_index[node] = len(nodes) - 1
-        
-        # Update total node count after all nodes are added
-        self.num_total_nodes = len(nodes)
-        self.cost_matrix = cdist(np.array([node.current for node in nodes]), np.array([node.current for node in nodes]), metric='euclidean')
-        self.nodes = nodes
-        return nodes
-
-    def generate_custom_roadmap(self,edge_indices: List[Tuple[int,int]]):
-        road_map = [[] for ii in range(len(self.nodes))]
-        edge_weights = [[] for ii in range(len(self.nodes))]
-        edge_list = {}
-        for edge in edge_indices:
-            s_idx = edge[0]
-            n_idx = edge[1]
-            e = (s_idx, n_idx)
-            if e in edge_list:
-                continue
-            edge_list[e] = 1
-            edge_list[e[::-1]] = 1
-            node_s = self.nodes[s_idx]
-            node_n = self.nodes[n_idx]
-            e_weight = self.get_cost(node_s,node_n)
-            road_map[s_idx].append(n_idx)
-            road_map[n_idx].append(s_idx)
-            edge_weights[s_idx].append(e_weight)
-            edge_weights[n_idx].append(e_weight)
-
-        self.road_map = road_map
-        self.road_map_edge_weights = edge_weights
-        self.edges, self.edge_indices_dict,self.edge_weights  = self.calculate_edges(road_map,edge_weights)
-        return road_map
-
-    def _make_constraint_sweep(self):
-        """Build the spatial-sweep backend.
-
-        ``sweep_backend``:
-        - ``"auto"`` (default): use the Shapely (GEOS) backend in 2D and the CGAL
-          backend in 3D+ (Shapely/GEOS is planar). Falls back to CGAL in 2D if
-          Shapely is not installed.
-        - ``"shapely"``: force the Shapely backend (2D only).
-        - ``"cgal"``: force the CGAL backend (2D or 3D).
-        Shapely is imported lazily so it is only required when actually selected."""
-        backend = getattr(self, "sweep_backend", "auto")
-        dim = getattr(self, "dim", None)
-        if dim is None:
-            dim = len(self.bounds) if getattr(self, "bounds", None) is not None else 2
-
-        if backend == "auto":
-            backend = "shapely" if dim == 2 else "cgal"
-            if backend == "shapely":
-                try:  # 2D auto falls back to CGAL when Shapely is unavailable.
-                    import shapely  # noqa: F401
-                except Exception:
-                    backend = "cgal"
-
-        if backend == "shapely":
-            from path_planning.utils.shapely_sweep import ShapelySweep
-            return ShapelySweep(
-                record_sweep=self.record_sweep,
-                use_exact_collision_check=self.use_exact_collision_check,
-            )
-        if backend != "cgal":
-            raise ValueError(f"Unknown sweep_backend {backend!r}; expected 'auto', 'cgal' or 'shapely'.")
-        return CGAL_Sweep(
-            record_sweep=self.record_sweep,
-            use_exact_collision_check=self.use_exact_collision_check,
-        )
-
-    def _roadmap_signature(self):
-        """Cheap content fingerprint of the roadmap the sweep is built for."""
-        return (
-            len(self.nodes), len(self.edges),
-            hash(tuple(tuple(n.current) for n in self.nodes)),
-            hash(tuple((int(e[0]), int(e[1])) for e in self.edges)),
-        )
-
-    def set_constraint_sweep(self, force: bool = False, keep_query_caches: bool = False):
-        """(Re)bind the sweep backend to the current roadmap.
-
-        Building the backend's spatial indices (vertex KD-tree / edge R-tree, edge
-        geometry arrays) is the expensive part and depends on the roadmap only, so it
-        is skipped when the roadmap is unchanged since the last call (content
-        fingerprint of nodes + edges); per-query memo caches are still cleared then,
-        keeping memory behaviour identical to a full rebuild. Callers that plan many
-        times on one roadmap (NeuralATTF builds a SippPlanner per low-level call)
-        therefore pay the index build once. ``force`` rebuilds regardless;
-        ``keep_query_caches`` also keeps the sweep's memoized query results.
+        ``type`` ``'Euclidean'`` / ``'Manhattan'``: straight-line distance between
+        ``p1`` and ``p2`` (both required). ``type='dijkstra'``: shortest-path length
+        over the roadmap; ``p1`` / ``p2`` must be roadmap nodes (world coordinates,
+        resolved with ``_index_of``). With ``p2`` the result is a float, ``inf``
+        when unreachable; without ``p2`` it is ``[(point, distance), ...]`` for
+        every node reachable from ``p1`` (itself at 0), in node order.
         """
-        sig = self._roadmap_signature()
-        if not force and getattr(self, "_constraint_sweep_signature", None) == sig:
-            if not keep_query_caches:
-                self.constraint_sweep.clear_caches()
-            self._constraint_sweep_locations_cache = {}
-            return
-        self.constraint_sweep.set_graph([node.current for node in self.nodes],self.edges)
-        self._constraint_sweep_signature = sig
-        self._sipp_sweep_memo = {}  # SippGraph's cross-call sweep memo is roadmap-bound
-        # Precompute tuples for fast per-index coordinate access — avoids the
-        # repeated `self.nodes[idx].current` attribute walk in the hot path.
-        self._node_current_tuples = [tuple(n.current) for n in self.nodes]
-        # Memoize the coordinate-converted sweep result so identical queries
-        # don't re-pay the set-comprehension cost on every CBS conflict check.
-        self._constraint_sweep_locations_cache = {}
+        if type == 'dijkstra':
+            u = self._index_of(p1)
+            if p2 is not None:
+                v = self._index_of(p2)
+                return float(self.roadmap.dijkstra(u, v))
+            return [(tuple(self.nodes[v].current), d) for v, d in self.roadmap.dijkstra(u)]
+        if type not in ('Euclidean', 'Manhattan'):
+            raise ValueError(f"get_distance: unknown type {type!r}; expected 'Euclidean', 'Manhattan' or 'dijkstra'")
+        if p2 is None:
+            raise ValueError("get_distance: p2 is required for a straight-line distance")
+        return Geometry.dist(p1, p2, type)
 
-    def get_constraint_sweep(self, p1: tuple[float,float], p2: tuple[float,float],v: float = 0.0, r: float = 0.5, use_interval: bool = False,get_time_interval: bool = False):
-        if not self.use_constraint_sweep:
-            return None
-        if use_interval:
-            overlapping_vertices,overlapping_edges = self.constraint_sweep.overlapping_interval_cgal(p1, p2,v, r,get_time_interval=get_time_interval)
-            node_tuples = getattr(self, "_node_current_tuples", None)
-            if node_tuples is None:
-                node_tuples = [tuple(n.current) for n in self.nodes]
-            if get_time_interval:
-                vertices_interval = {node_tuples[vi]: iv for vi, iv in overlapping_vertices.items()}
-                edges_interval = {(node_tuples[e[0]], node_tuples[e[1]]): iv for e, iv in overlapping_edges.items()}
-                return vertices_interval, edges_interval
-            vertices_locations = set(node_tuples[vi] for vi in overlapping_vertices)
-            edges_locations = set((node_tuples[e[0]], node_tuples[e[1]]) for e in overlapping_edges)
-            return vertices_locations, edges_locations
+    def _all_edges_from(self, u_indices, khop: int = -1) -> dict:
+        """``{u: [(v, distance), ...]}`` along the roadmap for each node index in
+        ``u_indices``: ``RoadmapBase.khop_distances`` (``khop=-1`` every node,
+        ``inf`` when unreachable; ``khop=k`` the nodes within ``k`` hops)."""
+        n = len(self.nodes)
+        if n == 0 or self.roadmap.num_nodes != n:
+            raise ValueError("Edges have not been generated yet. Please generate the roadmap first.")
+        return self.roadmap.khop_distances(list(u_indices), khop)
 
-        cache = getattr(self, "_constraint_sweep_locations_cache", None)
-        if cache is not None:
-            cache_key = (p1, p2, v, r)
-            cached = cache.get(cache_key)
-            if cached is not None:
-                return cached
-
-        overlapping_edges = self.constraint_sweep.overlapping_graph_elements_cgal(p1, p2, v, r)
-        node_tuples = getattr(self, "_node_current_tuples", None)
-        if node_tuples is None:
-            node_tuples = [tuple(n.current) for n in self.nodes]
-        edges_locations = set((node_tuples[e[0]], node_tuples[e[1]]) for e in overlapping_edges)
-        if cache is not None:
-            cache[cache_key] = edges_locations
-        return edges_locations
-
-    def get_constraint_segment(self, p1a: Tuple[float, ...],p1b: Tuple[float, ...],p2a: Tuple[float, ...],p2b: Tuple[float, ...],v: float = 0.0,r: float = 0.5) -> bool:
-        p1a = np.array(p1a)
-        p2a = np.array(p2a)
-        p1b = np.array(p1b)
-        p2b = np.array(p2b)
-        if v == 0.0:
-            v1 = p1b-p1a
-            v2 = p2b-p2a
-            t_dur = 1.0
-        else:
-            dist1 = np.linalg.norm(p1b-p1a)
-            dist2 = np.linalg.norm(p2b-p2a)
-            t_dur1 = dist1/v
-            t_dur2 = dist2/v
-            t_dur = min(t_dur1, t_dur2)
-            v1 = (p1b-p1a)/t_dur1 if dist1 > 0.0 else np.zeros(self.dim)
-            v2 = (p2b-p2a)/t_dur2 if dist2 > 0.0 else np.zeros(self.dim)
-        r = 2*r
-        r_vec = p2a-p1a
-        vel = v2-v1
-        tmin = np.clip(-np.dot(vel,r_vec)/(np.dot(vel,vel)+1e-10),0.0,t_dur)
-        r_min_vec = r_vec + vel*tmin
-        if np.linalg.norm(r_min_vec) < r:
-            return True
-        return False
-
-    def point_float_to_int(self, point: Tuple[float, ...]) -> Tuple[int, ...]:
-        """
-        Convert a point from float to integer coordinates.
-
-        Args:
-            point: a point in float coordinates
-        
-        Returns:
-            point: a point in integer coordinates
-        """
-        point_int = []
-        for d in range(self.dim):
-            point_int.append(max(0, min(self.shape[d] - 1, int(round(point[d]+1e-10)))))
-        point_int = tuple(point_int)
-        return point_int
-
-    def set_obstacles(self, obstacles: np.ndarray):
-        self.obstacles = [tuple[Any, ...](obs) for obs in obstacles]
-        self.set_obstacle_map(obstacles)
-
-    def inflate_obstacles(self, radius: float = 1.0, use_expand = True) -> None:
-        """Euclidean ESDF inflation plus the 8-connected (2^dim - 1) ring.
-
-        ``Grid.inflate_obstacles`` marks a free cell when the center-to-center
-        ESDF is within ``radius``. 
-        ``If use_expand is True, the radius will be expanded to the nearest integer multiple of the resolution,
-        allowing to capture diagonal neighbours of an obstacle cell.``
-        """
-        radius = np.ceil(1/(self.resolution*np.sqrt(self.dim)))*np.sqrt(self.dim)*self.resolution if use_expand and radius > 0 else radius
-        super().inflate_obstacles(radius)
-
-    def set_inflation_radius(self, radius: float, use_expand = True):
-        self.inflation_radius = radius
-        self.inflate_obstacles(radius, use_expand)
-        self._esdf_initialized = True
-
-    def clear_data(self):
-        self.road_map = []
-        self.edges = []
-        self.edge_indices_dict = {}
-        self.edge_weights = []
-        self.start = []
-        self.goal = []
+    def _reset_edge_caches(self):
+        """Drop the cached start / goal edge lists (``get_start/goal_nodes_with_all_edges``)."""
         self.start_to_all_edges_dict = {}
         self.goal_to_all_edges_dict = {}
-        self.nodes = []
-        self.node_index_dict = {}
-        self.start_nodes_index = {}
-        self.goal_nodes_index = {}
-        self.grid_nodes_index = {}
-        self.boundary_points = []
-        self.boundary_nodes_index = {}
-        self.cost_matrix = None
-        self.obstacles = []
-        self.inflation_radius = 0.0
-        self._esdf_initialized = False
+        self._start_edges_khop = None
+        self._goal_edges_khop = None
 
-    def save_graph_sampler(self, path: str):
-        data = {
-            "start": self.start,
-            "goal": self.goal,
-            "sample_num": self.sample_num,
-            "num_neighbors": self.num_neighbors,
-            "min_edge_length": self.min_edge_length,
-            "max_edge_length": self.max_edge_length,
+    def get_start_nodes_with_all_edges(self, khop: int = -1):
+        """``{start index: [(v, distance), ...]}`` along the roadmap (see
+        ``_all_edges_from`` for ``khop``), cached per ``khop`` until the
+        roadmap is rebuilt (``Roadmap.apply`` resets the cache)."""
+        if not self.start_to_all_edges_dict or self._start_edges_khop != khop:
+            self.start_to_all_edges_dict = self._all_edges_from(list(self.start_nodes_index.values()), khop)
+            self._start_edges_khop = khop
+        return self.start_to_all_edges_dict
+
+    def get_goal_nodes_with_all_edges(self, khop: int = -1):
+        """Goal twin of ``get_start_nodes_with_all_edges``."""
+        if not self.goal_to_all_edges_dict or self._goal_edges_khop != khop:
+            self.goal_to_all_edges_dict = self._all_edges_from(list(self.goal_nodes_index.values()), khop)
+            self._goal_edges_khop = khop
+        return self.goal_to_all_edges_dict
+
+    # ------------------------------------------------------------ collision sweep
+    def _make_collision_sweep(self):
+        """A ``CollisionSweep`` from ``sweep_backend`` and ``sweep_spatial_index`` (see there)."""
+        return CollisionSweep(self.sweep_backend, self.sweep_spatial_index, self.dim)
+
+    def _roadmap_signature(self):
+        """Content fingerprint of the roadmap the sweep is built for. Remembered while the node list (nodes
+        are immutable; the list is replaced or appended to) and the adjacency matrix (replaced on every
+        change) are the same objects, so repeated calls cost nothing."""
+        nodes, adj = self.nodes, self.roadmap.adj
+        memo = getattr(self, "_signature_memo", None)
+        if memo is not None and memo[0] is nodes and memo[1] == len(nodes) and memo[2] is adj:
+            return memo[3]
+        sig = (
+            len(nodes), len(self.edges),
+            hash(tuple(tuple(n.current) for n in nodes)),
+            hash(tuple((int(e[0]), int(e[1])) for e in self.edges)),
+        )
+        self._signature_memo = (nodes, len(nodes), adj, sig)
+        return sig
+
+    def set_collision_sweep(self, backend: "str | None" = None, spatial_index: "str | None" = None,
+                            force: bool = False):
+        """Bind ``collision_sweep`` to the current roadmap (node positions and directed edges).
+
+        - ``backend`` / ``spatial_index``: switch ``sweep_backend`` / ``sweep_spatial_index`` (None keeps the
+          current one). A change rebuilds ``collision_sweep``, then binds it if the roadmap has nodes.
+        - The index depends on the roadmap only, so it is kept while the roadmap's fingerprint is unchanged;
+          ``force`` rebinds regardless.
+
+        Each bind bumps ``sweep_version``, which planner-side sweep caches key on."""
+        current = (self.sweep_backend, self.sweep_spatial_index)
+        wanted = (backend or current[0], spatial_index or current[1])
+        if wanted != current:
+            self.sweep_backend, self.sweep_spatial_index = wanted
+            self.collision_sweep = self._make_collision_sweep()
+            self._collision_sweep_signature = None
+            if not self.nodes:
+                return
+        sig = self._roadmap_signature()
+        if not force and self._collision_sweep_signature == sig:
+            return
+        self.collision_sweep.set_graph([node.current for node in self.nodes], self.edges)
+        self._collision_sweep_signature = sig
+        self._node_current_tuples = [tuple(n.current) for n in self.nodes]
+        self.sweep_version += 1
+
+    def get_collision_sweep(self, p1: tuple[float,float], p2: tuple[float,float],v=None, r: float = 0.5, use_interval: bool = False,get_time_interval: bool = False):
+        """The planners' per-move disc query: the roadmap elements a disc of radius ``r`` moving ``p1 -> p2``
+        at speed ``v`` touches, keyed by node coordinates.
+
+        - ``use_interval`` and ``get_time_interval``: ``({vertex: (t1, t2)}, {(a, b): (t1, t2)})``, times
+          from 0 at ``p1`` (a wait ``p1 == p2``: ``(0, inf)``).
+        - ``use_interval`` only: the two key sets. Neither: the set of directed edge keys.
+
+        Edge keys include a self-loop ``(p, p)`` for every vertex hit. ``v`` of None or 0: the move takes 1
+        time unit. Not cached: planners memoize it (see ``sipp.graph_generation.cached_collision_sweep``).
+        For agent types and other shapes see ``sweep_paths``."""
+        if not self.use_collision_sweep:
+            return None
+        wait = tuple(p1) == tuple(p2)
+        (vid, vt1, vt2), (src, tgt, et1, et2) = _disc_sweep_paths(
+            self.collision_sweep, [p1] if wait else [p1, p2], r, v or None, goal_hold=float("inf") if wait else 0.0)[0]
+        nt = self._node_current_tuples
+        v_pos, v_win = [nt[i] for i in vid.tolist()], list(zip(vt1.tolist(), vt2.tolist()))
+        vertices = dict(zip(v_pos, v_win))
+        edges = {(nt[a], nt[b]): w for a, b, w in zip(src.tolist(), tgt.tolist(), zip(et1.tolist(), et2.tolist()))}
+        edges.update(((p, p), w) for p, w in zip(v_pos, v_win))
+        if use_interval and get_time_interval:
+            return vertices, edges
+        return (set(vertices), set(edges)) if use_interval else set(edges)
+
+    # ------------------------------------------------------------ agent queries (Agent types, any shape)
+    def sweep_paths(self, agents, paths, t0=0.0, goal_hold=0.0, other=None, clearance: str = "radius",
+                    heading=None, other_heading=None, prev=None, speed=None) -> list:
+        """When each agent's body covers each roadmap vertex and directed edge along its path. One entry
+        per path: ``((vertex, t1, t2), (src, tgt, t1, t2))`` node-index arrays, one row per window,
+        times from ``t0`` at the path's first waypoint. Ball agents use the disc code, other shapes the exact
+        polytope sweep. A single move is a 2-point path; a wait a 1-point path with ``goal_hold`` (``inf``:
+        it stays).
+
+        - ``agents``: one ``Agent`` (type) for all paths, or one per path; speed and turning come from it,
+          and its ``clearance`` expands its body radially (as does ``other``'s; with a clearance the
+          ``"minkowski"`` rule is not available and ``"radius"`` is used).
+        - ``paths``: a list of ``(P, D)`` waypoint arrays.
+        - ``t0``, ``goal_hold``, ``heading``, ``prev``, ``speed``: one value or one per path.
+          ``heading``: a fixed attitude (an angle in 2D; a yaw or 3x3 rotation in 3D).
+        - ``prev``: the waypoint the agent arrives from. It then turns in place at the first waypoint for
+          ``angle / max_rotation`` (covered as its bounding ball) before moving, a waiting polygon keeps its
+          arrival attitude, and elements it still covers on arrival start at ``t0``. Ignored for a
+          never-turning agent (``max_rotation = 0``).
+        - ``speed``: overrides the agent's ``max_speed``.
+        - ``other`` (an ``Agent`` or a radius): who the result will constrain; None: the body alone.
+        - ``clearance="radius"``: the body grows by ``other``'s bounding radius. Exact for ball agents; for
+          polygons every face moves out by it (never less than the true clearance, more near sharp corners).
+        - ``clearance="minkowski"`` (``other`` a polygon / polyhedron ``Agent``): exact. A directed edge is
+          covered while ``other``, anywhere on it and facing along it, would overlap the body; a vertex
+          while ``other`` standing on it would, with attitude ``other_heading`` or, without it, as its
+          bounding ball. A ball ``other`` uses the ``"radius"`` rule.
+
+        Not cached: the planner memoizes what it reuses."""
+        if clearance not in ("radius", "minkowski"):
+            raise ValueError(f"clearance must be 'radius' or 'minkowski', got {clearance!r}")
+        paths = [np.asarray(p, dtype=float).reshape(-1, self.dim) for p in as_path_list(paths)]
+        n = len(paths)
+        agents = [agents] * n if isinstance(agents, Agent) else list(agents)
+        if len(agents) != n:
+            raise ValueError(f"expected one Agent or one per path ({n}), got {len(agents)}")
+        single_point = prev is not None and np.ndim(prev) == 1 and all(np.isscalar(x) for x in prev)
+        prevs = [prev] * n if prev is None or single_point else list(prev)
+        t0s, holds, heads, speeds = (_per_agent(x, n) for x in (t0, goal_hold, heading, speed))
+        movers = [a if sp is None else a.replace(max_speed=sp)
+                  for a, sp in zip(agents, speeds)]
+        prevs = [None if q is None or a.max_rotation == 0 or tuple(map(float, q)) == tuple(p[0]) else
+                 np.asarray(q, dtype=float) for q, a, p in zip(prevs, movers, paths)]
+        # A path arriving from ``prev`` is swept with ``prev`` in front, started earlier by its travel time.
+        arrive = [0.0 if q is None else (1.0 if a.max_speed is None else float(np.linalg.norm(p[0] - q)) / a.max_speed)
+                  for q, a, p in zip(prevs, movers, paths)]
+        full = [p if q is None else np.vstack([q, p]) for q, p in zip(prevs, paths)]
+        out = self._sweep_batch(movers, full, [t - dt for t, dt in zip(t0s, arrive)], holds, other, clearance,
+                                heads, other_heading)
+        for i, (dt, t) in enumerate(zip(arrive, t0s)):
+            if dt > 0.0:                                         # drop what ended before the arrival
+                (vid, t1, t2), (src, tgt, e1, e2) = out[i]
+                kv, ke = t2 > t + 1e-12, e2 > t + 1e-12
+                out[i] = ((vid[kv], np.maximum(t1[kv], t), t2[kv]),
+                          (src[ke], tgt[ke], np.maximum(e1[ke], t), e2[ke]))
+        return out
+
+    def _sweep_batch(self, agents, paths, t0s, holds, other, clearance, heads, other_heading) -> list:
+        """``sweep_paths`` without ``prev``: one result per path, absolute times."""
+        n = len(paths)
+        backend, eps = self.collision_sweep, self.collision_sweep.STRICT_EPS
+        shapes, speeds, turns, buffers = _agent_fields(agents)
+        grow = 0.0
+        if isinstance(other, Agent):
+            body = make_body(other.shape, self.dim)
+            if clearance == "minkowski" and body.ball_r <= 0 and not other.clearance and not any(buffers):
+                return body_roadmap_hits_minkowski(backend, paths, shapes, other.shape, speeds, t0s, turns,
+                                                   holds, heads, eps, other_heading)
+            grow = body.radius + other.clearance
+        elif other is not None:
+            grow = float(other)
+        ball_r = [make_body(sh, self.dim).ball_r for sh in shapes]
+        out = [None] * n
+        for is_ball in (True, False):
+            idx = [i for i in range(n) if (ball_r[i] > 0) == is_ball]
+            take = lambda xs: [xs[i] for i in idx]
+            if not idx:
+                continue
+            if is_ball:
+                res = _disc_sweep_paths(backend, take(paths), [ball_r[i] + buffers[i] + grow for i in idx],
+                                        take(speeds), take(t0s), take(turns), take(holds))
+            else:
+                res = _assemble_hits(backend, len(idx), *body_roadmap_hits(
+                    backend, take(paths), take(shapes), take(speeds), take(t0s), take(turns), take(holds),
+                    take(heads), eps, [buffers[i] + grow for i in idx]), True)
+            for i, r in zip(idx, res):
+                out[i] = r
+        return out
+
+    def agent_conflicts(self, agents, paths, t0=0.0, goal_hold=0.0, heading=None, pairs=None,
+                        first_only: bool = False, as_arrays: bool = False):
+        """When two agents' bodies overlap along their paths: ``{(i, j): [(t1, t2), ...]}`` with ``i < j``.
+        ``first_only``: ``{(i, j): first contact time}``. ``as_arrays``: ``(i, j, t1, t2)`` arrays.
+        ``pairs``: only check these agent pairs. ``agents``, ``paths``, ``t0``, ``goal_hold`` and ``heading``
+        as in ``sweep_paths``. Exact; no roadmap is needed."""
+        paths = as_path_list(paths)
+        agents = [agents] * len(paths) if isinstance(agents, Agent) else list(agents)
+        shapes, speeds, turns, buffers = _agent_fields(agents)
+        return self.collision_sweep.agent_conflicts(paths, shapes, speeds, t0, turns, goal_hold, heading, pairs,
+                                                    first_only, as_arrays, buffers)
+
+    def get_constraint_segment(self, p1a: Tuple[float, ...], p1b: Tuple[float, ...], p2a: Tuple[float, ...],
+                               p2b: Tuple[float, ...], v=None, r: float = 0.5, agents=None, heading=None) -> bool:
+        """Whether two agents collide while moving ``p1a -> p1b`` and ``p2a -> p2b`` over the same time step,
+        both starting at 0: ``agent_conflicts`` on the pair.
+
+        - ``agents``: one ``Agent`` for both moves or one per move, any shape; each move takes its length /
+          ``max_speed`` (1 time unit if ``max_speed`` is None). Default: discs of radius ``r`` at speed ``v``
+          (None or 0: 1 time unit). A moved agent is gone once it arrives.
+        - A wait (``a == b``) lasts the whole step (the longest move's duration).
+        - ``heading``: one fixed attitude per move (None: a move faces along itself). A waiting polygon
+          without a heading is checked as its bounding ball, since its attitude is unknown."""
+        if agents is None:
+            if r <= 0:
+                return False
+            agents = Agent.disc(r, v or None)
+        agents = [agents] * 2 if isinstance(agents, Agent) else list(agents)
+        heads = [None, None] if heading is None else list(heading)
+        moves = [(tuple(p1a), tuple(p1b)), (tuple(p2a), tuple(p2b))]
+        waits = [a == b for a, b in moves]
+        for i, (ag, w) in enumerate(zip(agents, waits)):
+            if w and heads[i] is None and not ag.is_ball:
+                agents[i] = Agent(ag.radius, ag.max_speed, ag.max_rotation, ag.type, ag.clearance)
+        dur = [1.0 if ag.max_speed is None else float(np.linalg.norm(np.subtract(b, a))) / ag.max_speed
+               for ag, (a, b), w in zip(agents, moves, waits) if not w]
+        step = max(dur, default=1.0)
+        paths = [np.array([a]) if w else np.array([a, b]) for (a, b), w in zip(moves, waits)]
+        holds = [step if w else 0.0 for w in waits]
+        return bool(self.agent_conflicts(agents, paths, goal_hold=holds, first_only=True,
+                                         heading=None if all(h is None for h in heads) else heads))
+
+    # ------------------------------------------------------------ persistence and transforms
+    def clear_data(self):
+        """Drop the start / goal, obstacles, samples and roadmap (and the start / goal edge caches)."""
+        super().clear_data()
+        self._reset_edge_caches()
+        self.node_sampler.reset()
+        self.roadmap.reset()
+
+    PICKLE_VERSION = 3          # 3: the type map (compressed) replaces the obstacle list; 2 still loads
+
+    def _settings(self) -> dict:
+        """The map's settings, as saved and as passed to a copy's constructor."""
+        return {
             "use_discrete_space": self.use_discrete_space,
-            "grid_points": self.grid_points,
-            "boundary_points": self.boundary_points,
-            "nodes": self.nodes,
-            # ndarray, not list-of-tuples: pickling 4.5M tuples costs ~10s / ~200MB, the array
-            # milliseconds / ~70MB. set_obstacles() accepts either on load.
-            "obstacles": np.asarray(self.obstacles, dtype=np.int64) if len(self.obstacles)
-                         else [],
-            "obs_size": self.obs_size,
-            "inflation_radius": self.inflation_radius,
-            "track_with_link": self.track_with_link,
-            "road_map": self.road_map,
-            "road_map_edge_weights": self.road_map_edge_weights,
-            "use_constraint_sweep": self.use_constraint_sweep,
-            "record_sweep": self.record_sweep,
-            "use_exact_collision_check": self.use_exact_collision_check,
-            "sweep_backend": getattr(self, "sweep_backend", "cgal"),
-            "sampling_dist_dict": self.sampling_dist_dict,
+            "use_collision_sweep": self.use_collision_sweep,
+            "sweep_backend": self.sweep_backend,
+            "sweep_spatial_index": self.sweep_spatial_index,
         }
 
+    def save_graph_sampler(self, path: str):
+        """Pickle the map as plain data (version 3): the settings, the start / goal, the type map
+        (obstacles, inflation and start / goal cells; zlib-compressed), ``node_sampler.state_dict()`` (nodes,
+        kinds, ``sampling_dist_dict``) and ``roadmap.state_dict()`` (nodes, adjacency, ``roadmap_config``).
+        The type map is restored on load instead of re-marking the obstacles and recomputing the distance
+        field to inflate them (seconds on a large map); the obstacle list is read back off it. Neither the
+        sampler nor the roadmap is pickled itself (both reference the map), nor is ``collision_sweep``: it
+        is rebuilt from the settings on load."""
+        data = {
+            "version": self.PICKLE_VERSION,
+            **self._settings(),
+            "start": self.start,
+            "goal": self.goal,
+            "node_sampler": self.node_sampler.state_dict(),
+            "roadmap": self.roadmap.state_dict(),
+            "type_map": _pack_array(self.type_map.data),
+            "obs_size": self.obs_size,
+            "inflation_radius": self.inflation_radius,
+        }
         with open(path, 'wb') as f:
             pickle.dump(data, f)
 
     def load_graph_sampler(self, path: str, args: dict = {}):
+        """Restore a map saved by ``save_graph_sampler``. ``args`` overrides the saved ``use_collision_sweep``,
+        ``sweep_backend`` and ``sweep_spatial_index``."""
         with open(path, 'rb') as f:
             data = pickle.load(f)
+        if not isinstance(data, dict) or data.get("version") not in (2, self.PICKLE_VERSION):
+            raise ValueError(f"{path}: not a version 2 or {self.PICKLE_VERSION} graph sampler pickle "
+                             "(written by older code: rebuild the map)")
         self._load_from_dict(data, args)
 
-    def _load_from_dict(self, data: dict, args: dict = {}):
-
+    def _load_from_dict(self, data: dict, args: dict = {}, grid_from: "GraphSampler | None" = None):
+        """Restore the data ``save_graph_sampler`` writes: the settings, start / goal, the grid (version 3:
+        the type map; version 2: the obstacle list, re-marked and inflated) and the ``node_sampler`` /
+        ``roadmap`` state dicts. ``grid_from``: a map with the same bounds, resolution, start / goal,
+        obstacles and inflation, whose grid is copied instead (``data`` then needs no grid)."""
         self.use_discrete_space = data["use_discrete_space"]
         self.set_start(data["start"])
         self.set_goal(data["goal"])
-        self.set_parameters(data["sample_num"], data["num_neighbors"], data["min_edge_length"], data["max_edge_length"])
-        self.num_total_nodes = self.sample_num + len(self.start) + len(self.goal)
-        self.sampling_dist_dict = data.get("sampling_dist_dict", {})
 
-
-        self.nodes = data["nodes"]
-        self.obstacles = data["obstacles"]
-        self.obs_size = data["obs_size"] if "obs_size" in data else 0.5
+        self.obs_size = data["obs_size"]
         self.inflation_radius = data["inflation_radius"]
-        self.set_obstacles(self.obstacles)
-        self.set_inflation_radius(self.inflation_radius)
-        self.track_with_link = data["track_with_link"]
-        self.grid_points = data["grid_points"]
-        self.boundary_points = data.get("boundary_points", [])
+        if grid_from is not None:
+            self._copy_grid(grid_from)
+        elif "type_map" in data:
+            type_map = _unpack_array(data["type_map"])
+            if type_map.shape != tuple(self.shape):
+                raise ValueError(f"saved type map {type_map.shape} does not match the map's shape {tuple(self.shape)}")
+            self._type_map = GridTypeMap(type_map)      # a fresh map: ESDF + connectivity recomputed on use
+            self.obstacles = None                        # read off the type map on first access
+        else:                                            # version 2
+            self.set_obstacles(data["obstacles"])
+            self.inflate_obstacles(self.inflation_radius)
 
-        # Set up node index dict
-        self.node_index_dict = {node: i for i, node in enumerate(self.nodes)}
-        self.cost_matrix = cdist(np.array([node.current for node in self.nodes]), np.array([node.current for node in self.nodes]), metric='euclidean')
-        self.start_nodes_index = {Node(tuple(start),None,0,0):self.node_index_dict[Node(tuple(start),None,0,0)] for start in self.start}
-        self.goal_nodes_index = {Node(tuple(goal),None,0,0):self.node_index_dict[Node(tuple(goal),None,0,0)] for goal in self.goal}
-        self.grid_nodes_index = {Node(tuple(grid_point),None,0,0):self.node_index_dict[Node(tuple(grid_point),None,0,0)] for grid_point in self.grid_points}
-        self._rebuild_boundary_nodes_index()
+        self.node_sampler.load_state_dict(data["node_sampler"])       # plain-array state dicts: they carry
+        self.roadmap = Roadmap(self, config=data["roadmap"].get("config"))   # the config and sampling parameters
+        self.roadmap.load_state_dict(data["roadmap"])
+        # nodes / pos_index_dict / edges / edge_weights / road_map are views over the sampler and roadmap.
+        # The start/goal edge lists are built lazily by get_start/goal_nodes_with_all_edges.
 
-        # Calculate edges (must happen before get_start/goal_nodes_with_all_edges)
-        self.road_map = data["road_map"]
-        self.road_map_edge_weights = data["road_map_edge_weights"]
-        self.edges, self.edge_indices_dict, self.edge_weights = self.calculate_edges(self.road_map, self.road_map_edge_weights)
-        self.get_start_nodes_with_all_edges()
-        self.get_goal_nodes_with_all_edges()
-
-        # Set up constraint sweep
-        self.use_constraint_sweep = data["use_constraint_sweep"] if not 'use_constraint_sweep' in args else args["use_constraint_sweep"]
-        self.record_sweep = data["record_sweep"]
-        self.use_exact_collision_check = data["use_exact_collision_check"]
+        # Collision sweep: rebuilt from the settings.
+        self.use_collision_sweep = args.get("use_collision_sweep", data["use_collision_sweep"])
         self.sweep_backend = args.get("sweep_backend", data.get("sweep_backend", "auto"))
-        self.constraint_sweep = self._make_constraint_sweep()
-        if self.use_constraint_sweep:
-            self.set_constraint_sweep()
+        self.sweep_spatial_index = args.get("sweep_spatial_index", data.get("sweep_spatial_index", "grid"))
+        self.collision_sweep = self._make_collision_sweep()
+        self._collision_sweep_signature = None          # the new sweep is unbound, even if the roadmap is not new
+        if self.use_collision_sweep:
+            self.set_collision_sweep()
 
-        points = np.array([samp.current for samp in self.nodes])
-        self.sample_kd_tree = KDTree(points)
+    def _copy_grid(self, source: "GraphSampler", keep_endpoints: bool = True):
+        """Take ``source``'s obstacle grid as copies: its obstacles, type map (obstacles, inflation and the
+        start / goal cells) and ESDF, as ``set_obstacles`` + ``inflate_obstacles`` would rebuild them, but
+        without re-marking every obstacle or recomputing the distance field. The arrays are copied, not
+        shared: ``set_start`` / ``set_goal`` write cells in place. The ESDF keeps the source's lazy state: a
+        stale one (e.g. right after loading, where marking the inflation cells flags it) is recomputed on
+        first use, as it would be on the source, instead of here.
+
+        ``keep_endpoints=False`` drops the source's start / goal marks (for a map with its own endpoints):
+        each such cell becomes what the inflation would have made it, ``TYPES.INFLATION`` within
+        ``inflation_radius`` of an obstacle cell, else ``TYPES.FREE``, found from the obstacle cells around
+        it rather than the whole distance field."""
+        stale = source._esdf_lazy_flag_
+        self.obstacles = None if source._obstacles is None else list(source._obstacles)   # None: still derived
+        self.inflation_radius = source.inflation_radius
+        type_map = source.type_map.data.copy()
+        if not keep_endpoints:
+            self._unmark_endpoints(type_map)
+        self._type_map = GridTypeMap(type_map)           # a fresh map: ESDF + connectivity dirty
+        self._esdf = source._esdf.copy()
+        self._esdf_lazy_flag_ = stale                    # the source's ESDF state; connectivity stays lazy
+        if not stale and source._inflated_esdf_source is source._esdf:   # derived, never written in place
+            self._inflated_esdf, self._inflated_esdf_source = source._inflated_esdf, self._esdf
+
+    def _unmark_endpoints(self, type_map: np.ndarray):
+        """Reset ``type_map``'s start / goal cells (in place) to inflation or free, as ``inflate_obstacles``
+        marks them: the ESDF (distance between cell centres to the nearest obstacle cell, as float32) is at
+        most ``inflation_radius``. Only obstacle cells within that radius are looked at."""
+        cells = np.argwhere((type_map == TYPES.START) | (type_map == TYPES.GOAL))
+        if len(cells) == 0:
+            return
+        reach = int(np.ceil(self.inflation_radius / self.resolution)) if self.inflation_radius > 0 else 0
+        shape = np.asarray(type_map.shape)
+        for cell in cells:
+            lo, hi = np.maximum(cell - reach, 0), np.minimum(cell + reach + 1, shape)
+            window = type_map[tuple(slice(a, b) for a, b in zip(lo, hi))]
+            obstacles = np.argwhere(window == TYPES.OBSTACLE) + lo
+            inflated = False
+            if len(obstacles) and self.inflation_radius > 0:
+                dist = np.sqrt((((obstacles - cell) * self.resolution) ** 2).sum(axis=1)).min()
+                inflated = np.float32(dist) <= self.inflation_radius
+            type_map[tuple(cell)] = TYPES.INFLATION if inflated else TYPES.FREE
 
     def rotate(self, k: int, axes: Tuple[int, int] = (0, 1)):
-        """
-        Rotate the grid type map and all node / start / goal / obstacle positions
-        in-place by k * 90 degrees counterclockwise in the plane of ``axes``.
+        """Rotate the map in place by ``k`` quarter turns counterclockwise in the plane of ``axes`` (two distinct
+        dimensions, as ``numpy.rot90``): the type map, ESDF, obstacles, nodes, start / goal and obstacle nodes.
 
-        ``axes`` is a pair of distinct dimension indices (same convention as ``numpy.rot90``).
-        When k is 1 or 3, the world extents along those two axes are swapped.
-        Road map topology and cost_matrix are unchanged (rotation preserves distances).
-
-        - **Discrete space** (``use_discrete_space`` is True): grid cell indices are
-          rotated with the same mapping as ``numpy.rot90`` on ``type_map``.
-        - **Continuous space** (``use_discrete_space`` is False): world coordinates in
-          the ``(axes[0], axes[1])`` plane are rotated about the **center of the grid
-          bounds** on those axes, using the same corner mapping as the discrete case
-          (normalized coordinates in ``[0, 1]`` per axis).
-
-        Example: for a 2D map, ``rotate(1, (0, 1))`` is a 90° CCW rotation in the
-        plane of dimensions 0 and 1.
-        """
+        Positions turn about the centre of the bounds; for odd ``k`` the two axes' extents swap. This maps
+        cell centres to cell centres exactly as ``rot90`` maps cells, so discrete nodes stay on their cells.
+        Roadmap topology and edge weights are kept, every sampler kind follows its node, and the collision
+        sweep is rebound. Example: ``rotate(1)`` turns a 2D map 90 degrees CCW."""
         a, b = int(axes[0]), int(axes[1])
-        if a == b or not (0 <= a < self.dim) or not (0 <= b < self.dim):
-            raise ValueError(
-                f"axes must be two distinct valid dimension indices, got {axes}"
-            )
-
-        k %= 4  # 0, 1, 2, 3
+        if a == b or not (0 <= a < self.dim and 0 <= b < self.dim):
+            raise ValueError(f"axes must be two distinct valid dimension indices, got {axes}")
+        k %= 4
         if k == 0:
             return
+        lo = np.asarray(self.bounds, dtype=float)[:, 0].copy()
+        ext = np.asarray(self.bounds, dtype=float)[:, 1] - lo
+        shape = np.asarray(self.shape, dtype=float)
 
-        old_bounds = np.asarray(self.bounds, dtype=float).copy()
-        old_shape = tuple(int(s) for s in self.shape)
+        def quarter(u, n):
+            """Turn coordinates ``u`` (``(N, D)``, from the lower corner) in a box of extents ``n``."""
+            u = np.array(u, dtype=float).reshape(-1, self.dim)
+            ua, ub = u[:, a].copy(), u[:, b].copy()
+            u[:, a], u[:, b] = {1: (n[b] - ub, ua), 2: (n[a] - ua, n[b] - ub), 3: (ub, n[a] - ua)}[k]
+            return u
 
-        new_bounds = old_bounds.copy()
-        if k in (1, 3):
-            range_a = old_bounds[a, 1] - old_bounds[a, 0]
-            range_b = old_bounds[b, 1] - old_bounds[b, 0]
-            new_bounds[a, 1] = old_bounds[a, 0] + range_b
-            new_bounds[b, 1] = old_bounds[b, 0] + range_a
+        def move(points):
+            return lo + quarter(np.asarray(points, dtype=float).reshape(-1, self.dim) - lo, ext)
 
-        def rotate_grid_nd(coords: tuple) -> tuple:
-            ca, cb = coords[a], coords[b]
-            if k == 1:
-                new_ca, new_cb = old_shape[b] - 1 - cb, ca
-            elif k == 2:
-                new_ca, new_cb = old_shape[a] - 1 - ca, old_shape[b] - 1 - cb
-            else:
-                new_ca, new_cb = cb, old_shape[a] - 1 - ca
-            lst = list(coords)
-            lst[a], lst[b] = new_ca, new_cb
-            return tuple(lst)
+        # python-motion-planning >= 2.1: ``type_map`` is read-only and the numba kernels read ``_shape_array``;
+        # a fresh GridTypeMap marks the ESDF / connectivity maps dirty, so they are recomputed lazily.
+        self._type_map = GridTypeMap(np.rot90(self.type_map.data.copy(), k=k, axes=(a, b)))
+        self._esdf = np.ascontiguousarray(np.rot90(self._esdf, k=k, axes=(a, b)))
+        self._connectivity_map = np.ascontiguousarray(np.rot90(self._connectivity_map, k=k, axes=(a, b)))
+        self._shape_array = np.asarray(self.shape, dtype=np.int64)
+        if k % 2:
+            self._bounds[[a, b], 1] = lo[[a, b]] + ext[[b, a]]
 
-        def transform_pos_continuous(p: Tuple[float, ...]) -> Tuple[float, ...]:
-            """Rotate world coords in the (a,b) plane about the center of bounds."""
-            lst = [float(v) for v in p]
-            range_a = old_bounds[a, 1] - old_bounds[a, 0]
-            range_b = old_bounds[b, 1] - old_bounds[b, 0]
-            if range_a <= 0.0 or range_b <= 0.0:
-                return tuple(lst)
-            ua = (lst[a] - old_bounds[a, 0]) / range_a
-            ub = (lst[b] - old_bounds[b, 0]) / range_b
-            if k == 1:
-                ua, ub = 1.0 - ub, ua
-            elif k == 2:
-                ua, ub = 1.0 - ua, 1.0 - ub
-            else:
-                ua, ub = ub, 1.0 - ua
-            lst[a] = new_bounds[a, 0] + ua * (new_bounds[a, 1] - new_bounds[a, 0])
-            lst[b] = new_bounds[b, 0] + ub * (new_bounds[b, 1] - new_bounds[b, 0])
-            return tuple(lst)
+        points = move([node.current for node in self.nodes])
+        self.node_sampler.set_positions([tuple(p) for p in points.tolist()])
+        if self.roadmap.num_nodes == len(points):
+            self.roadmap._set_points(points)             # same topology; clearance re-read from the new ESDF
+        self.start = move(self.start).tolist()
+        self.goal = move(self.goal).tolist()
+        if len(self.obstacles) > 0:                      # grid cells: turn their centres
+            cells = quarter(np.asarray(self.obstacles, dtype=float) + 0.5, shape) - 0.5
+            self.obstacles = [tuple(c) for c in np.rint(cells).astype(int).tolist()]
+        self.obstacle_nodes = [Node(tuple(p), None, 0, 0)
+                               for p in move([n.current for n in self.obstacle_nodes]).tolist()]
 
-        def transform_pos(p: Tuple[float, ...]) -> Tuple[float, ...]:
-            if self.use_discrete_space:
-                p_grid = tuple(self.world_to_map(p,discrete=True))
-                new_coords = rotate_grid_nd(p_grid)
-                return tuple(float(v) for v in new_coords)
-            return transform_pos_continuous(p)
+        self._reset_edge_caches()
+        if self.use_collision_sweep and len(self.edges) > 0:
+            self.set_collision_sweep()
 
-        self.type_map = GridTypeMap(
-            np.rot90(self.type_map.data.copy(), k=k, axes=(a, b))
-        )
-        self._esdf = np.rot90(self._esdf.copy(), k=k, axes=(a, b))
+    def pruned(self, kept_node_indices: np.ndarray, return_copy: bool = False) -> "GraphSampler":
+        """Keep only the nodes ``kept_node_indices`` plus the start and goal nodes (always kept), renumbered
+        in increasing index order, and the roadmap edges between them; returns the pruned map.
 
-        self._bounds[:, :] = new_bounds
-
-        self.nodes = [
-            Node(transform_pos(node.current), None, 0, 0) for node in self.nodes
-        ]
-        self.start = [list(transform_pos(tuple(s))) for s in self.start]
-        self.goal = [list(transform_pos(tuple(g))) for g in self.goal]
-        self.grid_points = [transform_pos(tuple(gp)) for gp in self.grid_points]
-        self.boundary_points = [transform_pos(tuple(bp)) for bp in self.boundary_points]
-
-        if len(self.obstacles) > 0:
-            obs = np.asarray(self.obstacles, dtype=int)
-            new_obs = np.empty_like(obs)
-            for idx in range(len(obs)):
-                rotated = rotate_grid_nd(
-                    tuple(int(obs[idx, d]) for d in range(obs.shape[1]))
-                )
-                new_obs[idx] = rotated
-            self.obstacles = [tuple(obs) for obs in new_obs]
-
-        self.obstacle_nodes = [
-            Node(
-                transform_pos(tuple(float(v) for v in n.current)),
-                None,
-                0,
-                0,
-            )
-            for n in self.obstacle_nodes
-        ]
-
-        # 6. Rebuild index dicts
-        self.node_index_dict = {node: i for i, node in enumerate(self.nodes)}
-        self.start_nodes_index = {
-            Node(tuple(s), None, 0, 0): self.node_index_dict[Node(tuple(s), None, 0, 0)]
-            for s in self.start
-        }
-        self.goal_nodes_index = {
-            Node(tuple(g), None, 0, 0): self.node_index_dict[Node(tuple(g), None, 0, 0)]
-            for g in self.goal
-        }
-        self.grid_nodes_index = {
-            Node(tuple(gp), None, 0, 0): self.node_index_dict[Node(tuple(gp), None, 0, 0)]
-            for gp in self.grid_points
-        }
-        self._rebuild_boundary_nodes_index()
-
-        # 7. Clear caches and rebuild derived structures
-        self.start_to_all_edges_dict = {}
-        self.goal_to_all_edges_dict = {}
-
-        if self.nodes:
-            points = np.array([samp.current for samp in self.nodes])
-            self.sample_kd_tree = KDTree(points)
-        else:
-            self.sample_kd_tree = None
-
-        if self.use_constraint_sweep and len(self.edges) > 0:
-            self.set_constraint_sweep()
-
-    def create_pruned_copy(self, kept_node_indices: np.ndarray):
-        """
-        Create a pruned copy of the current GraphSampler that only contains
-        the nodes whose indices are in kept_node_indices and edges between them.
-        """
-        if kept_node_indices is None or len(kept_node_indices) == 0:
-            raise ValueError("kept_node_indices must be a non-empty array of node indices.")
-
-        kept_node_indices = np.asarray(kept_node_indices, dtype=int)
-        kept_set = set(int(i) for i in kept_node_indices.tolist())
-        sorted_kept = sorted(kept_set)
-
-        # Mapping from old node index -> new node index
-        old_to_new = {old_idx: new_idx for new_idx, old_idx in enumerate(sorted_kept)}
-
-        # Pruned nodes (preserve order according to sorted_kept)
-        pruned_nodes = [self.nodes[old_idx] for old_idx in sorted_kept]
-
-        # Pruned grid points: only keep grid nodes whose indices remain
-        pruned_grid_points = []
-        for grid_node, idx in self.grid_nodes_index.items():
-            if idx in kept_set:
-                pruned_grid_points.append(grid_node.current)
-
-        # Same for boundary points
-        pruned_boundary_points = []
-        for boundary_node, idx in self.boundary_nodes_index.items():
-            if idx in kept_set:
-                pruned_boundary_points.append(boundary_node.current)
-
-        # Edges and edge weights restricted to kept nodes
-        pruned_road_map = []
-        pruned_road_map_edge_weights = []
-        has_edge_weights = self.road_map_edge_weights is not None and len(self.road_map_edge_weights) > 0
-
-        for old_i in sorted_kept:
-            neighbors = []
-            weights = []
-            if old_i < len(self.road_map):
-                for nbr_idx, old_j in enumerate(self.road_map[old_i]):
-                    if old_j in kept_set:
-                        neighbors.append(old_to_new[old_j])
-                        if has_edge_weights:
-                            weights.append(self.road_map_edge_weights[old_i][nbr_idx])
-            pruned_road_map.append(neighbors)
-            if has_edge_weights:
-                pruned_road_map_edge_weights.append(weights)
-
-        if not has_edge_weights:
-            pruned_road_map_edge_weights = [[] for _ in pruned_road_map]
-
-        # Determine how many non start/goal nodes remain (treat grid_points as non start/goal)
-        # This mirrors how num_total_nodes is tracked: sample_num + len(start) + len(goal).
-        pruned_sample_num = len(pruned_grid_points)
-
-        pruned_data = {
+        - ``return_copy`` False: prunes this map's node sampler and roadmap in place (the grid, start / goal
+          and settings are unchanged) and returns ``self``. Index-keyed state is renewed: the start / goal
+          edge lists, and the collision sweep is rebound (``sweep_version`` bumps, so planner sweep caches
+          built on the old numbering are not reused).
+        - ``return_copy`` True: leaves this map untouched and returns a new ``GraphSampler`` with the same map
+          and settings (the grid is copied, not rebuilt)."""
+        node_sampler, roadmap = self._pruned_state(kept_node_indices)
+        if not return_copy:
+            self.node_sampler.load_state_dict(node_sampler)
+            self.roadmap = Roadmap(self, config=roadmap["config"])
+            self.roadmap.load_state_dict(roadmap)
+            self._reset_edge_caches()
+            if self.use_collision_sweep and len(self.edges) > 0:
+                self.set_collision_sweep()
+            else:                                        # nothing to bind: drop the old graph's binding
+                self.collision_sweep = self._make_collision_sweep()
+                self._collision_sweep_signature = None
+                self.sweep_version += 1
+            return self
+        settings = self._settings()
+        copy = GraphSampler(bounds=self.bounds, resolution=self.resolution, start=[], goal=[],
+                            roadmap_config={**roadmap["config"], "sample_num": 0}, **settings,
+                            sampling_dist_dict=self.node_sampler.sampling_dist_dict)
+        copy._load_from_dict({                           # the layout save_graph_sampler writes
+            "version": self.PICKLE_VERSION,
+            **settings,
             "start": self.start,
             "goal": self.goal,
-            "sample_num": pruned_sample_num,
-            "num_neighbors": self.num_neighbors,
-            "min_edge_length": self.min_edge_length,
-            "max_edge_length": self.max_edge_length,
-            "use_discrete_space": self.use_discrete_space,
-            "grid_points": pruned_grid_points,
-            "boundary_points": pruned_boundary_points,
-            "nodes": pruned_nodes,
-            "obstacles": self.obstacles,
+            "node_sampler": node_sampler,
+            "roadmap": roadmap,
+            "obs_size": self.obs_size,
             "inflation_radius": self.inflation_radius,
-            "track_with_link": self.track_with_link,
-            "road_map": pruned_road_map,
-            "road_map_edge_weights": pruned_road_map_edge_weights,
-            "use_constraint_sweep": self.use_constraint_sweep,
-            "record_sweep": self.record_sweep,
-            "use_exact_collision_check": self.use_exact_collision_check,
-            "sweep_backend": getattr(self, "sweep_backend", "cgal"),
-            "sampling_dist_dict": self.sampling_dist_dict,
+        }, grid_from=self)                              # same map: copy the grid rather than rebuild it
+        return copy
+
+    def _pruned_state(self, kept_node_indices: np.ndarray) -> Tuple[dict, dict]:
+        """The ``node_sampler`` and ``roadmap`` state dicts of this map restricted to ``kept_node_indices`` plus
+        the start and goal nodes, renumbered in increasing index order (see ``pruned``)."""
+        if kept_node_indices is None or len(kept_node_indices) == 0:
+            raise ValueError("kept_node_indices must be a non-empty array of node indices.")
+        start_goal = set(self.start_nodes_index.values()) | set(self.goal_nodes_index.values())
+        kept = sorted(set(np.asarray(kept_node_indices, dtype=int).tolist()) | start_goal)
+        kept_arr = np.asarray(kept, dtype=np.int64)
+        m = len(kept_arr)
+        new_index = np.full(len(self.nodes), -1, dtype=np.int64)
+        new_index[kept_arr] = np.arange(m)
+        # The edges between kept nodes, in their old order (rows stay sorted: the renumbering is monotone).
+        adj = self.roadmap.adj
+        rows = np.repeat(np.arange(adj.shape[0]), np.diff(adj.indptr))
+        keep = (new_index[rows] >= 0) & (new_index[adj.indices] >= 0)
+        new_rows = new_index[rows[keep]]
+        kinds = {kind: sorted(int(new_index[i]) for i in index.values() if new_index[i] >= 0)
+                 for kind, index in (("start_points", self.start_nodes_index), ("goal_points", self.goal_nodes_index),
+                                     ("boundary_points", self.boundary_nodes_index))}
+        roadmap_config = {**self.roadmap_config.as_dict(), "sample_num": sum(i not in start_goal for i in kept)}
+        clearance = np.array([self.nodes[i].max_clearance for i in kept], dtype=np.float64)
+        node_sampler = {
+            "sampling_dist_dict": self.node_sampler.sampling_dist_dict,
+            "pos_index_dict": {tuple(self.nodes[i].current): new for new, i in enumerate(kept)},
+            "clearance": clearance,
+            "kinds": {kind: np.array(idx, dtype=np.int64) for kind, idx in kinds.items()},
         }
-
-        # Create a new GraphSampler instance with the same geometric configuration
-        resolution = getattr(self, "resolution", 1.0)
-        pruned_sampler = GraphSampler(
-            bounds=self.bounds,
-            resolution=resolution,
-            start=[],
-            goal=[],
-            sample_num=0,
-            num_neighbors=self.num_neighbors,
-            min_edge_len=self.min_edge_length,
-            max_edge_len=self.max_edge_length,
-            use_discrete_space=self.use_discrete_space,
-            use_constraint_sweep=self.use_constraint_sweep,
-            record_sweep=self.record_sweep,
-            use_exact_collision_check=self.use_exact_collision_check,
-            sweep_backend=getattr(self, "sweep_backend", "cgal"),
-            sampling_dist_dict=self.sampling_dist_dict,
-        )
-        pruned_sampler._load_from_dict(pruned_data)
-        return pruned_sampler
-
-
-    def plan(self):
-        pass
+        roadmap = {
+            "config": roadmap_config,
+            "nodes": np.array([self.nodes[i].current for i in kept], dtype=np.float64).reshape(m, self.dim),
+            "clearance": clearance,
+            "indptr": np.concatenate([[0], np.cumsum(np.bincount(new_rows, minlength=m))]),
+            "indices": new_index[adj.indices[keep]],
+            "data": np.asarray(adj.data, dtype=np.float64)[keep],
+        }
+        return node_sampler, roadmap

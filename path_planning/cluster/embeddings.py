@@ -40,7 +40,7 @@ from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import connected_components, shortest_path
 from scipy.sparse.linalg import eigsh
 
-from path_planning.cluster.kmeans.graph_kmeans import build_symmetric_adjacency
+from path_planning.cluster.kmeans.graph_kmeans import symmetric_roadmap_edges
 
 EMBEDDING_METHODS = ("gnn", "euclid", "isomap", "spectral")
 EMBEDDING_VERSION = "1"   # bump when the isomap/spectral maths changes (invalidates the cache)
@@ -62,27 +62,15 @@ def node_positions(map_) -> np.ndarray:
     return np.array([n.current for n in map_.nodes], dtype=np.float64)
 
 
-def symmetric_roadmap_csr(map_, pos: Optional[np.ndarray] = None
-                          ) -> Tuple[csr_matrix, np.ndarray]:
+def symmetric_roadmap_csr(map_) -> Tuple[csr_matrix, np.ndarray]:
     """Undirected CSR adjacency (Euclidean edge lengths) of the roadmap plus
     the canonical (u < v, w) edge array used for content hashing. Uses the
     same symmetrizer as GraphKMeans/GraphEM/CTopPRM (k-NN roadmaps can be
     one-directional)."""
-    if pos is None:
-        pos = node_positions(map_)
-    adj = build_symmetric_adjacency(pos, map_.road_map, map_.road_map_edge_weights)
-    rows, cols, vals = [], [], []
-    for u, nbrs in enumerate(adj):
-        for v, w in nbrs:
-            rows.append(u)
-            cols.append(v)
-            vals.append(w)
-    n = len(pos)
-    csr = csr_matrix((np.asarray(vals, dtype=np.float64),
-                      (np.asarray(rows, dtype=np.int64), np.asarray(cols, dtype=np.int64))),
-                     shape=(n, n))
-    und = [(u, v, w) for u, nbrs in enumerate(adj) for v, w in nbrs if u < v]
-    edges = np.array(und, dtype=np.float64).reshape(-1, 3)
+    n, u, v, w = symmetric_roadmap_edges(map_)
+    csr = csr_matrix((w, (u, v)), shape=(n, n))
+    upper = u < v
+    edges = np.stack([u[upper], v[upper], w[upper]], axis=1).astype(np.float64).reshape(-1, 3)
     return csr, edges
 
 
@@ -294,7 +282,7 @@ def compute_embedding(map_, method: str, d: int = 32, *, model=None, data=None,
         return z, info
 
     # isomap / spectral: symmetric graph -> largest component -> (cached) solve
-    csr, edges = symmetric_roadmap_csr(map_, pos)
+    csr, edges = symmetric_roadmap_csr(map_)
     lcc, n_comp, _ = largest_component(csr)
     dropped = np.setdiff1d(np.arange(n), lcc)
     sg = set(map_.start_nodes_index.values()) | set(map_.goal_nodes_index.values())

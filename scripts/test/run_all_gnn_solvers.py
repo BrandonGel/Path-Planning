@@ -1,13 +1,9 @@
 """
-2D Scenario
-Generate a dataset of MAPF instances and their solutions for 4 agents in a 32x32 grid with 0.1 obstacles and 64 permutations.
-Save the dataset in the benchmark/train folder.
+Solve an existing test dataset on its GNN-pruned roadmaps (graph_sampler_<prune>.pkl, built by
+scripts/test/run_create_gnn_maps.py), with every requested solver and velocity. It generates no map: a case
+without its pruned roadmap raises.
 
-Only provide the save path
-python scripts/test/run_all_solvers.py -s /home/bho36/Dropbox/Team_Path_Planning/brandon_graph_data/test -n 4 -p 4 -c 2
-
-Generate a dataset of MAPF instances and their solutions for 4 agents in a 32x32 grid with 0.1 obstacles and 64 permutations.
-python scripts/generate/run_ground_truth.py -s benchmark/train -b 0 32.0 0 32.0 -n 4 -o 0.1 -p 64 -r 1.0 -c 100
+python scripts/test/run_all_gnn_solvers.py -s /home/bho36/Dropbox/Team_Path_Planning/brandon_graph_data/test -n 4 -p 4 -c 2
 
 """
 
@@ -19,24 +15,19 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from path_planning.data_generation.dataset_ground_truth_solve import (
-    create_solutions,
-    create_path_parameter_directory,
-)
-from path_planning.data_generation.dataset_ground_truth_map import create_maps
+from path_planning.multi_agent_planner.mapf_solver import MAPF_SOLVERS, solver_supports
+from path_planning.data_generation.dataset_ground_truth_solve import create_solutions
+from path_planning.data_generation.dataset_util import create_path_parameter_directory
 import argparse
 import yaml
 import random
 import numpy as np
-from math import sqrt   
 # Set seeding so that randomness is deterministic
 random.seed(0)
 np.random.seed(0)
-from path_planning.gnn.dataset_prune import create_prune_mechanism, get_prune_mechanism_folder, get_gnn_paths
+from path_planning.gnn.dataset_prune import get_prune_mechanism_folder, get_gnn_paths
 from path_planning.utils.util import set_map_config
 from path_planning.gnn.dataset_prune import read_prune_mechanism_from_yaml
-from path_planning.data_generation.dataset_visualize_graph import collect_graph_tasks
-from path_planning.gnn.dataset_prune import create_gnn_map_tasks
 from path_planning.data_generation.dataset_util import get_graph_file_path, generate_gnn_sampler_path, generate_base_case_path, get_prediction_file_path, read_gen_config_from_yaml
 
 if __name__ == "__main__":
@@ -54,12 +45,10 @@ if __name__ == "__main__":
     parser.add_argument("-rmt","--road_map_types",type=str, nargs='+', default=['grid', 'prm', 'cdt', 'rrg', 'halton'], help="road map type")
     parser.add_argument("-ar","--agent_radii",nargs='+',type=float, default=[1.0], help="agent radius")
     parser.add_argument("-av","--agent_velocities",nargs='+',type=float, default=[1.0], help="agent velocity")
-    parser.add_argument("-mapf","--mapf_solver_names",type=str, nargs='+', default=["sipp"], choices=["cbs", "icbs", "lacam", "lacam_random", "sipp"], help="MAPF solver to use")
+    parser.add_argument("-mapf","--mapf_solver_names",type=str, nargs='+', default=["sipp"], choices=list(MAPF_SOLVERS), help="MAPF solver to use")
     parser.add_argument("-c","--num_cases",type=int, default=25, help="number of cases to generate")
     parser.add_argument("-t","--time_limit",type=int, default=60, help="time_limit for the solver in seconds")
     parser.add_argument("-m","--max_iterations",type=int, default=10000, help="max iterations for the solver")
-    parser.add_argument("-ds","--use_discrete_space",action="store_true",help="use discrete space",)
-    parser.add_argument("-dp","--delete_failed_path",action="store_true", help="delete failed path")
 
     parser.add_argument("-prune_config","--prune_config",type=str, default='config/prune_config.yaml', help="prune config")
     parser.add_argument("-gen_config","--gen_config",type=str, default='config/gen.yaml', help="start/goal placement config used when the dataset was generated (recorded in the dataset config.yaml)")
@@ -67,7 +56,7 @@ if __name__ == "__main__":
     parser.add_argument("-cp_path","--checkpoint_path",type=str, default=None, help="checkpoint path")
     parser.add_argument("-train","--train_config",type=str, default='config/train.yaml', help="train config file")
     parser.add_argument("-run_id","--run_id",type=str, default=None, help="run_id")
-    parser.add_argument("-gng","--generate_new_graph",action="store_true", help="generate new graph")
+    parser.add_argument("-gng","--generate_new_graph",action="store_true", help="solve every permutation again, also the ones already solved")
     parser.add_argument("-cfg","--config",type=str, default='config/map.yaml', help="config file")
     parser.add_argument("-w","--num_workers",type=int, default=None, help="number of parallel workers for cases (default: auto-detect CPU cores)")
     parser.add_argument("-heurs","--heuristic_types",type=str, default='',choices=['manhattan', 'euclidean','dijkstra'], help="heuristic type")
@@ -155,15 +144,10 @@ if __name__ == "__main__":
             for solver in mapf_solver_names:
             
                 for agent_velocity in agent_velocities:
-                    if 'lacam' in solver and (agent_radius != 0.0 or agent_velocity != 0.0 or road_map_type != "grid"):
-                        continue
-                    if (solver == 'cbs' or solver == 'icbs') and agent_velocity != 0.0:
-                        continue
-                    if solver == 'ccbs' and (agent_radius == 0.0 or agent_velocity == 0.0):
+                    if not solver_supports(solver, agent_radius, agent_velocity, road_map_type):
                         continue
                     map_config['mapf_solver_name'] = solver
                     map_config['agent_velocity'] = agent_velocity
-                    map_config['delete_failed_path'] = args.delete_failed_path
                     map_config['solve_till_success'] = True
                     map_config['resolve_solution'] = True
 

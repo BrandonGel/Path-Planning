@@ -137,7 +137,7 @@ def _run_continuous(
 
 def main():
     # CLI: `python run_neural_attf_continous.py [roadmap_type] [sweep_backend] [--map path/to/mapd.yaml]`
-    # roadmap_type: prm (default), rrg, cdt, voronoi, halton, midpoints, centroids, dt
+    # roadmap_type: halton (default), prm, rrg, cdt, voronoi, midpoints, centroids, dt
     # sweep_backend: auto (default; shapely in 2D, cgal in 3D+), or force cgal/shapely
     map_yaml = _map_yaml_from_argv()  # strip --map first so positionals keep their slots
     roadmap_type = sys.argv[1] if len(sys.argv) > 1 else "halton"
@@ -151,7 +151,7 @@ def main():
         velocity=1.0,
         roadmap_type=roadmap_type,
         sweep_backend=sweep_backend,
-        make_gif=True,  # flip to True to also render the (slower) GIF
+        make_gif=True,
     )
 
 

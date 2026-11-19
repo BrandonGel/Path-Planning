@@ -9,7 +9,7 @@ token-passing logic operates on any roadmap exposed by
 grid, PRM, CDT, RRG, etc.
 
 Spatial primitives are point tuples taken from ``Node.current``. Obstacles are
-checked through ``graph_map.in_collision_point``. The heuristic is Euclidean
+checked through ``graph_map.in_collision``. The heuristic is Euclidean
 over node points. The neural-encoder guidance path is optional and goes through
 a ``GridOverlay`` so the U-Net can still run on non-grid graphs (the encoder
 itself stays 2D-image-based).
@@ -27,8 +27,13 @@ import numpy as np
 from path_planning.common.environment.map.graph_sampler import GraphSampler
 from path_planning.multi_agent_planner.decentralized.neural_attf.cbs import Environment
 from path_planning.multi_agent_planner.decentralized.neural_attf.grid_overlay import GridOverlay
-from path_planning.multi_agent_planner.centralized.sipp.graph_generation import cached_constraint_sweep
+from path_planning.multi_agent_planner.centralized.sipp.graph_generation import cached_collision_sweep
 from path_planning.multi_agent_planner.centralized.sipp.sipp import SippPlanner
+from path_planning.multi_agent_planner.centralized.cbs.data_types import (
+    _bounding_ball, _heading_of, _ori_between, put_heading, start_heading,
+)
+from path_planning.multi_agent_planner.sweep_cache import shared_sweep_cache
+from path_planning.agent import Agent
 
 try:
     import torch  # type: ignore
@@ -44,13 +49,14 @@ def _as_point(p) -> Tuple[float, ...]:
     return tuple(float(c) for c in p)
 
 
-def _point_schedule(p, t) -> dict:
-    """A timed-waypoint dict ``{x, y[, z], t}`` for SIPP dynamic obstacles."""
+def _point_schedule(p, t, heading=None) -> dict:
+    """A timed-waypoint dict ``{x, y[, z], t[, yaw[, pitch]]}`` for SIPP dynamic obstacles; ``heading`` is a
+    ``State.ori`` (degrees; ``(yaw, pitch)`` in 3D)."""
     p = _as_point(p)
     d = {"x": float(p[0]), "y": float(p[1]), "t": float(t)}
     if len(p) == 3:
         d["z"] = float(p[2])
-    return d
+    return put_heading(d, heading)
 
 
 class _Waypoint(tuple):
@@ -64,16 +70,51 @@ class _Waypoint(tuple):
     inside the tick, which appears as the same vertex twice with its arrival and
     departure fractions - and other agents plan against exactly that motion.
     ``via_t=None`` (legacy) means "unknown": consumers fall back to constant
-    speed within the tick (arc-length fractions).
+    speed within the tick (arc-length fractions). ``yaw`` is the heading the body
+    faces at this waypoint (a ``State.ori``: degrees, ``(yaw, pitch)`` in 3D), i.e.
+    that of its last move; None when unknown (see :func:`_with_headings`).
     """
 
-    def __new__(cls, pos, via=(), via_t=None):
+    def __new__(cls, pos, via=(), via_t=None, yaw=None):
         obj = super().__new__(cls, tuple(float(c) for c in pos))
         obj.via = tuple(tuple(float(c) for c in v) for v in via)
         obj.via_t = None if via_t is None else tuple(float(f) for f in via_t)
+        obj.yaw = yaw
         if obj.via_t is not None and len(obj.via_t) != len(obj.via):
             raise ValueError("via_t must align with via")
         return obj
+
+
+def _with_headings(points, heading) -> list:
+    """``points`` as :class:`_Waypoint` s carrying ``yaw``: the direction of the last move made up to each one
+    (through its vias), ``heading`` before the first move. Bodies face along each move and keep that heading
+    while waiting, which is how SIPP plans them (instant turns)."""
+    out, prev = [], None
+    for p in points:
+        via = getattr(p, "via", ())
+        if prev is not None:
+            for a, b in zip((prev,) + via, via + (tuple(p),)):
+                if a != b:
+                    heading = _ori_between(a, b)
+        out.append(_Waypoint(p, via, getattr(p, "via_t", None), heading))
+        prev = tuple(out[-1])
+    return out
+
+
+def _last_move_heading(timed, i, heading):
+    """The heading after the last move among ``timed[0..i]`` (``[(point, t), ...]``), ``heading`` if none."""
+    for j in range(i, 0, -1):
+        if timed[j - 1][0] != timed[j][0]:
+            return _ori_between(timed[j - 1][0], timed[j][0])
+    return heading
+
+
+def _point_segment_dist(p, a, b) -> float:
+    """Distance from point ``p`` to the segment ``a -> b``."""
+    ab = [y - x for x, y in zip(a, b)]
+    denom = sum(c * c for c in ab)
+    s = 0.0 if denom <= 0.0 else max(0.0, min(1.0, sum((q - x) * c for q, x, c in zip(p, a, ab)) / denom))
+    return math.dist(p, [x + s * c for x, c in zip(a, ab)])
 
 
 def _via_fracs_from(prev, wp):
@@ -95,28 +136,6 @@ def _via_fracs_from(prev, wp):
     return out
 
 
-def _wp(p):
-    """Position tuple for a path entry, keeping ``_Waypoint`` (and its vias) intact."""
-    return p if isinstance(p, _Waypoint) else tuple(p)
-
-
-class _Loc:
-    """Minimal stand-in exposing ``.point`` (matches cbs.Location's interface)."""
-    __slots__ = ("point",)
-
-    def __init__(self, point):
-        self.point = _wp(point)
-
-
-class _SegState:
-    """Minimal path state exposing ``.location.point`` so SIPP-derived paths plug
-    into the same join code as the grid Environment solution states."""
-    __slots__ = ("location",)
-
-    def __init__(self, point):
-        self.location = _Loc(point)
-
-
 class NeuralATTF:
     def __init__(
         self,
@@ -130,8 +149,6 @@ class NeuralATTF:
         num_goal_wait_steps: int = 0,
         heuristic_type: str = "euclidean",
         deadlock_radius: float = 2.0,
-        agent_radius: float = 0.0,
-        velocity: float = 0.0,
         low_level: str = "grid",
         device: str = "cpu",
         sipp_time_limit: float | None = None,
@@ -141,6 +158,15 @@ class NeuralATTF:
         sipp_obstacle_horizon: float | None = None,
         sipp_clearance_margin: float = 0.005,
     ):
+        """Token passing over ``graph_map`` for ``agents``: dicts with ``name``, ``start`` and, for agents with
+        a body, ``"agent"`` (an ``Agent``: any 2D / 3D shape, ``clearance``, ``max_speed``), optionally a start
+        ``yaw`` (+ ``pitch`` in 3D, degrees). No ``"agent"`` anywhere: point particles; mixing raises.
+
+        Everything about a body comes from its ``Agent``. The SIPP low level plans the exact shapes (a body
+        faces along each move and keeps its heading while waiting) and the speed (``max_speed``; None: one
+        time unit per move). The bookkeeping around it (resting footprints, parking and escape choices, the
+        grid low level's obstacles, the pre-move to the roadmap) treats each body as its bounding ball
+        (radius + clearance), which is cautious for polygons."""
         self.graph_map = graph_map
         self.agents = agents
         self.assigned_tasks = set()
@@ -151,8 +177,11 @@ class NeuralATTF:
         self.heuristic_type = heuristic_type
         self.a_star_max_iter = a_star_max_iter
         self.deadlock_radius = float(deadlock_radius)
-        self.agent_radius = float(agent_radius)
-        self.velocity = float(velocity)
+        self.bodies = {a["name"]: a.get("agent") for a in agents}
+        with_body = [b is not None for b in self.bodies.values()]
+        if any(with_body) and not all(with_body):
+            raise ValueError('Neural-ATTF: every agent dict needs an "agent" (an Agent) once any of them has one')
+        self._max_reach = max((b.reach for b in self.bodies.values() if b is not None), default=0.0)
         self.low_level = low_level
         self.device = device
         # Wall-clock cap (s) per SIPP low-level call; None = unbounded (stops only
@@ -174,21 +203,21 @@ class NeuralATTF:
         # task or a parking spot at the next time_forward), while an idle, unassigned
         # agent (committed path of length 1) blocks its footprint until it is moved.
         self.sipp_obstacle_horizon = sipp_obstacle_horizon
-        # Extra agent-agent clearance (world units) handed to SIPP on top of agent_radius.
-        # The sweep clears other agents at exactly 2 * radius and the solution checker
-        # flags distance <= 2 * radius, so tangential passes would sit on the threshold.
+        # Extra clearance (world units) each body gets in SIPP on top of its own. The
+        # sweep clears two bodies at exactly touching distance and the solution checker
+        # flags touching as a collision, so tangential passes would sit on the threshold.
         self.sipp_clearance_margin = float(sipp_clearance_margin)
+        self._sipp_bodies = {name: self._grown(body) for name, body in self.bodies.items()}
 
-        # Agent footprint is the set of graph nodes a radius-``agent_radius`` disk
-        # covers (computed via the map's CGAL swept-collision query), so it works on
-        # any roadmap — grid or continuous PRM. At radius 0 an agent is a point.
-        self._coverage_cache: dict = {}
+        # An agent's footprint is the set of graph nodes its body covers (the map's
+        # swept-collision query), so it works on any roadmap - grid or continuous PRM.
+        # Point particles cover only the node they stand on.
         self._node_kdtree = None       # nearest-node snap (built from graph_map.nodes)
         self._node_kdtree_n = -1
-        if self.agent_radius > 0 or self.low_level == "sipp":
-            # SIPP / radius coverage both rely on the CGAL constraint sweep.
-            self.graph_map.use_constraint_sweep = True
-            self.graph_map.set_constraint_sweep()
+        if self._max_reach > 0 or self.low_level == "sipp":
+            # SIPP / body coverage both rely on the collision sweep.
+            self.graph_map.use_collision_sweep = True
+            self.graph_map.set_collision_sweep()
 
         non_task_endpoints = [tuple(p) for p in non_task_endpoints]
         if len(agents) > len(non_task_endpoints):
@@ -233,7 +262,7 @@ class NeuralATTF:
         # agent name -> earliest step its parking dispatch may run again (back-off).
         self.token["park_retry_after"] = {}
         for a in self.agents:
-            start = tuple(a["start"])
+            start = _Waypoint(a["start"], yaw=start_heading(a))   # given yaw, else 0
             self.token["agents"][a["name"]] = [start]
             self.token["path_ends"].add(start)
             if start in self.non_task_endpoints:
@@ -335,80 +364,141 @@ class NeuralATTF:
                     assigned_agents.add(agent)
         return assigned_pairs, valid_pairs
 
+    # ------------------------------------------------------------------ bodies
+
+    def _reach(self, name=None) -> float:
+        """Bounding radius + clearance of ``name``'s body (0 for a point particle; no name: the largest)."""
+        if name is None:
+            return self._max_reach
+        body = self.bodies.get(name)
+        return 0.0 if body is None else body.reach
+
+    def _gap(self, name=None, other=None) -> float:
+        """How close the centres of ``name`` and ``other`` may come, as bounding balls: the sum of their
+        reaches, an agent not named counting as the largest body (1e-9 for point particles)."""
+        return max(self._reach(name) + self._reach(other), 1e-9)
+
+    def _sipp_gap(self, name, other) -> float:
+        """:meth:`_gap` with both bodies grown by ``sipp_clearance_margin`` (0 for point particles)."""
+        if self._max_reach <= 0:
+            return 0.0
+        return self._reach(name) + self._reach(other) + 2.0 * self.sipp_clearance_margin
+
+    def _speed(self, name):
+        """``name``'s ``max_speed`` (None: point particle, or one time unit per move)."""
+        body = self.bodies.get(name)
+        return None if body is None else body.max_speed
+
+    def _grown(self, body):
+        """``body`` grown by ``sipp_clearance_margin``: what SIPP plans an agent as, and what other agents
+        see it as (None for a point particle). A ball keeps the plain-disc form (same sweep cache keys)."""
+        if body is None:
+            return None
+        m = self.sipp_clearance_margin
+        if body.is_ball and not body.clearance:
+            return Agent.disc(body.radius + m, body.max_speed, type=body.type)
+        return body.replace(clearance=body.clearance + m)
+
+    def _faces(self, name) -> bool:
+        """Whether ``name``'s heading matters for its collisions (a body that is not a ball)."""
+        body = self.bodies.get(name)
+        return body is not None and not body.is_ball
+
+    def _heading(self, name):
+        """The heading ``name`` faces now: that of its current waypoint (every committed one carries it;
+        0 if one does not)."""
+        here = self.token["agents"][name][0]
+        yaw = getattr(here, "yaw", None)
+        return start_heading({"start": here}) if yaw is None else yaw
+
     # ----------------------------------------------------- dynamic obstacles
 
-    def _covered_nodes(self, p1, p2) -> set:
+    def _covered_nodes(self, p1, p2, owner, other=None) -> set:
         """
-        Graph nodes a radius-``agent_radius`` disk covers while moving ``p1 -> p2``.
+        Graph nodes ``owner``'s body covers while moving ``p1 -> p2`` (resting there
+        when ``p1 == p2``), for ``other``'s body standing on them: its bounding ball,
+        the largest body when ``other`` is None.
 
-        Uses the map's CGAL swept-collision query (the same machinery as CBS/SIPP),
-        which returns the exact set of roadmap vertices/edges the moving disk
-        overlaps — real ``node.current`` tuples, so they match A* state points on any
-        roadmap (grid or continuous PRM). At ``agent_radius == 0`` (or if the sweep is
-        unavailable) the footprint collapses to the single point ``p2``.
+        Uses the map's swept-collision query (the same machinery as CBS/SIPP), which
+        returns the roadmap vertices/edges the moving body overlaps - real
+        ``node.current`` tuples, so they match A* state points on any roadmap (grid
+        or continuous PRM). A moving polygon faces along its move; a resting one
+        faces ``p2.yaw`` when ``p2`` carries it, else it counts as its bounding ball.
+        For point particles (or if the sweep fails) the footprint is the point ``p2``.
         """
+        yaw = getattr(p2, "yaw", None)
         p1 = tuple(float(c) for c in p1)
         p2 = tuple(float(c) for c in p2)
-        if self.agent_radius <= 0:
+        body = self.bodies.get(owner)
+        if body is None:
             return {p2}
-        key = (p1, p2)
-        cached = self._coverage_cache.get(key)
-        if cached is not None:
-            return cached
+        grow = self._reach(other)
+        wait = p1 == p2
+        heading = None
+        if wait and not body.is_ball:
+            if yaw is None:   # unknown attitude: its bounding ball
+                body = _bounding_ball(body)
+            else:
+                heading = _heading_of(yaw)
+        key = (body.key, grow, p1, p2, None if heading is None else yaw)
+        return shared_sweep_cache(self.graph_map, "neural_attf").get_or_compute(
+            key, lambda: self._sweep_cover(body, p1, p2, owner, grow, heading))
+
+    def _sweep_cover(self, body, p1, p2, owner, grow, heading) -> set:
+        """:meth:`_covered_nodes` worked out (not cached)."""
+        wait = p1 == p2
         covered = {p2}
         try:
-            sweep = self.graph_map.get_constraint_sweep(
-                p1, p2, self.velocity, 2.0 * self.agent_radius, use_interval=True
-            )
-            if sweep is not None:
-                verts, edges = sweep
-                covered |= set(verts)
-                for a, b in edges:
-                    covered.add(tuple(a))
-                    covered.add(tuple(b))
+            (vid, _, _), (src, tgt, _, _) = self.graph_map.sweep_paths(
+                body, [np.array([p1] if wait else [p1, p2], dtype=float)],
+                goal_hold=float("inf") if wait else 0.0, other=grow,
+                heading=None if heading is None else [heading])[0]
+            nt = self.graph_map._node_current_tuples
+            covered |= {nt[i] for i in vid.tolist()} | {nt[i] for i in src.tolist()} | {nt[i] for i in tgt.tolist()}
         except Exception:
-            # Fallback: nodes within the disk via the roadmap KD-tree.
-            kdt = getattr(self.graph_map, "sample_kd_tree", None)
-            if kdt is not None:
-                idxs = kdt.query_ball_point(np.asarray(p2, dtype=float), self.agent_radius)
-                for i in idxs:
+            # Fallback: the roadmap nodes within its bounding ball.
+            if self.graph_map.nodes:
+                for i in self._node_tree().query_ball_point(np.asarray(p2, dtype=float), self._reach(owner)):
                     covered.add(tuple(self.graph_map.nodes[int(i)].current))
-        self._coverage_cache[key] = covered
         return covered
 
-    def get_moving_obstacles_agents(self, agents, time_start: int) -> dict:
+    def get_moving_obstacles_agents(self, agents, time_start: int, planner=None) -> dict:
+        """``{(x, y, k): owner}``: the nodes each moving agent covers at step ``k`` after ``time_start``,
+        for ``planner``'s body (None: the largest)."""
         obstacles: dict = {}
         for name, path in agents.items():
             if len(path) > time_start and len(path) > 1:
                 for i in range(time_start, len(path)):
                     k = i - time_start
-                    # Cover the swept motion arriving at this timestep (radius-aware,
+                    # Cover the swept motion arriving at this timestep (body-aware,
                     # graph-node footprint) rather than crude grid offsets.
                     prev = path[i - 1] if i >= 1 else path[i]
-                    for c in self._covered_nodes(prev, path[i]):
+                    for c in self._covered_nodes(prev, path[i], name, planner):
                         obstacles[(c[0], c[1], k)] = name
                     if i == len(path) - 1:
-                        for c in self._covered_nodes(path[i], path[i]):
+                        for c in self._covered_nodes(path[i], path[i], name, planner):
                             obstacles[(c[0], c[1], k + 1)] = name
         return obstacles
 
-    def get_idle_obstacles_agents(self, agents_paths, delayed_agents, _time_start: int = 0) -> set:
+    def get_idle_obstacles_agents(self, agents_paths, delayed_agents, planner=None) -> set:
+        """The nodes resting (idle, parked or delayed) agents cover, for ``planner``'s body (None: the
+        largest)."""
         obstacles: set = set()
-        for _, path in agents_paths.items():
+        for name, path in agents_paths.items():
             last = path[-1]
             if len(path) == 1 or last in self.non_task_endpoints:
-                obstacles |= self._covered_nodes(last, last)
+                obstacles |= self._covered_nodes(last, last, name, planner)
         for agent_name in delayed_agents:
             pos = self.token["agents"][agent_name][0]
-            obstacles |= self._covered_nodes(pos, pos)
+            obstacles |= self._covered_nodes(pos, pos, agent_name, planner)
         return obstacles
 
     # ------------------------------------------------------------- idle plan
 
     def check_safe_idle(self, agent_pos, agent_name) -> bool:
-        # Never idle on (or within 2*agent_radius of) a pending task waypoint — a resting agent's
-        # footprint there would block that task's pickup/delivery.
-        clearance = 2.0 * self.agent_radius if self.agent_radius > 0 else 1e-9
+        # Never idle on (or within the bounding-ball gap of) a pending task waypoint - a resting
+        # agent's footprint there would block that task's pickup/delivery.
+        clearance = self._gap(agent_name)
         ap = np.asarray(agent_pos, dtype=float)
         for _, task in self.token["tasks"].items():
             for wp in task:
@@ -428,10 +518,10 @@ class NeuralATTF:
         return True
 
     def _blocks_pending_task(self, endpoint) -> bool:
-        """True if ``endpoint`` lies on (or within 2*agent_radius of) any pending or assigned task
-        waypoint. Parking there would let the resting agent's footprint occupy a task pickup/goal
-        and permanently block that leg, so such endpoints are avoided."""
-        clearance = 2.0 * self.agent_radius if self.agent_radius > 0 else 1e-9
+        """True if ``endpoint`` lies on (or within the largest bounding-ball gap of) any pending or
+        assigned task waypoint. Parking there would let the resting agent's footprint occupy a task
+        pickup/goal and permanently block that leg, so such endpoints are avoided."""
+        clearance = self._gap()
         ep = np.asarray(endpoint, dtype=float)
         for task in self.token["tasks"].values():
             for wp in task:
@@ -565,32 +655,47 @@ class NeuralATTF:
     # ------------------------------------------------------------- A* driver
 
     def plan(
-        self, agent_name, start, goal, all_idle_agents, all_delayed_agents, cost_map, cost: int,
+        self, agent_name, start, goal, all_idle_agents, all_delayed_agents, cost_map, offset_steps: int,
         rest_forever: bool = False,
         final_leg: bool = False,
+        heading=None,
     ):
-        """Low-level plan ``start -> goal`` for one agent.
+        """Low-level plan ``start -> goal`` for one agent: ``{agent_name: [_Waypoint, ...]}``, each
+        carrying the heading there (see :func:`_with_headings`), or False.
 
-        ``cost`` is the tick at which this leg starts relative to now (0 for a leg
+        ``offset_steps`` is the tick at which this leg starts relative to now (0 for a leg
         starting immediately; the running offset for later legs of a multi-waypoint
         task). ``rest_forever`` marks a leg whose end is a permanent rest (parking,
         deadlock relocation, idle reroute): SIPP then only accepts a goal whose safe
         interval is unbounded, so no already-committed path crosses the resting spot.
         Task legs leave it False - the agent rests one tick and is reassigned;
         ``final_leg`` marks the last leg of a task route, whose goal must then stay
-        safe through that one-tick hold (see :meth:`_plan_sipp`).
+        safe through that one-tick hold (see :meth:`_plan_sipp`). ``heading`` is the
+        heading the agent faces at ``start`` (default: the one it faces now).
         """
         start = tuple(start)
         goal = tuple(goal)
+        if heading is None:
+            heading = self._heading(agent_name)
         if self.low_level == "sipp":
-            # Continuous-time, interval-based, radius-aware low-level planning.
-            # cost_map is grid-only; cost is the leg's start-tick offset.
-            return self._plan_sipp(
-                agent_name, start, goal, offset_steps=int(cost), rest_forever=rest_forever,
-                final_leg=final_leg,
+            # Continuous-time, interval-based, body-aware low-level planning.
+            # cost_map is grid-only.
+            points = self._plan_sipp(
+                agent_name, start, goal, offset_steps=int(offset_steps), rest_forever=rest_forever,
+                final_leg=final_leg, heading=heading,
             )
-        moving = self.get_moving_obstacles_agents(self.token["agents"], cost)
-        idle = self.get_idle_obstacles_agents(all_idle_agents, all_delayed_agents, cost)
+        else:
+            points = self._plan_grid(agent_name, start, goal, all_idle_agents, all_delayed_agents, cost_map,
+                                     offset_steps)
+        if not points:
+            return False
+        return {agent_name: _with_headings(points, heading)}
+
+    def _plan_grid(self, agent_name, start, goal, all_idle_agents, all_delayed_agents, cost_map, offset_steps):
+        """The grid low level (time-stepped A* around the other agents' footprints): the path's points, or
+        None."""
+        moving = self.get_moving_obstacles_agents(self.token["agents"], offset_steps, agent_name)
+        idle = self.get_idle_obstacles_agents(all_idle_agents, all_delayed_agents, agent_name)
         agents = [{"name": agent_name, "start": start, "goal": goal}]
         heur = self.heuristic_type if self.heuristic_type in {"manhattan", "euclidean"} else "euclidean"
         # Scale A* budget with graph size so larger maps still terminate within
@@ -607,42 +712,39 @@ class NeuralATTF:
             alpha=self.alpha,
         )
         if env.ignore_agent_dict.get(agent_name, False):
-            return False
+            return None
         solution, _ = env.compute_solution()
-        return solution
+        return [s.location.point for s in solution[agent_name]] if solution else None
 
     # ----------------------------------------------------- SIPP (continuous t)
 
-    def _snap_to_node(self, pt):
-        """Return ``pt`` if it is already a graph node, else the nearest node coord
-        (SIPP states must be graph nodes; resampled mid-edge positions may not be).
-
-        Uses a KD-tree built from the authoritative ``graph_map.nodes`` — the map's
-        own ``sample_kd_tree`` can be stale for roadmap types (cdt/voronoi/rrg) that
-        rebuild the node set, so its indices may not align with ``nodes``."""
-        from path_planning.common.environment.node import Node
-
-        pt = tuple(pt)
-        if Node(pt) in self.graph_map.node_index_dict:
-            return pt
+    def _node_tree(self):
+        """KD-tree over ``graph_map.nodes``, rebuilt when the node count changes (call with nodes present)."""
         nodes = self.graph_map.nodes
-        if not nodes:
-            return pt
         if self._node_kdtree is None or self._node_kdtree_n != len(nodes):
             from scipy.spatial import KDTree
 
             self._node_kdtree = KDTree([tuple(n.current) for n in nodes])
             self._node_kdtree_n = len(nodes)
-        _, idx = self._node_kdtree.query(np.asarray(pt, dtype=float), k=1)
+        return self._node_kdtree
+
+    def _snap_to_node(self, pt):
+        """Return ``pt`` if it is already a graph node, else the nearest node coord
+        (SIPP states must be graph nodes; resampled mid-edge positions may not be).
+
+        Uses a KD-tree built from ``graph_map.nodes``."""
+        pt = tuple(pt)
+        if pt in self.graph_map.pos_index_dict:
+            return pt
+        nodes = self.graph_map.nodes
+        if not nodes:
+            return pt
+        _, idx = self._node_tree().query(np.asarray(pt, dtype=float), k=1)
         return tuple(nodes[int(idx)].current)
 
-    def _snap_start(self, pt):
-        """Nearest ``(node, t_reach)`` of :meth:`_snap_start_candidates`."""
-        return self._snap_start_candidates(pt)[0]
-
-    def _snap_start_candidates(self, pt):
-        """Roadmap nodes a SIPP plan may start from, nearest first, each with the
-        time (s) needed to reach it: ``[(node, t_reach), ...]``.
+    def _snap_start_candidates(self, pt, name):
+        """Roadmap nodes a SIPP plan for ``name`` may start from, nearest first, each
+        with the time (s) it needs to reach it at its speed: ``[(node, t_reach), ...]``.
 
         A re-planned agent usually sits mid-edge (its committed path is sampled per
         tick, so a hold or a re-validation catches it between vertices). Planning
@@ -653,28 +755,27 @@ class NeuralATTF:
         takes. Both endpoints of the edge are offered (nearest first) so the caller
         can fall back to the other one when the move to the nearest is not safe
         (see :meth:`_reach_segment_safe`). Points already on a node (or off every
-        edge) snap as before with ``t_reach = 0``.
+        edge) snap as before with ``t_reach = 0``, as does an agent without a speed.
         """
-        from path_planning.common.environment.node import Node
-
         pt = tuple(float(c) for c in pt)
-        if Node(pt) in self.graph_map.node_index_dict:
+        if pt in self.graph_map.pos_index_dict:
             return [(pt, 0.0)]
         nodes = self.graph_map.nodes
         snapped = self._snap_to_node(pt)
-        if not nodes or self.velocity <= 0:
+        speed = self._speed(name)
+        if not nodes or not speed or speed <= 0:
             return [(snapped, 0.0)]
         p = np.asarray(pt, dtype=float)
         # The containing edge's endpoints can be far from ``pt`` (long aisle edges)
         # while many unrelated nodes are closer, so search every node within one
         # maximum edge length rather than a fixed k nearest.
-        idxs = self._node_kdtree.query_ball_point(p, self._max_edge_len() + 1e-6)
+        idxs = self._node_tree().query_ball_point(p, self._max_edge_len() + 1e-6)
         found = {}  # endpoint -> (distance to edge, endpoint distance)
         for i in idxs:
             i = int(i)
             a = np.asarray(nodes[i].current, dtype=float)
-            for j in self.graph_map.road_map[i]:
-                b = np.asarray(nodes[int(j)].current, dtype=float)
+            for j in self.graph_map.neighbors(i).tolist():
+                b = np.asarray(nodes[j].current, dtype=float)
                 ab = b - a
                 denom = float(ab @ ab)
                 if denom <= 0:
@@ -691,9 +792,9 @@ class NeuralATTF:
         if not found:
             # Off every edge (should not happen for a committed-path position): drive
             # the chord to the nearest node, at least time-consistently.
-            return [(snapped, math.dist(pt, snapped) / self.velocity)]
+            return [(snapped, math.dist(pt, snapped) / speed)]
         ordered = sorted(found.items(), key=lambda kv: kv[1])
-        return [(end, d_end / self.velocity) for end, (_, d_end) in ordered]
+        return [(end, d_end / speed) for end, (_, d_end) in ordered]
 
     def _idle_blocked_nodes(self, agent_name, start) -> set:
         """Roadmap nodes inside the resting footprint of some OTHER idle agent
@@ -701,14 +802,12 @@ class NeuralATTF:
         whose footprint covers ``start`` are skipped (escaping from inside one is
         allowed, see _plan_sipp)."""
         blocked = set()
-        clearance = 2.0 * self.agent_radius if self.agent_radius > 0 else 1e-9
         for name, path in self.token["agents"].items():
             if name == agent_name or len(path) != 1:
                 continue
-            p = tuple(path[0])
-            if math.dist(p, start) <= clearance:
+            if math.dist(path[0], start) <= self._gap(agent_name, name):
                 continue
-            blocked |= self._covered_nodes(p, p)
+            blocked |= self._covered_nodes(path[0], path[0], name, agent_name)
         return blocked
 
     def _statically_reachable(self, agent_name, start, goal) -> bool:
@@ -732,11 +831,13 @@ class NeuralATTF:
         nodes = self.graph_map.nodes
         if not nodes:
             return []
-        pos2idx = {tuple(n.current): i for i, n in enumerate(nodes)}
+        pos2idx = self.graph_map.pos_index_dict
+        neighbors = self.graph_map.neighbors
         s = pos2idx.get(self._snap_to_node(start))
         g = pos2idx.get(self._snap_to_node(goal))
         if s is None or g is None:
             return []
+        blocked = {pos2idx[p] for p in blocked if p in pos2idx} - {g}
         dist = {s: 0.0}
         prev = {}
         heap = [(0.0, s)]
@@ -747,9 +848,8 @@ class NeuralATTF:
             if d > dist.get(u, float("inf")):
                 continue
             pu = nodes[u].current
-            for v in self.graph_map.road_map[u]:
-                v = int(v)
-                if blocked and tuple(nodes[v].current) in blocked and v != g:
+            for v in neighbors(u).tolist():
+                if v in blocked:
                     continue
                 nd = d + math.dist(pu, nodes[v].current)
                 if nd < dist.get(v, float("inf")):
@@ -777,7 +877,7 @@ class NeuralATTF:
     def _max_edge_len(self) -> float:
         """Longest roadmap edge (cached per roadmap size)."""
         nodes = self.graph_map.nodes
-        key = (len(nodes), len(self.graph_map.edges))
+        key = (len(nodes), self.graph_map.roadmap.num_edges)
         cached = getattr(self, "_max_edge_len_cache", None)
         if cached is not None and cached[0] == key:
             return cached[1]
@@ -789,15 +889,16 @@ class NeuralATTF:
         self._max_edge_len_cache = (key, best)
         return best
 
-    def _reach_segment_safe(self, actual, start, other_end, t_reach, sched, horizons) -> bool:
-        """Whether driving ``actual -> start`` over ``[0, t_reach]`` (world clock) is
-        clear of the other agents. ``actual`` lies on roadmap edge
+    def _reach_segment_safe(self, actual, start, other_end, t_reach, sched, horizons, name) -> bool:
+        """Whether ``name`` driving ``actual -> start`` over ``[0, t_reach]`` (world
+        clock) is clear of the other agents, all taken as bounding balls (grown by
+        ``sipp_clearance_margin``). ``actual`` lies on roadmap edge
         ``(other_end, start)``; SIPP validates a plan only from ``start`` on, so this
         pre-segment is the one part of a re-planned agent's motion it never checks.
 
         Two stages. The swept-footprint machinery SIPP blocks its graph with is the
         pre-filter: every other-agent schedule segment overlapping the window is
-        swept (memoized on the roadmap, see :func:`cached_constraint_sweep`) and
+        swept (memoized on the roadmap, see :func:`cached_collision_sweep`) and
         only segments whose sweep touches this edge, in a contact window that
         intersects ``[0, t_reach]``, are considered further - waits and the resting
         hold after a schedule's last point included. Because that window is for the
@@ -811,8 +912,6 @@ class NeuralATTF:
         if t_reach <= 0.0 or other_end is None:
             return True
         keys = {(tuple(other_end), tuple(start)), (tuple(start), tuple(other_end))}
-        r_sweep = 2.0 * (self.agent_radius + self.sipp_clearance_margin)
-        v_nom = float(self.velocity)
         a = np.asarray(actual, dtype=float)
         b = np.asarray(start, dtype=float)
 
@@ -828,8 +927,8 @@ class NeuralATTF:
 
         v_a = (b - a) / t_reach
 
-        def approaches(q0, t0, q1, t1, w0, w1):
-            """Closest approach < clearance between us (a + v_a t) and the obstacle
+        def approaches(q0, t0, q1, t1, w0, w1, r_sweep):
+            """Closest approach < r_sweep between us (a + v_a t) and the obstacle
             (q0 -> q1 over [t0, t1], resting if q0 == q1) inside [w0, w1]."""
             ta, tb = max(0.0, w0, t0), min(t_reach, w1, t1)
             if tb < ta:
@@ -843,15 +942,17 @@ class NeuralATTF:
             t_star = ta if vv <= 1e-12 else min(tb, max(ta, -float(r0 @ v_rel) / vv))
             return min(float(np.linalg.norm(r0 + v_rel * t)) for t in (ta, t_star, tb)) < r_sweep
 
-        for name, pts in sched.items():
+        for other, pts in sched.items():
             if not pts:
                 continue
+            r_sweep = self._sipp_gap(name, other)
+            v_nom = self._speed(other) or 0.0
             timed = [(float(p["t"]), tuple(_as_point(p))) for p in pts]
             q0 = np.asarray(timed[0][1], dtype=float)
             d0 = float(np.linalg.norm(a - q0))
             if d0 < r_sweep and float(np.linalg.norm(b - q0)) >= d0:
                 continue  # already inside its clearance and moving away: escaping
-            h = horizons.get(name)
+            h = horizons.get(other)
             h = float("inf") if h is None else float(h)
             t_last, p_last = timed[-1]
             segs = list(zip(timed, timed[1:])) + [((t_last, p_last), (t_last + h, p_last))]
@@ -859,8 +960,8 @@ class NeuralATTF:
                 if not overlaps(t0, t1):
                     continue
                 if p0 == p1:
-                    _, edges = cached_constraint_sweep(self.graph_map, p0, p0, v_nom, r_sweep)
-                    if edge_hit(edges) is not None and approaches(p0, t0, p1, t1, t0, t1):
+                    _, edges = cached_collision_sweep(self.graph_map, p0, p0, v_nom, r_sweep)
+                    if edge_hit(edges) is not None and approaches(p0, t0, p1, t1, t0, t1, r_sweep):
                         return False  # resting footprint on our sub-segment during [t0, t1]
                     continue
                 dur = t1 - t0
@@ -869,10 +970,10 @@ class NeuralATTF:
                     implied = math.dist(p0, p1) / dur
                     if abs(implied - v_nom) > 1e-6:
                         v_seg = implied
-                _, edges = cached_constraint_sweep(self.graph_map, p0, p1, v_seg, r_sweep)
+                _, edges = cached_collision_sweep(self.graph_map, p0, p1, v_seg, r_sweep)
                 iv = edge_hit(edges)
                 if iv is not None and overlaps(t0 + iv[0], t0 + iv[1]):
-                    if approaches(p0, t0, p1, t1, t0 + iv[0], t0 + iv[1]):
+                    if approaches(p0, t0, p1, t1, t0 + iv[0], t0 + iv[1], r_sweep):
                         return False
         return True
 
@@ -902,7 +1003,11 @@ class NeuralATTF:
         ``exclude`` drops names entirely (used to let an agent escape from inside an
         idle agent's footprint). ``offset_time`` adds a fractional shift (s) on top
         of ``offset_steps`` - the time the planning agent needs to reach the roadmap
-        node its plan starts from (see :meth:`_snap_start`).
+        node its plan starts from (see :meth:`_snap_start_candidates`).
+
+        The first entry of each schedule carries the heading the agent faces then
+        (``yaw`` / ``pitch``); SIPP works out the rest from the moves (a body faces
+        along each move and keeps its heading while waiting).
         """
         dt = self.timestep_duration
         shift = offset_steps * dt + float(offset_time)
@@ -912,7 +1017,7 @@ class NeuralATTF:
             if name == agent_name or not path or name in exclude:
                 continue
             if len(path) == 1:
-                sched[name] = [_point_schedule(path[0], 0.0)]
+                sched[name] = [_point_schedule(path[0], 0.0, self._heading(name) if self._faces(name) else None)]
                 horizons[name] = None
                 continue
             # Absolute timeline of the committed path: waypoint k at k*dt, with the
@@ -926,39 +1031,47 @@ class NeuralATTF:
                         timed.append((q, (k - 1 + frac) * dt))
                 timed.append((tuple(path[k]), k * dt))
             # Re-base onto the leg's own clock: drop what happens before the leg
-            # starts, interpolating the position at exactly t = 0.
+            # starts, interpolating the position at exactly t = 0. ``at`` is the
+            # timed point the agent last reached by then (-1: moving towards ``ff``).
             rebased = [(q, tq - shift) for q, tq in timed]
-            first_future = next((i for i, (_, tq) in enumerate(rebased) if tq > 1e-9), None)
-            if first_future is None:
-                rebased = [(rebased[-1][0], 0.0)]
-            elif first_future == 0:
-                pass
+            ff = next((i for i, (_, tq) in enumerate(rebased) if tq > 1e-9), None)
+            if ff is None:
+                rebased, at = [(rebased[-1][0], 0.0)], len(timed) - 1
+            elif ff == 0:
+                at = 0
             else:
-                (qa, ta), (qb, tb) = rebased[first_future - 1], rebased[first_future]
+                (qa, ta), (qb, tb) = rebased[ff - 1], rebased[ff]
                 frac = 0.0 if tb - ta <= 1e-12 else (0.0 - ta) / (tb - ta)
                 q0 = tuple(a + frac * (b - a) for a, b in zip(qa, qb))
-                rebased = [(q0, 0.0)] + rebased[first_future:]
-            sched[name] = [_point_schedule(q, tq) for q, tq in rebased]
+                rebased = [(q0, 0.0)] + rebased[ff:]
+                at = -1 if qa != qb else ff - 1
+            head = None
+            if self._faces(name):                                # the heading it has then
+                head = (_ori_between(timed[ff - 1][0], timed[ff][0]) if at < 0
+                        else _last_move_heading(timed, at, self._heading(name)))
+            sched[name] = [_point_schedule(q, tq, head if i == 0 else None) for i, (q, tq) in enumerate(rebased)]
             horizons[name] = dt
         return sched, horizons
 
     def _plan_sipp(
         self, agent_name, start, goal, offset_steps: int = 0, rest_forever: bool = False,
-        final_leg: bool = False,
+        final_leg: bool = False, heading=None,
     ):
+        """The SIPP low level: the plan's per-tick points (see :meth:`_resample_by_time`), or False.
+        ``heading`` is the heading the agent faces at ``start``."""
         actual_start = tuple(float(c) for c in start)
         # Mid-edge start: SIPP checks the plan from the snapped node on, so the move
         # to that node is validated here; fall back to the edge's other endpoint,
         # and give up (the caller re-plans next tick) when neither is safe now.
         chosen = None
         world_sched = None
-        candidates = self._snap_start_candidates(actual_start)
+        candidates = self._snap_start_candidates(actual_start, agent_name)
         for cand, cand_reach in candidates:
             if cand_reach > 0.0 and offset_steps == 0:
                 if world_sched is None:
                     world_sched = self._other_agent_schedules(agent_name, 0, (), 0.0)
                 other_end = next((c for c, _ in candidates if c != cand), None)
-                if not self._reach_segment_safe(actual_start, cand, other_end, cand_reach, *world_sched):
+                if not self._reach_segment_safe(actual_start, cand, other_end, cand_reach, *world_sched, agent_name):
                     continue
             chosen = (cand, cand_reach)
             break
@@ -982,7 +1095,15 @@ class NeuralATTF:
 
         heur = self.heuristic_type if self.heuristic_type in {"manhattan", "euclidean"} else "euclidean"
         budget = max(int(self.a_star_max_iter), 10 * len(self.graph_map.nodes))
-        radius = self.agent_radius + self.sipp_clearance_margin if self.agent_radius > 0 else 0.0
+        # The body SIPP plans for (none: a point particle), facing the way it is headed
+        # when it reaches ``start`` (along the pre-move when it starts mid-edge).
+        me = {"name": agent_name, "start": start, "goal": goal}
+        body = self._sipp_bodies.get(agent_name)
+        if body is not None:
+            me["agent"] = body
+            if t_reach > 0.0 and tuple(start) != actual_start:
+                heading = _ori_between(actual_start, start)
+            put_heading(me, heading)
 
         def build(exclude=()):
             # SIPP's t=0 is the moment the agent stands on ``start``; the world is
@@ -990,13 +1111,12 @@ class NeuralATTF:
             sched, horizons = self._other_agent_schedules(
                 agent_name, offset_steps, exclude, offset_time=t_reach
             )
+            if body is not None:   # each other agent with its own body
+                sched = {name: {"agent": self._sipp_bodies.get(name), "schedule": s} for name, s in sched.items()}
             return SippPlanner(
                 self.graph_map,
+                [me],
                 dynamic_obstacles=sched,
-                agents=[{"name": agent_name, "start": start, "goal": goal}],
-                radius=radius,
-                velocity=self.velocity,
-                use_constraint_sweep=True,
                 heuristic_type=heur,
                 time_limit=self.sipp_time_limit,
                 sipp_max_iterations=budget,
@@ -1008,25 +1128,24 @@ class NeuralATTF:
                 goal_safe_until=None if rest_forever else goal_safe_until,
             )
 
-        planner = build()
-        if offset_steps == 0 and not planner.sipp_graph[start].interval_list:
+        solution, info = build().compute_plan()
+        if offset_steps == 0 and agent_name in info.get("start_blocked", ()):
             # Our own start lies inside an idle agent's (forever-blocked) footprint,
             # e.g. two agents were held next to each other by the simulation. SIPP
             # cannot even seed its search then, so plan the escape ignoring those
             # idle agents; the idle-agent re-router / deadlock recovery separate them.
-            clearance = 2.0 * radius
             covering = {
                 name
                 for name, path in self.token["agents"].items()
-                if name != agent_name and len(path) == 1 and math.dist(path[0], start) <= clearance
+                if name != agent_name and len(path) == 1
+                and math.dist(path[0], start) <= self._sipp_gap(agent_name, name)
             }
             if covering:
                 print(
                     f"[NeuralATTF] {agent_name} starts inside idle {sorted(covering)}; "
                     "planning escape ignoring them"
                 )
-                planner = build(exclude=covering)
-        solution, info = planner.compute_plan()
+                solution, info = build(exclude=covering).compute_plan()
         self._record_sipp_metrics(info)
         schedule = solution.get(agent_name) if solution else None
         if not schedule:
@@ -1036,8 +1155,7 @@ class NeuralATTF:
             # its true (mid-edge) position to ``start`` along the edge it is on.
             schedule = [dict(s, t=float(s["t"]) + t_reach) for s in schedule]
             schedule = [_point_schedule(actual_start, 0.0)] + schedule
-        positions = self._resample_by_time(schedule, goal, dt=self.timestep_duration)
-        return {agent_name: [_SegState(p) for p in positions]}
+        return self._resample_by_time(schedule, goal, dt=self.timestep_duration)
 
     def _record_sipp_metrics(self, info: dict) -> None:
         """Fold one SIPP low-level call's effort into the run-wide counters."""
@@ -1142,39 +1260,48 @@ class NeuralATTF:
             "goal": tuple(target),
             "predicted_cost": 0,
         }
-        self.token["agents"][agent_name] = [_wp(state.location.point) for state in path[agent_name]]
+        self.token["agents"][agent_name] = path[agent_name]
         return True
 
     # ------------------------------------------------------ deadlock recovery
 
-    def _interference_footprint(self, agent_name) -> set:
-        """Graph-node coords ``agent_name`` must not rest on.
+    def _interference_footprint(self, agent_name, near=None) -> set:
+        """Graph-node coords ``agent_name`` must not rest on (with ``near=(point, radius)``: those of them
+        within ``radius`` of ``point`` at least; steps that cannot cover a node that close are skipped).
 
-        The union of: every *other* agent's moving + idle footprint (radius-aware),
+        The union of: every *other* agent's moving + idle footprint (body-aware),
         all path ends, occupied parking spots, **every waypoint of pending/assigned
         tasks**, and assigned task start/goal cells. The task-waypoint inclusion is
         what breaks the repeated-deadlock loop — a stuck agent will no longer
         evacuate onto a cell some task still needs.
         """
         footprint: set = set()
+        edge = self._max_edge_len() + 1e-6 if near is not None else 0.0
+
+        def cover(a, b, owner, other=None):
+            # A covered node lies within both reaches + one edge of the step (see _covered_nodes).
+            if near is not None and _point_segment_dist(near[0], a, b) > (
+                    near[1] + self._reach(owner) + self._reach(other) + edge):
+                return
+            footprint.update(self._covered_nodes(a, b, owner, other))
+
         for name, path in self.token["agents"].items():
             if name == agent_name or not path:
                 continue
             for i in range(len(path)):
-                prev = path[i - 1] if i >= 1 else path[i]
-                footprint |= self._covered_nodes(prev, path[i])
+                cover(path[i - 1] if i >= 1 else path[i], path[i], name, agent_name)
             # Resting (idle) footprint at the committed path end.
-            footprint |= self._covered_nodes(path[-1], path[-1])
+            cover(path[-1], path[-1], name, agent_name)
         for owner, route in self.token.get("blocked_routes", {}).items():
             if owner == agent_name:
                 continue
             for i in range(len(route)):
-                footprint |= self._covered_nodes(route[i - 1] if i else route[i], route[i])
+                cover(route[i - 1] if i else route[i], route[i], owner, agent_name)
         footprint |= {tuple(p) for p in self.token["path_ends"]}
         footprint |= {tuple(p) for p in self.token["occupied_non_task_endpoints"]}
         for task in self.token["tasks"].values():
             for wp in task:
-                footprint |= self._covered_nodes(wp, wp)
+                cover(wp, wp, agent_name)
         footprint |= {tuple(sg) for sg in self.get_agents_to_tasks_starts_goals()}
         return footprint
 
@@ -1183,7 +1310,7 @@ class NeuralATTF:
         footprint is clear of :meth:`_interference_footprint`, sorted nearest-first.
 
         Local-only — an empty list means the agent should stay put. A
-        ``scipy.spatial.KDTree`` ball query (clearance ``2 * agent_radius``) replaces
+        ``scipy.spatial.KDTree`` ball query (the bounding-ball gap) replaces
         the old per-candidate CGAL sweep, which dominated runtime over the ~1500
         nodes inspected per call.
         """
@@ -1191,16 +1318,13 @@ class NeuralATTF:
         if not nodes:
             return []
         pt = np.asarray(agent_pos, dtype=float)
-        # Reachable nodes within r (reuse the authoritative-node KD-tree).
-        if self._node_kdtree is None or self._node_kdtree_n != len(nodes):
-            from scipy.spatial import KDTree
+        # Reachable nodes within r (reuse the node KD-tree).
+        near_idxs = self._node_tree().query_ball_point(pt, r)
 
-            self._node_kdtree = KDTree([tuple(n.current) for n in nodes])
-            self._node_kdtree_n = len(nodes)
-        near_idxs = self._node_kdtree.query_ball_point(pt, r)
-
-        footprint = self._interference_footprint(agent_name)
-        clearance = 2.0 * self.agent_radius if self.agent_radius > 0 else 1e-9
+        clearance = self._gap(agent_name)
+        reach = r + clearance                          # only footprint nodes this close can reject a candidate
+        footprint = [p for p in self._interference_footprint(agent_name, near=(tuple(pt), reach))
+                     if math.dist(p, pt) <= reach + 1e-6]
         fp_tree = None
         if footprint:
             from scipy.spatial import KDTree
@@ -1213,7 +1337,7 @@ class NeuralATTF:
             d = float(np.linalg.norm(np.asarray(cand) - pt))
             if d <= 1e-9:
                 continue
-            if self.graph_map.in_collision_point(cand):
+            if self.graph_map.in_collision(cand):
                 continue
             if fp_tree is not None and fp_tree.query_ball_point(np.asarray(cand, dtype=float), clearance):
                 continue
@@ -1243,7 +1367,7 @@ class NeuralATTF:
             if not path:
                 continue
             self.update_ends(agent_pos, agent_name)
-            self.token["agents"][agent_name] = [_wp(state.location.point) for state in path[agent_name]]
+            self.token["agents"][agent_name] = path[agent_name]
             return
         print(f"Deadlock recovery: no collision-free escape for {agent_name}.")
 
@@ -1265,7 +1389,7 @@ class NeuralATTF:
 
         # Start from the static obstacle maze; mask out idle-agent occupied cells.
         maze_np = overlay.maze.copy()
-        for o in self.get_idle_obstacles_agents(self.token["agents"], self.token["delayed_agents"], 0):
+        for o in self.get_idle_obstacles_agents(self.token["agents"], self.token["delayed_agents"]):
             ci, cj = overlay.point_to_cell(o)
             maze_np[ci, cj] = 0.0
         maze = torch.tensor(maze_np, device=device).unsqueeze(0).unsqueeze(0).float()
@@ -1313,26 +1437,28 @@ class NeuralATTF:
         segments = []
         seg_start = agent_pos
         cum = 0
+        heading = None   # each leg starts facing the way the previous one ended (the first: as now)
         for i, wp in enumerate(waypoints):
             cost_map = cost_maps[i] if cost_maps is not None and i < len(cost_maps) else None
             if not self._statically_reachable(agent_name, seg_start, wp):
                 return None, i + 1  # sealed off by idle footprints: SIPP would only burn its budget
             seg = self.plan(
                 agent_name, seg_start, wp, all_idle_agents, all_delayed_agents, cost_map, cum,
-                final_leg=(i == len(waypoints) - 1),
+                final_leg=(i == len(waypoints) - 1), heading=heading,
             )
             if not seg:
                 return None, i + 1
+            heading = seg[agent_name][-1].yaw
             for _ in range(self.num_goal_wait_steps):
                 # A plain copy: re-appending the last sample would replay its vias.
-                seg[agent_name].append(_SegState(tuple(seg[agent_name][-1].location.point)))
+                seg[agent_name].append(_Waypoint(seg[agent_name][-1], yaw=heading))
             segments.append(seg[agent_name])
             cum += len(seg[agent_name]) - 1
             seg_start = wp
         joined = []
         prev_last = None
         for i, seg_pts in enumerate(segments):
-            pts = [_wp(s.location.point) for s in seg_pts]
+            pts = list(seg_pts)
             if prev_last is not None:
                 # The previous leg's final sample is the same position as this leg's
                 # first, but it is the one that carries the vias / via_t of the tick
@@ -1350,7 +1476,8 @@ class NeuralATTF:
         has left, anything else is sent to parking. If no plan exists the agent simply
         stays put (a length-1 path), i.e. it stops short of the blocker and becomes a
         resting obstacle itself instead of driving into one."""
-        pos = tuple(self.token["agents"][name][0])
+        here = self.token["agents"][name][0]
+        pos = _Waypoint(here, yaw=self._heading(name))   # without the vias of the tick that reached it
         self.token["agents"][name] = [pos]
         self.token["n_replans"] += 1
         all_idle_agents = {k: v for k, v in self.token["agents"].items() if k != name}
@@ -1540,43 +1667,44 @@ class NeuralATTF:
         nearest open node) clears them out of the aisles entirely, avoiding the mid-aisle
         oscillation that stalled the all-nearest-node variant. Falls back to the nearest
         non-interfering node when no parking endpoint is reachable."""
-        # Nodes covered by every agent's *moving* path (len > 1) -> set of owners,
-        # plus the static route of every task leg that could not be planned this
-        # step: an idle agent parked on the only corridor into a goal makes that
-        # leg unplannable in the first place, so it must be nudged off it too, or
-        # the leg (and the task) never gets a path at all.
-        moving_cover: dict = {}
+        # Every agent's *moving* path (len > 1), step by step, plus the static route of
+        # every task leg that could not be planned this step: an idle agent parked on
+        # the only corridor into a goal makes that leg unplannable in the first place,
+        # so it must be nudged off it too, or the leg (and the task) never gets a path.
+        # Taken now: the plans made below do not change what counts as interfering.
+        segments = []
         for name, path in self.token["agents"].items():
-            if len(path) <= 1:
-                continue
-            for i in range(len(path)):
-                prev = path[i - 1] if i >= 1 else path[i]
-                for c in self._covered_nodes(prev, path[i]):
-                    moving_cover.setdefault(tuple(c), set()).add(name)
+            if len(path) > 1:
+                segments += [(name, path[i - 1] if i else path[i], path[i]) for i in range(len(path))]
         for name, route in self.token.get("blocked_routes", {}).items():
-            for i in range(len(route)):
-                prev = route[i - 1] if i >= 1 else route[i]
-                for c in self._covered_nodes(prev, route[i]):
-                    moving_cover.setdefault(tuple(c), set()).add(name)
-        if not moving_cover:
+            segments += [(name, route[i - 1] if i else route[i], route[i]) for i in range(len(route))]
+        idle = [(name, path) for name, path in self.token["agents"].items() if len(path) == 1]
+        if not segments or not idle:
             return
+        # A node a step covers lies within the owner's reach + the largest reach + one
+        # edge of the step (covered edges add their far end), so farther steps are skipped.
+        slack = self._max_reach + self._max_edge_len() + 1e-6
+        cover = []                                     # every covered node, built when first needed
 
-        from scipy.spatial import KDTree
+        def covered_near(pt, radius):
+            if not cover:
+                from scipy.spatial import KDTree
 
-        cover_pts = list(moving_cover.keys())
-        cover_tree = KDTree([tuple(p) for p in cover_pts])
-        clearance = 2.0 * self.agent_radius if self.agent_radius > 0 else 1e-9
+                cover.append(KDTree(sorted({tuple(c) for o, a, b in segments for c in self._covered_nodes(a, b, o)})))
+            return cover[0].query_ball_point(np.asarray(pt, dtype=float), radius)
 
-        for name, path in list(self.token["agents"].items()):
-            if len(path) != 1:
-                continue  # only idle / just-finished agents
+        for name, path in idle:
             pos = tuple(path[0])
-            hits = cover_tree.query_ball_point(np.asarray(pos, dtype=float), clearance)
-            # Interfering only if some overlapping moving-path node belongs to ANOTHER agent.
+            clearance = self._gap(name)
+            # Interfering only if a node within the clearance is covered by ANOTHER agent's step.
             movers = set()
-            for h in hits:
-                movers |= moving_cover[cover_pts[h]]
-            movers.discard(name)
+            for owner, a, b in segments:
+                if owner == name or owner in movers:
+                    continue
+                if _point_segment_dist(pos, a, b) > clearance + self._reach(owner) + slack:
+                    continue
+                if any(math.dist(c, pos) <= clearance for c in self._covered_nodes(a, b, owner)):
+                    movers.add(owner)
             if not movers:
                 continue
             all_idle_agents = {k: v for k, v in self.token["agents"].items() if k != name}
@@ -1587,15 +1715,19 @@ class NeuralATTF:
             # replaced by the new parking target.
             entry = self.token["agents_to_tasks"].get(name)
             has_task = bool(entry) and entry.get("task_name") != "safe_idle"
-            # Prefer free parking endpoints (off-aisle) that are not themselves on a
-            # covered node (else the blocker is just nudged again next step); fall
-            # back to nearest non-interfering node.
-            parking = [
-                ep for ep in self._free_parking_endpoints_sorted(pos, exclude=pos)
-                if not cover_tree.query_ball_point(np.asarray(ep, dtype=float), clearance)
-            ]
+
+            def targets():
+                # Free parking endpoints (off-aisle) that are not themselves on a covered
+                # node (else the blocker is just nudged again next step), then the nearest
+                # non-interfering nodes (worked out only if no parking spot works).
+                for ep in self._free_parking_endpoints_sorted(pos, exclude=pos):
+                    if not covered_near(ep, clearance):
+                        yield ep, True
+                for node in self._close_non_interfering_nodes(pos, name, self.deadlock_radius):
+                    yield node, False
+
             committed = False
-            for target in parking:
+            for target, parking in targets():
                 if not self._statically_reachable(name, pos, target):
                     continue
                 new_path = self.plan(
@@ -1605,35 +1737,19 @@ class NeuralATTF:
                     continue
                 self.update_ends(pos, name)
                 self.token["occupied_non_task_endpoints"].discard(pos)
-                self.token["occupied_non_task_endpoints"].add(tuple(target))
+                if parking:
+                    self.token["occupied_non_task_endpoints"].add(tuple(target))
                 if not has_task:
-                    self.token["agents_to_tasks"][name] = {
-                        "task_name": "safe_idle",
-                        "start": tuple(pos),
-                        "goal": tuple(target),
-                        "predicted_cost": 0,
-                    }
-                self.token["agents"][name] = [_wp(s.location.point) for s in new_path[name]]
+                    if parking:
+                        self.token["agents_to_tasks"][name] = {
+                            "task_name": "safe_idle", "start": tuple(pos), "goal": tuple(target), "predicted_cost": 0,
+                        }
+                    else:
+                        self.token["agents_to_tasks"].pop(name, None)
+                self.token["agents"][name] = new_path[name]
                 self.token["n_replans"] += 1
                 committed = True
                 break
-            if not committed:
-                for target in self._close_non_interfering_nodes(pos, name, self.deadlock_radius):
-                    if not self._statically_reachable(name, pos, target):
-                        continue
-                    new_path = self.plan(
-                        name, pos, target, all_idle_agents, all_delayed_agents, None, 0, rest_forever=True
-                    )
-                    if not new_path:
-                        continue
-                    self.update_ends(pos, name)
-                    self.token["occupied_non_task_endpoints"].discard(pos)
-                    if not has_task:
-                        self.token["agents_to_tasks"].pop(name, None)
-                    self.token["agents"][name] = [_wp(s.location.point) for s in new_path[name]]
-                    self.token["n_replans"] += 1
-                    committed = True
-                    break
             if committed or self.low_level != "sipp":
                 continue
             # The blocker cannot move. SIPP movers were planned on the assumption that

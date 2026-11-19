@@ -88,7 +88,11 @@ def to_roadmap_frame(rmt: str, pts, inpt_path: Path):
 def pickle_node_set(pkl: Path):
     with open(pkl, "rb") as f:
         data = pickle.load(f)
-    return {tuple(round(float(v), 9) for v in n.current) for n in data["nodes"]}, len(data["nodes"])
+    if "node_sampler" in data:                      # version-2 pickle: plain position array
+        pts = data["node_sampler"]["positions"]
+    else:                                           # legacy: Node list
+        pts = [n.current for n in data["nodes"]]
+    return {tuple(round(float(v), 9) for v in p) for p in pts}, len(pts)
 
 
 def check_instance(method, cf, n, rmt, case):

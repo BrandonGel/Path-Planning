@@ -1,6 +1,9 @@
-# Self-supervised cluster-GNN encoder training (cluster.md §13 objective).
-# Model keys use the exact GNN.__init__ parameter names — get_model silently
-# drops anything it doesn't recognize.
+# Self-supervised cluster-GNN encoder training (cluster.md §13 objective), read by
+# scripts/train/run_cluster_train.py (path_planning/gnn/train_cluster.py).
+# Command-line overrides: -f folder_path, -s save_folder, -e num_epochs, -bs batch_size, -seed,
+# --compile, --cluster-alpha; dataloader workers are -w (not a key here).
+# Model keys are the GATv2 constructor's parameter names (path_planning/gnn/model.py); get_model
+# silently drops a key it does not recognise.
 seed: 42
 
 encoder:
@@ -59,17 +62,17 @@ train:
   verbose_epoch: 10
   save_folder: logs/cluster
   load_folder: null
-  num_workers: 4
 
 dataset:
   folder_path:
-    # 100 x 12-agent cases, boundary nodes at the resolution (-gbn -bns 1.0),
-    # 1500 samples for the continuous types; built by
-    # scripts/generate/run_cluster_dataset.py. Every root listed here must
-    # exist (the loader iterates each one).
+    # 100 x 12-agent cases, 1500 samples for the continuous types, 4 roadmap types x 4 rotations each;
+    # built by scripts/generate/run_cluster_dataset.py -gbn. This stored set was built when boundary
+    # nodes could be resampled every 1.0 world units (-bns 1.0, an option since removed), so a newly
+    # generated set has fewer boundary nodes. Every root listed here must exist (the loader iterates
+    # each one). The loader reads sample_cluster/<type>/graph_*/graph.npz + target_cluster.npy.
     - /home/bho36/Dropbox/Team_Path_Planning/brandon_graph_data/train_cluster/map64.0x64.0_resolution1.0/agents12_obst0.025/radius0.5
-  load_file: null
-  save_file: null
+  load_file: null             # a dataset cache (.pt) to load instead of reading the samples
+  save_file: null             # where to write that cache
   config:
     # Mixed-type training over all four source roadmap types; a root without
     # a type's sample_cluster/<type> folder is skipped for that type.
