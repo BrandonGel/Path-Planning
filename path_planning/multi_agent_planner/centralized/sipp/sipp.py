@@ -88,6 +88,7 @@ class SippPlanner:
     def _new_round(self):
         """Forget the planned agents: only the dynamic obstacles remain."""
         self._tables = {}                    # body key (None: points) -> SippGraph
+        self._applied = {}                   # body key -> how many of _committed its table is blocked with
         self._committed = []                 # (name, body, plan, action costs), in planning order
 
     def _graph(self, name) -> SippGraph:
@@ -98,16 +99,15 @@ class SippPlanner:
         if graph is None:
             graph = self._tables[key] = SippGraph(self.graph_map, self.dynamic_obstacles, body, self.obstacle_horizon,
                                                   self.exact_vertices)
-            for other, other_body, plan, costs in self._committed:
-                graph.update_intervals([plan], [costs], [other], [other_body], [self.start_ori[other]])
+        for other, other_body, plan, costs in self._committed[self._applied.get(key, 0):]:
+            graph.update_intervals([plan], [costs], [other], [other_body], [self.start_ori[other]])
+        self._applied[key] = len(self._committed)
         return graph
 
     def _commit(self, name, plan, costs):
-        """Agent ``name`` now follows ``plan``: block it in every table."""
-        body = self.bodies.get(name)
-        self._committed.append((name, body, plan, costs))
-        for graph in self._tables.values():
-            graph.update_intervals([plan], [costs], [name], [body], [self.start_ori[name]])
+        """Agent ``name`` now follows ``plan``. A table is blocked with it when it is next asked for
+        (``_graph``), so the last agent planned costs nothing."""
+        self._committed.append((name, self.bodies.get(name), plan, costs))
 
     @property
     def sipp_graph(self) -> dict:
@@ -440,7 +440,7 @@ class SippPlanner:
         speed = self.bodies[name].max_speed
         duration = (lambda L: 1.0) if speed is None else (lambda L: L / speed)
         data = graph.arrays(speed, duration)
-        vid = graph._arr["vid"]
+        vid = graph._vid
         s, gv = vid[start], vid[goal]
         key = (goal, speed, name if self.heuristic_type == HEURISTIC_TYPE["dijkstra"] else None)
         h = self._h_arrays.get(key)

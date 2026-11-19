@@ -5,14 +5,131 @@ import math
 import weakref
 
 import numpy as np
+from numba import njit
 
 from path_planning.agent import Agent
 from path_planning.common.environment.map.graph_sampler import GraphSampler
 from path_planning.multi_agent_planner.centralized.cbs.data_types import _heading_of, _make_ori, _ori_between
 from path_planning.multi_agent_planner.sweep_cache import shared_sweep_cache
 
-_LAYOUT = weakref.WeakKeyDictionary()     # graph_map -> (roadmap signature, vertex keys, directed edge keys)
+# graph_map -> (roadmap signature, vertex keys, directed edge keys, position -> vertex id, edge key -> edge id)
+_LAYOUT = weakref.WeakKeyDictionary()
 _STATIC = weakref.WeakKeyDictionary()     # graph_map -> (roadmap signature, its move lists and edge ids)
+_POINT = Agent.disc(1e-9)                 # the body of a point obstacle (covered by the agent's reach)
+
+
+@njit(cache=True)
+def _windows(slots, lo_off, hi_off, ptr, ids, t1, t2):
+    """The windows of pieces ``k``: row ``slots[k]`` of ``(ptr, ids, t1, t2)`` (a sweep's covered ids and
+    times), started at ``lo_off[k]`` / ``hi_off[k]``. ``(ids, lo, hi)``."""
+    total = 0
+    for k in range(slots.shape[0]):
+        total += ptr[slots[k] + 1] - ptr[slots[k]]
+    out, lo, hi = np.empty(total, np.int64), np.empty(total), np.empty(total)
+    w = 0
+    for k in range(slots.shape[0]):
+        for j in range(ptr[slots[k]], ptr[slots[k] + 1]):
+            out[w], lo[w], hi[w] = ids[j], lo_off[k] + t1[j], hi_off[k] + t2[j]
+            w += 1
+    return out, lo, hi
+
+
+@njit(cache=True)
+def _group_windows(ids, lo, hi, n):
+    """Windows ``[lo, hi]`` grouped by id (``0 .. n-1``) and ordered by start inside each group:
+    ``(ptr, lo, hi)``, group ``i`` being ``ptr[i]:ptr[i + 1]``."""
+    m = ids.shape[0]
+    ptr = np.zeros(n + 1, np.int64)
+    for k in range(m):
+        ptr[ids[k] + 1] += 1
+    for i in range(n):
+        ptr[i + 1] += ptr[i]
+    fill = ptr[:n].copy()
+    slo, shi = np.empty(m), np.empty(m)
+    for k in range(m):
+        i = ids[k]
+        j = fill[i]
+        fill[i] = j + 1
+        first = ptr[i]
+        while j > first and slo[j - 1] > lo[k]:
+            slo[j], shi[j] = slo[j - 1], shi[j - 1]
+            j -= 1
+        slo[j], shi[j] = lo[k], hi[k]
+    return ptr, slo, shi
+
+
+@njit(cache=True)
+def _pad(ptr, lo, hi, rows):
+    """The lists ``ptr[i]:ptr[i + 1]`` as the first rows of two arrays of ``rows`` rows (at least 4
+    columns), and their lengths."""
+    n = ptr.shape[0] - 1
+    cols = 4
+    for i in range(n):
+        cols = max(cols, ptr[i + 1] - ptr[i])
+    out_lo, out_hi = np.zeros((rows, cols)), np.zeros((rows, cols))
+    count = np.zeros(rows, np.int64)
+    for i in range(n):
+        a = ptr[i]
+        count[i] = ptr[i + 1] - a
+        for j in range(count[i]):
+            out_lo[i, j], out_hi[i, j] = lo[a + j], hi[a + j]
+    return out_lo, out_hi, count
+
+
+@njit(cache=True)
+def _unsafe_table(slots, lo_off, hi_off, s_ptr, s_ids, s_t1, s_t2, n):
+    """What ``UnsafeIntervalList.add`` leaves on ``n`` empty edge records after every window of the pieces
+    (see ``_windows``): per edge the union of its closed windows (touching ones merged), in order.
+    ``(ptr, starts, ends)``, edge ``e`` being ``ptr[e]:ptr[e + 1]``."""
+    ids, lo, hi = _windows(slots, lo_off, hi_off, s_ptr, s_ids, s_t1, s_t2)
+    ptr, slo, shi = _group_windows(ids, np.minimum(lo, hi), np.maximum(lo, hi), n)
+    out_ptr = np.zeros(n + 1, np.int64)
+    out_lo, out_hi = np.empty(ids.shape[0]), np.empty(ids.shape[0])
+    w = 0
+    for e in range(n):
+        a, b = ptr[e], ptr[e + 1]
+        if a < b:
+            start, end = slo[a], shi[a]
+            for k in range(a + 1, b):
+                if slo[k] <= end:
+                    if shi[k] > end:
+                        end = shi[k]
+                else:
+                    out_lo[w], out_hi[w] = start, end
+                    w += 1
+                    start, end = slo[k], shi[k]
+            out_lo[w], out_hi[w] = start, end
+            w += 1
+        out_ptr[e + 1] = w
+    return out_ptr, out_lo[:w], out_hi[:w]
+
+
+@njit(cache=True)
+def _safe_table(slots, lo_off, hi_off, s_ptr, s_ids, s_t1, s_t2, n):
+    """What ``SippNode.split_interval`` leaves on ``n`` fresh vertices after every blocked window of the
+    pieces (see ``_windows``): per vertex what remains of ``(0, inf)`` outside the windows (each widened
+    by 1e-10), less the remnants of 1e-6 or shorter. ``(ptr, starts, ends)``, vertex ``v`` being
+    ``ptr[v]:ptr[v + 1]``."""
+    ids, lo, hi = _windows(slots, lo_off, hi_off, s_ptr, s_ids, s_t1, s_t2)
+    ptr, slo, shi = _group_windows(ids, lo - 1e-10, hi + 1e-10, n)
+    out_ptr = np.zeros(n + 1, np.int64)
+    out_lo, out_hi = np.empty(ids.shape[0] + n), np.empty(ids.shape[0] + n)
+    w = 0
+    for v in range(n):
+        start = 0.0                                   # where the safe time not yet blocked begins
+        for k in range(ptr[v], ptr[v + 1]):
+            if shi[k] <= start:
+                continue
+            if slo[k] - start > 1e-6:
+                out_lo[w], out_hi[w] = start, slo[k]
+                w += 1
+            start = shi[k]
+        if start < np.inf:
+            out_lo[w], out_hi[w] = start, np.inf
+            w += 1
+        out_ptr[v + 1] = w
+    return out_ptr, out_lo[:w], out_hi[:w]
+
 
 class State(object):
     def __init__(self, position=(-1,-1), t=0, interval=(0,float('inf'))):
@@ -73,8 +190,7 @@ class UnsafeIntervalList(object):
     __slots__ = ("starts", "ends")
 
     def __init__(self):
-        # Lists are allocated on first add(): init_graph builds one record per
-        # directed edge on every reset_graph and most never receive an interval.
+        # Lists are allocated on first add(): most records never receive an interval.
         self.starts = None
         self.ends = None
 
@@ -130,9 +246,8 @@ class UnsafeIntervalList(object):
 class SippEdge(UnsafeIntervalList):
     """Edge record for the SIPP graph: a merged, sorted list of unsafe intervals.
 
-    Subclasses UnsafeIntervalList directly (no wrapper object) because
-    init_graph builds one SippEdge per directed edge on every
-    reset_graph, so construction cost matters.
+    Subclasses UnsafeIntervalList directly (no wrapper object): a search makes one per edge it reads, so
+    construction cost matters.
     """
 
     __slots__ = ()
@@ -156,6 +271,111 @@ def cached_collision_sweep(graph_map, p1, p2, v, r):
     modify them."""
     return shared_sweep_cache(graph_map).get_or_compute(
         (p1, p2, v, r), lambda: graph_map.get_collision_sweep(p1, p2, v, r, use_interval=True, get_time_interval=True))
+
+
+class _Rows(object):
+    """Rows of ``(id, t1, t2)`` triples back to back in arrays that grow: row ``i`` is ``ptr[i]:ptr[i + 1]``."""
+
+    def __init__(self):
+        self.count = 0
+        self.ptr = np.zeros(64, np.int64)
+        self.ids, self.t1, self.t2 = np.zeros(1024, np.int64), np.zeros(1024), np.zeros(1024)
+
+    @staticmethod
+    def _room(array, size):
+        if size <= array.shape[0]:
+            return array
+        grown = np.zeros(max(size, 2 * array.shape[0]), array.dtype)
+        grown[:array.shape[0]] = array
+        return grown
+
+    def add(self, ids, t1, t2):
+        a = int(self.ptr[self.count])
+        b = a + len(ids)
+        self.ptr = self._room(self.ptr, self.count + 2)
+        self.ids, self.t1, self.t2 = self._room(self.ids, b), self._room(self.t1, b), self._room(self.t2, b)
+        self.ids[a:b], self.t1[a:b], self.t2[a:b] = ids, t1, t2
+        self.count += 1
+        self.ptr[self.count] = b
+
+
+class _SweepRows(object):
+    """What every sweep asked for so far covers, as rows of ids for ``_safe_table`` / ``_unsafe_table``:
+    ``slot[key]`` is a sweep's row in ``vertices`` and ``edges``; ``positions[row]`` its vertex positions."""
+
+    def __init__(self):
+        self.slot, self.positions = {}, []
+        self.vertices, self.edges = _Rows(), _Rows()
+
+
+class _Table(dict):
+    """``{position: SippNode, (p, q): SippEdge}`` over every vertex and directed edge of the roadmap. A
+    record is made when it is first asked for (KeyError for any other key): a search reads a small part of
+    the table, and making every record costs more than blocking the table does.
+
+    ``nodes[vertex id]`` / ``edges[edge id]`` are the records made so far (None: not yet). ``built``: the
+    table a new record starts from, ``(vertex ptr, starts, ends, edge ptr, starts, ends)`` as
+    ``_safe_table`` / ``_unsafe_table`` give them (None: every vertex safe for good, every edge clear)."""
+
+    def __init__(self, vertex_ids, edge_ids, vertex_count):
+        super().__init__()
+        self.vertex_ids, self.edge_ids = vertex_ids, edge_ids
+        self.nodes, self.edges = [None] * vertex_count, [None] * len(edge_ids)
+        self.built = None
+        self._lists = None                   # ``built`` as lists, once a record is made from it
+
+    def __missing__(self, key):
+        lists = self._lists
+        if lists is None and self.built is not None:
+            lists = self._lists = [array.tolist() for array in self.built]
+        k = self.vertex_ids.get(key)
+        if k is not None:
+            record = self.nodes[k] = SippNode()
+            if lists is not None:
+                a, b = lists[0][k], lists[0][k + 1]
+                record.interval_list = list(zip(lists[1][a:b], lists[2][a:b]))
+                if a < b and lists[1][a] == 0.0:             # (the untouched start of time stays the int 0)
+                    record.interval_list[0] = (0, lists[2][a])
+        else:
+            k = self.edge_ids[key]
+            record = self.edges[k] = SippEdge()
+            if lists is not None and lists[3][k] < lists[3][k + 1]:
+                a, b = lists[3][k], lists[3][k + 1]
+                record.starts, record.ends = lists[4][a:b], lists[5][a:b]
+        self[key] = record
+        return record
+
+    def get(self, key, default=None):
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
+    def __contains__(self, key):
+        return key in self.vertex_ids or key in self.edge_ids
+
+    def _all(self):
+        """Every record, in the roadmap's order (vertices, then edges)."""
+        if dict.__len__(self) < len(self.vertex_ids) + len(self.edge_ids):
+            records = {key: self[key] for key in (*self.vertex_ids, *self.edge_ids)}
+            super().clear()
+            super().update(records)
+        return self
+
+    def __iter__(self):
+        return dict.__iter__(self._all())
+
+    def __len__(self):
+        return dict.__len__(self._all())
+
+    def keys(self):
+        return dict.keys(self._all())
+
+    def values(self):
+        return dict.values(self._all())
+
+    def items(self):
+        return dict.items(self._all())
 
 
 class SippGraph(object):
@@ -209,8 +429,9 @@ class SippGraph(object):
 
     # ------------------------------------------------------------------ the table
     def init_graph(self):
-        """A fresh record per vertex and per directed edge (both ways of every roadmap edge), keyed by
-        position / end positions; the key layout is worked out once per roadmap."""
+        """A fresh table: a record per vertex and per directed edge (both ways of every roadmap edge), keyed
+        by position / end positions and made when first read (``_Table``); the key layout is worked out
+        once per roadmap."""
         gm = self.graph_map
         sig = gm._roadmap_signature()
         layout = _LAYOUT.get(gm)
@@ -222,29 +443,45 @@ class SippGraph(object):
                 src_pos, tgt_pos = nodes[src_idx].current, nodes[tgt_idx].current
                 edge_keys.setdefault((src_pos, tgt_pos), None)
                 edge_keys.setdefault((tgt_pos, src_pos), None)
-            layout = _LAYOUT[gm] = (sig, vertex_keys, list(edge_keys))
-        _, vertex_keys, edge_keys = layout
-        self.sipp_graph = {p: SippNode() for p in vertex_keys}
-        # Node ids for the compiled search: the vertices first (id = vertex index), per-heading lists after.
-        self._nobj = [self.sipp_graph[p] for p in vertex_keys]
-        for key in edge_keys:
-            self.sipp_graph[key] = SippEdge()
+            edge_keys = list(edge_keys)
+            layout = _LAYOUT[gm] = (sig, vertex_keys, edge_keys, {tuple(p): i for i, p in enumerate(vertex_keys)},
+                                    {key: i for i, key in enumerate(edge_keys)})
+        _, self._vertex_keys, self._edge_keys, self._vid, self._eid = layout
+        self.sipp_graph = _Table(self._vid, self._eid, len(self._vertex_keys))
+        # node id -> its SippNode, for the compiled search: the vertices first (id = vertex index; None until
+        # the record is made, see ``_node``), per-heading lists after.
+        self._nobj = self.sipp_graph.nodes
+        self._eobj = self.sipp_graph.edges                   # edge id -> its record (None until made: ``_edge``)
+
+    def _node(self, k):
+        """The ``SippNode`` with node id ``k``."""
+        node = self._nobj[k]
+        return node if node is not None else self.sipp_graph[self._vertex_keys[k]]
+
+    def _edge(self, k):
+        """The record of the edge with id ``k``."""
+        edge = self._eobj[k]
+        return edge if edge is not None else self.sipp_graph[self._edge_keys[k]]
 
     def reset_graph(self):
         """Back to the dynamic obstacles alone."""
-        self.swaps = set()                   # (from, to, t_from, t_to) of every obstacle step, for that check
+        self.swaps = set()                   # agents without a body: (from, to, t_from, t_to) of every obstacle step
         self._pieces = []                    # (body, path, t0, hold, heading): every blocking piece
         self._blockers = {}                  # position -> indices of the pieces that block it (as a ball)
         self._exact = {}                     # position -> {ori: [SippNode, pieces applied]}
         self._current = {}                   # position -> blockers applied to all its headings
         # For the compiled search (arrays()): what changed since the arrays were last brought up to date.
         self._arr = None
+        self._at_speed = {}                  # (body, speed) -> the body with that max_speed
         self._static = None
         self._dirty_nodes, self._dirty_edges, self._dirty_into = set(), set(), set()
         self._nid = {}                       # (position, ori) -> node id of a per-heading interval list
-        self._nobj = []                      # node id -> its SippNode (ids below the vertex count: the vertices)
         self.init_graph()
-        self.init_intervals(self.dynamic_obstacles)
+        self._index_schedule_swaps(self.dynamic_obstacles)
+        if self.points:
+            self._block_points(self.dynamic_obstacles)
+        else:
+            self._block_all(self._schedule_pieces(self.dynamic_obstacles))
 
     @staticmethod
     def _norm_horizon(horizon) -> float:
@@ -267,36 +504,110 @@ class SippGraph(object):
 
     # ------------------------------------------------------------------ blocking
     def init_intervals(self, dyn_obstacles: dict | None = None):
-        """Block the table with timed schedules ``{name: schedule}`` (see the class docstring).
+        """Block the table with timed schedules ``{name: schedule}`` (see the class docstring), piece by
+        piece on top of what it holds. (A new table blocks its own obstacles in one pass, ``_block_all``;
+        this is the same rule step by step.)
 
         - The last point blocks its footprint (vertices AND edges) for ``[t, t + horizon]``.
         - A wait (next point at the same position) blocks it for exactly ``[t, next t]``.
         - A move blocks what the body sweeps, at the speed the schedule implies when that differs from the
           body's own (a time-sampled schedule can cover less than a full move per tick).
         """
+        self._index_schedule_swaps(dyn_obstacles)
+        if self.points:
+            self._block_points(dyn_obstacles)
+            return
+        for body, p, q, heading, speed, t1, t2 in self._schedule_pieces(dyn_obstacles):
+            if q is None:
+                self._block_wait(body, p, heading, t1, t2)
+            else:
+                self._block_move(body, p, q, t1, speed)
+
+    def _index_schedule_swaps(self, dyn_obstacles):
+        """The obstacles' steps, for the swap check of agents without a body (the only ones that make it)."""
+        if self.agent is not None:
+            return
+        for spec in (dyn_obstacles or {}).values():
+            _, schedule = self._obstacle(spec)
+            self._index_swaps([State(position=tuple(self._position(entry)), t=entry["t"]) for entry in schedule])
+
+    def _block_points(self, dyn_obstacles):
+        """Point particles: each schedule point takes its vertex for one step, the last for the horizon."""
+        for name, spec in (dyn_obstacles or {}).items():
+            _, schedule = self._obstacle(spec)
+            horizon = self._horizon_for(name)
+            for i, entry in enumerate(schedule):
+                t = max(0.0, float(entry["t"]))
+                self.sipp_graph[tuple(self._position(entry))].split_interval(
+                    t, t + 1 if i < len(schedule) - 1 else t + horizon, 1)
+
+    def _schedule_pieces(self, dyn_obstacles):
+        """The waits and moves of schedules ``{name: schedule}``, in order, as ``(body, p, q, heading, speed,
+        t1, t2)``: standing at ``p`` with ``heading`` over ``[t1, t2]`` (``q`` None), or moving ``p -> q``
+        at ``speed`` from ``t1`` (``t2 = t1``)."""
         for name, spec in (dyn_obstacles or {}).items():
             body, schedule = self._obstacle(spec)
             horizon = self._horizon_for(name)
             points = [tuple(self._position(entry)) for entry in schedule]
             times = [max(0.0, float(entry["t"])) for entry in schedule]
-            self._index_swaps([State(position=p, t=entry["t"]) for p, entry in zip(points, schedule)])
-            if self.points:
-                for i, (p, t) in enumerate(zip(points, times)):
-                    last = i == len(points) - 1
-                    self.sipp_graph[p].split_interval(t, t + 1 if not last else t + horizon, 1)
-                continue
-            heads = self._wait_headings(body, points, [entry.get("yaw") for entry in schedule],
-                                        [entry.get("pitch") for entry in schedule])
+            if body is None or body.is_ball:                 # (no heading to keep)
+                heads = [None] * len(points)
+            else:
+                heads = self._wait_headings(body, points, [entry.get("yaw") for entry in schedule],
+                                            [entry.get("pitch") for entry in schedule])
+            last = len(points) - 1
             for i, (p, t) in enumerate(zip(points, times)):
-                if i == len(points) - 1:
-                    self._block_wait(body, p, heads[i], t, t + horizon)
+                if i == last:
+                    yield body, p, None, heads[i], None, t, t + horizon
                     continue
                 q, next_t = points[i + 1], times[i + 1]
                 if q == p:
                     if next_t - t > 1e-9:
-                        self._block_wait(body, p, heads[i], t, next_t)
+                        yield body, p, None, heads[i], None, t, next_t
                     continue
-                self._block_move(body, p, q, t, self._implied_speed(body, p, q, next_t - t))
+                yield body, p, q, None, self._implied_speed(body, p, q, next_t - t), t, t
+
+    def _block_all(self, pieces):
+        """Block a fresh table with ``pieces`` (see ``_schedule_pieces``) in one pass: the same table as
+        ``_block_wait`` / ``_block_move`` piece by piece, without visiting each covered vertex and edge in
+        Python. What each sweep covers is kept as rows of ids (``_SweepRows``) in the sweep cache, so it
+        is dropped with the sweeps it was made from."""
+        rows = self._cache.get_or_compute(("rows", None if self.agent is None else self.agent.key, self._rule), _SweepRows)
+        slot_of, inf = rows.slot, float('inf')
+        slots, lo_off, hi_off = [], [], []
+        for body, p, q, heading, speed, t1, t2 in pieces:
+            wait = q is None
+            mover_key = _POINT.key if body is None else body.key
+            if wait:
+                key = (mover_key, p, None if heading is None else np.asarray(heading, dtype=float).tobytes())
+            else:
+                key = (mover_key, p, q, speed)
+            slot = slot_of.get(key)
+            if slot is None:
+                vertices, edges = self._sweep(body, [p], inf, heading, None) if wait else self._sweep(body, [p, q], 0.0, None, speed)
+                slot = slot_of[key] = len(rows.positions)
+                # A wait covers its footprint for as long as it lasts: zero windows, to which the wait's
+                # own start and end are added.
+                for group, ids, covered in ((rows.vertices, self._vid, vertices), (rows.edges, self._eid, edges)):
+                    group.add([ids[x] for x, _, _ in covered],
+                              [0.0] * len(covered) if wait else [a for _, a, _ in covered],
+                              [0.0] * len(covered) if wait else [b for _, _, b in covered])
+                rows.positions.append([x for x, _, _ in vertices])
+            slots.append(slot)
+            lo_off.append(t1)
+            hi_off.append(t2)
+            if self.oriented and rows.positions[slot]:
+                if wait:
+                    self._remember_wait(body, p, heading, t1, t2, rows.positions[slot])
+                else:
+                    self._remember_move(body, p, q, t1, speed, rows.positions[slot])
+        if not slots:
+            return
+        slots = np.array(slots, dtype=np.int64)
+        lo_off, hi_off = np.array(lo_off, dtype=np.float64), np.array(hi_off, dtype=np.float64)
+        V, E = rows.vertices, rows.edges
+        self.sipp_graph.built = (*_safe_table(slots, lo_off, hi_off, V.ptr, V.ids, V.t1, V.t2, len(self._vertex_keys)),
+                                 *_unsafe_table(slots, lo_off, hi_off, E.ptr, E.ids, E.t1, E.t2, len(self._edge_keys)))
 
     def update_intervals(self, plans, action_costs, dyn_names, bodies=None, starts=None):
         """Block the table with planned paths: ``plans`` (lists of ``State``), their ``(wait, move)`` action
@@ -376,7 +687,7 @@ class SippGraph(object):
         """What ``body`` covers along ``path`` (from t = 0) for this table's agent: ``(vertex windows
         [(position, t1, t2)], edge windows [((p, q), t1, t2)])``. Cached for every table on the map."""
         other = self.agent
-        mover = body if body is not None else Agent.disc(1e-9)   # a point obstacle: covered by the agent's reach
+        mover = body if body is not None else _POINT             # a point obstacle: covered by the agent's reach
         key = (mover.key, None if other is None else other.key, self._rule, tuple(map(tuple, path)), hold,
                None if heading is None else np.asarray(heading, dtype=float).tobytes(), speed)
 
@@ -399,7 +710,7 @@ class SippGraph(object):
             self.sipp_graph[e].add_unsafe_interval(t1, t2)
         self._mark(vertices, edges)
         if self.oriented and vertices:
-            self._remember((body, (p,), t1, t2 - t1, heading), [v for v, _, _ in vertices])
+            self._remember_wait(body, p, heading, t1, t2, [v for v, _, _ in vertices])
 
     def _block_move(self, body, p, q, t0, speed):
         """``body`` moving ``p -> q`` from ``t0`` (at ``speed``; None: in one time unit) blocks what it sweeps."""
@@ -410,11 +721,20 @@ class SippGraph(object):
             self.sipp_graph[e].add_unsafe_interval(t0 + a, t0 + b)
         self._mark(vertices, edges)
         if self.oriented and vertices:
-            if body is not None and speed != body.max_speed:     # (the exact test reads the speed from the body)
-                body = body.replace(max_speed=speed)
-            self._remember((body, (p, q), t0, 0.0, None), [v for v, _, _ in vertices])
+            self._remember_move(body, p, q, t0, speed, [v for v, _, _ in vertices])
 
     # ------------------------------------------------------------------ vertices per heading
+    def _remember_wait(self, body, p, heading, t1, t2, vertices):
+        self._remember((body, (p,), t1, t2 - t1, heading), vertices)
+
+    def _remember_move(self, body, p, q, t0, speed, vertices):
+        if body is not None and speed != body.max_speed:     # (the exact test reads the speed from the body)
+            slowed = self._at_speed.get((body, speed))
+            if slowed is None:
+                slowed = self._at_speed[(body, speed)] = body.replace(max_speed=speed)
+            body = slowed
+        self._remember((body, (p, q), t0, 0.0, None), vertices)
+
     def _remember(self, piece, vertices):
         k = len(self._pieces)
         self._pieces.append(piece)
@@ -495,7 +815,7 @@ class SippGraph(object):
         results, missing, standing, pieces = [None] * len(todo), [], {}, {}
         for n, (position, ori, k) in enumerate(todo):
             body, path, _, hold, head = self._pieces[k]
-            mover = body if body is not None else Agent.disc(1e-9)
+            mover = body if body is not None else _POINT
             key = ("exact", self._standing.key, position, ori, mover.key, path, hold,
                    None if head is None else np.asarray(head, dtype=float).tobytes())
             hit = self._cache.get(key)
@@ -507,7 +827,7 @@ class SippGraph(object):
             # The agent stands at each (vertex, heading) for good from t = 0; each piece is started at
             # t = 0 too, so the windows come out relative to the piece's start.
             stands, ks = list(standing), list(pieces)
-            body_of = lambda k: self._pieces[k][0] if self._pieces[k][0] is not None else Agent.disc(1e-9)
+            body_of = lambda k: self._pieces[k][0] if self._pieces[k][0] is not None else _POINT
             agents = [self._standing] * len(stands) + [body_of(k) for k in ks]
             paths = [np.array([pos], dtype=float) for pos, _ in stands] + [np.array(self._pieces[k][1], dtype=float) for k in ks]
             heads = [_heading_of(o) for _, o in stands] + [self._pieces[k][4] for k in ks]
@@ -533,10 +853,9 @@ class SippGraph(object):
         return [node, 0]
 
     def _mark(self, vertices, edges):
-        """Remember what changed for the next ``arrays()`` (from the table's creation on: a new table's arrays
-        start out all safe and only what was blocked is copied in)."""
-        S = self._static_arrays()
-        vid, eid = S["vid"], S["eid"]
+        """Remember what changed for the next ``arrays()`` (new arrays start from what ``_block_all`` built
+        and only what was blocked after it is copied in)."""
+        vid, eid = self._vid, self._eid
         self._dirty_nodes.update(vid[v] for v, _, _ in vertices)
         self._dirty_edges.update(eid[e] for e, _, _ in edges)
 
@@ -578,9 +897,7 @@ class SippGraph(object):
         gm = self.graph_map
         nodes = gm.nodes
         n = len(nodes)
-        vid = {tuple(node.current): i for i, node in enumerate(nodes)}
-        edge_keys = [k for k in self.sipp_graph if isinstance(k[0], tuple)]     # (the order init_graph adds them)
-        eid = {k: i for i, k in enumerate(edge_keys)}
+        vid, eid = self._vid, self._eid
         ptr, to, edge, length, heads = [0], [], [], [], []
         for u in range(n):                                   # the moves in the order the Python search takes them
             p = tuple(nodes[u].current)
@@ -592,21 +909,28 @@ class SippGraph(object):
         into = [[] for _ in range(n)]
         for k, v in enumerate(to):
             into[v].append(k)
-        return {"vid": vid, "eid": eid, "edge_keys": edge_keys, "dur": {}, "mv_ptr": np.array(ptr, dtype=np.int64),
+        return {"dur": {}, "mv_ptr": np.array(ptr, dtype=np.int64),
                 "mv_to": np.array(to, dtype=np.int64), "mv_edge": np.array(edge, dtype=np.int64), "mv_len": length,
                 "mv_head": heads, "into": into, "pred": None, "arrival": {}}
 
     def _build_arrays(self):
-        """This table's arrays: every vertex safe for good and every edge clear, then what was blocked."""
+        """This table's arrays: the table ``_block_all`` built (without one: every vertex safe for good and
+        every edge clear), then what was blocked after it."""
         S = self._static_arrays()
         A = dict(S)
-        A["edges"] = [self.sipp_graph[k] for k in S["edge_keys"]]
         A["mv_node"] = S["mv_to"].copy()
-        rows = max(16, 2 * len(self._nobj))
-        A["nd_lo"] = np.zeros((rows, 4)); A["nd_hi"] = np.zeros((rows, 4)); A["nd_hi"][:, 0] = np.inf
-        A["nd_n"] = np.ones(rows, dtype=np.int64)
-        A["ed_lo"] = np.zeros((max(1, len(S["edge_keys"])), 4)); A["ed_hi"] = np.zeros_like(A["ed_lo"])
-        A["ed_n"] = np.zeros(A["ed_lo"].shape[0], dtype=np.int64)
+        n, rows, edge_rows = len(self._vertex_keys), max(16, 2 * len(self._nobj)), max(1, len(self._edge_keys))
+        built = self.sipp_graph.built
+        if built is not None:
+            A["nd_lo"], A["nd_hi"], A["nd_n"] = _pad(*built[:3], rows)
+            A["ed_lo"], A["ed_hi"], A["ed_n"] = _pad(*built[3:], edge_rows)
+            A["nd_hi"][n:, 0] = np.inf                       # (room for per-heading lists: safe for good)
+            A["nd_n"][n:] = 1
+        else:
+            A["nd_lo"] = np.zeros((rows, 4)); A["nd_hi"] = np.zeros((rows, 4)); A["nd_hi"][:, 0] = np.inf
+            A["nd_n"] = np.ones(rows, dtype=np.int64)
+            A["ed_lo"] = np.zeros((edge_rows, 4)); A["ed_hi"] = np.zeros_like(A["ed_lo"])
+            A["ed_n"] = np.zeros(edge_rows, dtype=np.int64)
         for k in self._dirty_nodes:
             self._write_node(A, k)
         for k in self._dirty_edges:
@@ -617,7 +941,7 @@ class SippGraph(object):
         return A
 
     def _write_node(self, A, k):
-        lst = self._nobj[k].interval_list
+        lst = self._node(k).interval_list
         if k >= A["nd_lo"].shape[0] or len(lst) > A["nd_lo"].shape[1]:
             rows = max(A["nd_lo"].shape[0], 2 * (k + 1))
             cols = max(A["nd_lo"].shape[1], 2 * len(lst))
@@ -629,7 +953,7 @@ class SippGraph(object):
             A["nd_lo"][k, j], A["nd_hi"][k, j] = lo, hi
 
     def _write_edge(self, A, k):
-        rec = A["edges"][k]
+        rec = self._edge(k)
         m = len(rec)
         if m > A["ed_lo"].shape[1]:
             cols = 2 * m
@@ -643,7 +967,7 @@ class SippGraph(object):
     def _write_into(self, A, position):
         """The interval list each move into ``position`` arrives in: the vertex's own while nothing blocks
         it, else the one for the move's heading (-1 until it is worked out)."""
-        v = A["vid"][position]
+        v = self._vid[position]
         blocked = position in self._blockers
         for k in A["into"][v]:
             A["mv_node"][k] = self._nid.get((position, A["mv_head"][k]), -1) if blocked else v
