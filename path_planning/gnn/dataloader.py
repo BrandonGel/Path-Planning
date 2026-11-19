@@ -1,21 +1,18 @@
 
 import numpy as np
 from torch_geometric.data import HeteroData as HeteroDataBase
-from typing import Any, Optional, Callable
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from torch_geometric.data import InMemoryDataset
-from torch_geometric.transforms import AddSelfLoops, RemoveDuplicatedEdges
-from torch_geometric.utils import k_hop_subgraph,coalesce
+from torch_geometric.io import fs
+from torch_geometric.transforms import AddSelfLoops
 from pathlib import Path
 from tqdm import tqdm
-from typing import List,Tuple
 from multiprocessing import Pool, cpu_count
 from path_planning.data_generation.dataset_generate import get_target_space_type_name
 import os
 import torch
 import torch_geometric
 from torch_geometric.typing import EdgeType
-from typing import Dict, Any
-from path_planning.common.environment.map.graph_sampler import GraphSampler
 from path_planning.data_generation.dataset_util import generate_sample_base_path,generate_roadmap_path
 # Allowlist PyG's base storage to bypass the security check
 torch.serialization.add_safe_globals([torch_geometric.data.storage.BaseStorage])
@@ -24,14 +21,33 @@ torch.serialization.add_safe_globals([torch_geometric.data.storage.EdgeStorage])
 
 
 def _min_max_normalize_columns(x: np.ndarray) -> np.ndarray:
-    """Scale each column to [0, 1] via (x - min) / (max - min). Constant columns -> 0 (no NaNs)."""
+    """Scale each column to [0, 1] via (x - min) / (max - min). Constant columns -> 0 (no NaNs); an empty
+    array (a relation without edges) is returned as it is."""
     orig_dtype = np.asarray(x).dtype
     x = np.asarray(x, dtype=np.float64)
+    if x.shape[0] == 0:
+        return x.astype(orig_dtype, copy=False)
     mn = x.min(axis=0, keepdims=True)
     mx = x.max(axis=0, keepdims=True)
     rng = mx - mn
     out = np.divide(x - mn, rng, out=np.zeros_like(x), where=rng > 0)
     return out.astype(orig_dtype, copy=False)
+
+
+def normalize_positions(pos: np.ndarray, bounds) -> np.ndarray:
+    """Positions into [0, 1]: shifted by the map's origin (the per-axis lower bound), then divided by the
+    largest axis extent (one scale for every axis, so the aspect ratio is kept). ``bounds``: ``(dim, 2)``."""
+    b = np.asarray(bounds, dtype=float).reshape(-1, 2)
+    scale = float(np.max(b[:, 1] - b[:, 0]))
+    return (np.asarray(pos, dtype=float) - b[:, 0]) / (scale if scale > 0 else 1.0)
+
+
+def bounds_of_dataset_path(graph_file) -> np.ndarray:
+    """The map bounds a sample's folder name records (``map<W>x<H>[x<D>]_resolution<r>``): ``(dim, 2)``
+    from 0 to each extent (the folder name does not record the origin, so it is taken as 0)."""
+    part = next(p for p in Path(graph_file).parts if p.startswith('map') and 'resolution' in p)
+    extents = [float(e) for e in part.split('_')[0][len('map'):].split('x')]
+    return np.array([[0.0, e] for e in extents])
 
 
 class HeteroData(HeteroDataBase):
@@ -50,66 +66,51 @@ class HeteroData(HeteroDataBase):
         return {edge_type: getattr(self[edge_type], 'edge_weight', None) 
                 for edge_type in self.edge_index_dict.keys()}
 
-def _load_single_graph(files: Tuple[Path, Path]) -> HeteroData:
-    """
-    Load and process a single graph file (worker function for multiprocessing).
-    
-    Args:
-        files: Tuple of (graph_file, target_file)
-    
-    Returns:
-        HeteroData object containing the processed graph
-    """
-    graph_file, target_file = files
 
-    # Normalize node features
-    graph_file_split = str(graph_file).split('/')
-    ind = [ii for ii in range(len(graph_file_split)) if 'map' in graph_file_split[ii] and 'resolution' in graph_file_split[ii]][0]
-    resolution = float(graph_file_split[ind].split('_')[1][len('resolution'):])
-    bounds = graph_file_split[ind].split('_')[0][len('map'):].split('x')
-    dims = len(bounds)
-    bounds = np.array([float(b) for b in bounds]).max()
-    
-    # Load optimized npz format
-    data_dict = np.load(graph_file)
-    node_ndata = data_dict['node_features']
-    node_ndata[:,:dims] = node_ndata[:,:dims] / bounds
-    node_to_node_edges = data_dict['edge_index'].T
-    node_to_node_edata = data_dict['edge_attr'].reshape(len(data_dict['edge_attr']),-1)
-    node_to_node_edata = _min_max_normalize_columns(node_to_node_edata)
-    node_approx_node_edges = data_dict['approx_edge_index'].T
-    node_aprox_node_edata = data_dict['approx_edge_attr'].reshape(len(data_dict['approx_edge_attr']),-1)
-    node_aprox_node_edata = _min_max_normalize_columns(node_aprox_node_edata)
-    binary_id = str(data_dict['binary_id'])
-    # Load target
-    y: np.ndarray = np.load(target_file)
-    
+torch.serialization.add_safe_globals([HeteroData])
 
-    # Return as dictionary of numpy arrays instead of HeteroData
-    return {
-        'node_features': node_ndata,
-        'node_to_node_edges': node_to_node_edges,
-        'node_to_node_edata': node_to_node_edata,
-        'node_approx_node_edges': node_approx_node_edges,
-        'node_approx_node_edata': node_aprox_node_edata,
-        'y': y,
-        'binary_id': binary_id
-    }   
 
-def get_dummy_sample_data(dim: int = 2):
+def build_graph_data(node_features, bounds, edge_index, edge_attr, approx_edge_index, approx_edge_attr, y=None) -> HeteroData:
+    """The model's input graph, built the same way for training (``GraphDataset``) and inference
+    (``dataset_prune.normalize_data``).
+
+    - ``node_features``: ``(N, dim + k)``, positions first (world coordinates), then the class columns;
+      the positions are normalised with ``normalize_positions(., bounds)``.
+    - ``edge_index`` / ``approx_edge_index``: ``(E, 2)`` node index pairs of the roadmap edges and of the
+      start / goal -> node edges; ``edge_attr`` / ``approx_edge_attr``: their lengths, min-max normalised
+      per relation.
+    - Every relation gets a self-loop per node (attribute 0). ``y``: the per-node target, when there is one."""
+    x = np.array(node_features, dtype=np.float32)
+    dim = np.asarray(bounds).reshape(-1, 2).shape[0]
+    x[:, :dim] = normalize_positions(x[:, :dim], bounds)
     data = HeteroData()
-    num_nodes = 100
-    data['node'].x = torch.tensor(np.zeros((num_nodes,dim+2)), dtype=torch.float)
-    data['node','to','node'].edge_index = torch.tensor(np.zeros((2,num_nodes)), dtype=torch.long)
-    data['node','to','node'].edge_attr = torch.tensor(np.zeros((num_nodes,1)), dtype=torch.float)
-    data['node','to','node'].edge_weight = None
-    data['node','approx','node'].edge_index = torch.tensor(np.zeros((2,num_nodes)), dtype=torch.long)
-    data['node','approx','node'].edge_attr = torch.tensor(np.zeros((num_nodes,1)), dtype=torch.float)
-    data['node','approx','node'].edge_weight = None
-    data['node'].y = torch.tensor(np.zeros((num_nodes,1)), dtype=torch.float)
-    transform = torch_geometric.transforms.Compose([AddSelfLoops('edge_attr',fill_value=0.0)])
-    data = transform(data)
-    return data
+    data['node'].x = torch.tensor(x, dtype=torch.float)
+    for relation, index, attr in (('to', edge_index, edge_attr), ('approx', approx_edge_index, approx_edge_attr)):
+        attr = np.asarray(attr, dtype=np.float32).reshape(len(attr), -1)
+        data['node', relation, 'node'].edge_index = torch.tensor(np.asarray(index).reshape(-1, 2).T, dtype=torch.long)
+        data['node', relation, 'node'].edge_attr = torch.tensor(_min_max_normalize_columns(attr) if attr.size else attr,
+                                                               dtype=torch.float)
+        data['node', relation, 'node'].edge_weight = None
+    if y is not None:
+        data['node'].y = torch.tensor(y, dtype=torch.float)
+    return AddSelfLoops('edge_attr', fill_value=0.0)(data)
+
+
+def _load_single_graph(files: Tuple[Path, Path]) -> dict:
+    """Read one sample (worker function for multiprocessing): the arrays ``build_graph_data`` takes.
+    ``files``: ``(graph.npz, target.npy)``."""
+    graph_file, target_file = files
+    data_dict = np.load(graph_file)
+    return {
+        'node_features': data_dict['node_features'],
+        'bounds': bounds_of_dataset_path(graph_file),
+        'edge_index': data_dict['edge_index'],
+        'edge_attr': data_dict['edge_attr'],
+        'approx_edge_index': data_dict['approx_edge_index'],
+        'approx_edge_attr': data_dict['approx_edge_attr'],
+        'y': np.load(target_file),
+    }
+
 
 class GraphDataset(InMemoryDataset):  
     def __init__(self,
@@ -117,7 +118,6 @@ class GraphDataset(InMemoryDataset):
                 load_file:Path = None,
                 save_file:Path = None,
                 root:Optional[str] = None,
-                num_hops: int = 2,
                 transform: Optional[Callable] = None,
                 pre_transform: Optional[Callable] = None,
                 pre_filter: Optional[Callable] = None,
@@ -125,7 +125,6 @@ class GraphDataset(InMemoryDataset):
         self.data_files = data_files
         self.load_file = load_file
         self.save_file = save_file if save_file is not None and len(str(save_file)) > 0 else os.path.join(root, 'data.pt') if root is not None else 'data.pt'
-        self.data_binary_id = []
         super().__init__(root, transform, pre_transform, pre_filter)
 
         if load_file is not None:
@@ -134,126 +133,19 @@ class GraphDataset(InMemoryDataset):
                 return
             print(f"Loading {load_file} does not exist, processing data")
 
-        if len(data_files) == 0:
-            raise ValueError("No data files provided")
-
-        if data_files is None:
+        if not data_files:
             raise ValueError("No data files provided")
 
         # Get number of workers
         if num_workers is None:
             num_workers = cpu_count()
 
-        data_list = []
-
-        # Parallel processing
         if num_workers > 1 and len(data_files) > 1:
-            with Pool(processes=num_workers) as pool:
-                for result_dict in tqdm(
-                    pool.imap(_load_single_graph, data_files),
-                    total=len(data_files),
-                    desc="Loading graphs"
-                ):
-                    # Convert numpy arrays to HeteroData in main process
-                    data = HeteroData()
-                    data['node'].x = torch.tensor(result_dict['node_features'], dtype=torch.float)
-                    data['node','to','node'].edge_index = torch.tensor(result_dict['node_to_node_edges'], dtype=torch.long)
-                    data['node','to','node'].edge_attr = torch.tensor(result_dict['node_to_node_edata'], dtype=torch.float)
-                    data['node','to','node'].edge_weight = None
-                    data['node','approx','node'].edge_index = torch.tensor(result_dict['node_approx_node_edges'], dtype=torch.long)
-                    data['node','approx','node'].edge_attr = torch.tensor(result_dict['node_approx_node_edata'], dtype=torch.float)
-                    data['node','approx','node'].edge_weight = None
-                    data['node'].y = torch.tensor(result_dict['y'], dtype=torch.float)
-                    self.data_binary_id.append(result_dict['binary_id'])
-                    transform = torch_geometric.transforms.Compose([AddSelfLoops('edge_attr',fill_value=0.0)])
-                    data = transform(data)
-                    # data['node','to','node'].edge_weight = 1/(1 + data['node','to','node'].edge_attr) 
-                    # data['node','approx','node'].edge_weight = 1/(1 + data['node','approx','node'].edge_attr)
-                    if num_hops >= 0:
-                        node_mask = data['node'].y > 0 
-                        node_idx = torch.where(node_mask)[0]
-                        if num_hops > 0:
-                            subset, _, _, _ = k_hop_subgraph(
-                                node_idx, 
-                                num_hops=num_hops, 
-                                edge_index=data['node','to','node'].edge_index, 
-                                relabel_nodes=False
-                            )
-                        else:
-                            subset = node_idx
-            
-
-                        node_mask[:] = False
-                        node_mask[subset] = True
-                        subset_dict = {
-                            'node': node_mask # Pass the boolean mask directly
-                        }
-                        for edge_type, edge_index in data.edge_index_dict.items():
-                            if edge_type[0] == 'node' and  edge_type[2] != 'node':
-                                edge_mask = node_mask[edge_index[0]]
-                            elif edge_type[0] != 'node' and  edge_type[2] == 'node':
-                                edge_mask = node_mask[edge_index[1]]
-                            elif edge_type[0] == 'node' and  edge_type[2] == 'node':
-                                edge_mask = node_mask[edge_index[0]] & node_mask[edge_index[1]]
-                            else:
-                                edge_mask = torch.ones(node_mask.shape,dtype=bool)
-                            subset_dict[edge_type] = edge_mask
-
-                        data = data.subgraph(subset_dict)
-
-                    data_list.append(data)
+            with Pool(processes=num_workers) as pool:       # read in parallel, build the graphs here
+                arrays = list(tqdm(pool.imap(_load_single_graph, data_files), total=len(data_files), desc="Loading graphs"))
         else:
-            # Sequential fallback (original behavior)
-            for files in tqdm(data_files, desc="Loading graphs"):
-                result_dict = _load_single_graph(files)
-                # Convert numpy arrays to HeteroData
-                data = HeteroData()
-                data['node'].x = torch.tensor(result_dict['node_features'], dtype=torch.float)
-                data['node','to','node'].edge_index = torch.tensor(result_dict['node_to_node_edges'], dtype=torch.long)
-                data['node','to','node'].edge_attr = torch.tensor(result_dict['node_to_node_edata'], dtype=torch.float)
-                data['node','to','node'].edge_weight = None
-                data['node','approx','node'].edge_index = torch.tensor(result_dict['node_approx_node_edges'], dtype=torch.long)
-                data['node','approx','node'].edge_attr = torch.tensor(result_dict['node_approx_node_edata'], dtype=torch.float)
-                data['node','approx','node'].edge_weight = None
-                data['node'].y = torch.tensor(result_dict['y'], dtype=torch.float)  
-                self.data_binary_id.append(result_dict['binary_id'])
-                transform = torch_geometric.transforms.Compose([AddSelfLoops('edge_attr',fill_value=0.0)])
-                data = transform(data)
-
-                if num_hops >= 0:
-                    node_mask = data['node'].y > 0 
-                    node_idx = torch.where(node_mask)[0]
-                    if num_hops > 0:
-                        subset, _, _, _ = k_hop_subgraph(
-                                node_idx, 
-                                num_hops=num_hops, 
-                                edge_index=data['node','to','node'].edge_index, 
-                                relabel_nodes=False
-                            )
-                    else:
-                        subset = node_idx
-
-                    node_mask[:] = False
-                    node_mask[subset] = True
-                    subset_dict = {
-                        'node': node_mask # Pass the boolean mask directly
-                    }
-                    for edge_type, edge_index in data.edge_index_dict.items():
-                        if edge_type[0] == 'node' and  edge_type[2] != 'node':
-                            edge_mask = node_mask[edge_index[0]]
-                        elif edge_type[0] != 'node' and  edge_type[2] == 'node':
-                            edge_mask = node_mask[edge_index[1]]
-                        elif edge_type[0] == 'node' and  edge_type[2] == 'node':
-                            edge_mask = node_mask[edge_index[0]] & node_mask[edge_index[1]]
-                        else:
-                            edge_mask = torch.ones(node_mask.shape,dtype=bool)
-                        edge_mask_index = torch.where(edge_mask)[0]
-                        subset_dict[edge_type] = edge_mask
-
-                    data = data.subgraph(subset_dict)
-                data_list.append(data)
-        
-        self.data, self.slices = self.collate(data_list)
+            arrays = [_load_single_graph(files) for files in tqdm(data_files, desc="Loading graphs")]
+        self.data, self.slices = self.collate([build_graph_data(**a) for a in arrays])
 
     @property
     def raw_file_names(self):
@@ -261,10 +153,11 @@ class GraphDataset(InMemoryDataset):
 
     @property
     def processed_file_names(self):
-        return [self.save_paths]
+        return [self.save_file]
 
     def save(self):
-        torch.save((self._data, self.slices), self.save_file)
+        """Write the collated dataset to ``save_file`` in PyG's own format (what ``load`` reads)."""
+        fs.torch_save((self._data.to_dict(), self.slices, self._data.__class__), str(self.save_file))
 
 
 def get_graph_dataset_file_paths(paths:List[Path],config:dict, max_cases:list[int]=None,max_graphs:list[int]=None):
@@ -281,8 +174,10 @@ def get_graph_dataset_file_paths(paths:List[Path],config:dict, max_cases:list[in
         if len(max_graphs) != len(paths):
             raise ValueError("max_graphs must be a list of the same length as paths")
 
-    road_map_types = config["road_map_types"] if "road_map_types" in config else ["prm"]
-    target_space = config["target_space"].lower() if "target_space" in config else "convolution_binary"
+    # ``road_map_type``: one type or a list (config/train.yaml, util.set_train_config, run_train's -rmt).
+    road_map_types = config["road_map_type"]
+    road_map_types = [road_map_types] if isinstance(road_map_types, str) else list(road_map_types)
+    target_space = config["target_space"].lower()
 
     #Iterate over all paths
     for road_map_type in road_map_types:
@@ -311,9 +206,7 @@ def get_graph_dataset_file_paths(paths:List[Path],config:dict, max_cases:list[in
                     graphs_dirs = graphs_dirs[:graphs_dirs_end]
 
                 #Iterate over all graphs
-                for ii in range(len(graphs_dirs)):
-                    # Check if graph file exists
-                    graph_dir = graphs_dirs[ii]
+                for graph_dir in graphs_dirs:
                     graph_file = graph_dir / f'graph.npz'
                     target_file = graph_dir / f'target_{y_type_name}.npy'
                     assert graph_file.exists(), f"{graph_file} does not exist"

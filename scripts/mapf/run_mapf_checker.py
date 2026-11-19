@@ -1,59 +1,63 @@
 '''
-Run the checker for the MAPF solutions with different constant radii and constant velocities (except for zero velocity).
-If velocity is 0.0, then the agent is reaching the next waypoint in 1 second
-Or the time to travel between two waypoints is 1 second.
+Check the saved MAPF / MAPD solutions for time anomalies, velocity anomalies and collisions.
 
-For LaCAM, LaCAM_random,
-For radii 0.5 (no yet implemented with different radii)
+Every ``solution*.yaml`` under ``path_planning/maps/2d/<solver>/`` is checked, for the solvers written by
+``run_cbs.py``, ``run_icbs.py``, ``run_ccbs.py``, ``run_sipp.py``, ``run_lacam*.py`` and
+``run_neural_attf*.py``. Summaries that record each agent's body (``agents``: name -> ``Agent.to_dict()``,
+written by ``mapf_solver`` for every solver with bodies) are checked exactly with those bodies; older ones
+as discs of the summary's ``agent_radius``. A constant speed is expected when the summary's
+``agent_velocity`` is non-zero (velocity 0: every move takes one time unit).
 
-For CBS, ICBS, & SIPP,
-For radii 0.0, 1.0, 2.0.
-
-For SIPP,
-For velocities 0.0, 1.0, 2.0.
-
-python scripts/mapf/run_mapf_checker.py
+python scripts/mapf/run_mapf_checker.py [solver ...]
 '''
 
-import yaml
-from path_planning.utils.checker import check_time_anomaly, check_velocity_anomaly, check_collision
+import sys
+from pathlib import Path
 
-def check_mapf_solution(file,radius: float = 0.0,velocity: float = 0.0,verbose: bool = False):
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))   # this repo, ahead of any installed copy
+
+import glob
+import os
+
+import yaml
+
+from path_planning.multi_agent_planner.mapf_solver import MAPF_SOLVERS
+from path_planning.utils.checker import check_collision, check_collision_bodies, check_time_anomaly, check_velocity_anomaly
+
+SOLVERS = (*MAPF_SOLVERS, "neural_attf")
+ROOT = "path_planning/maps/2d"
+
+
+def check_mapf_solution(file, radius: float = None, velocity: float = None, verbose: bool = False) -> bool:
+    """Check one saved solution; True when it has no anomaly and no collision. ``radius`` / ``velocity``
+    default to the summary's ``agent_radius`` / ``agent_velocity``; recorded bodies take precedence."""
     with open(file, 'r') as f:
-        data = yaml.safe_load(f)
-    solution = data['schedule']
-    print(file)
-    check_time_anomaly(solution,verbose)
-    check_velocity_anomaly(solution,is_using_constant_speed=(velocity != 0),verbose=verbose)
-    check_collision(solution, radius,verbose)
+        data = yaml.load(f, Loader=getattr(yaml, "CSafeLoader", yaml.SafeLoader))
+    solution = data.get('schedule') or {}
+    if not solution:
+        print(f"{file}: no schedule")
+        return False
+    radius = float(data.get("agent_radius") or 0.0) if radius is None else radius
+    velocity = float(data.get("agent_velocity") or 0.0) if velocity is None else velocity
+    no_time = check_time_anomaly(solution, verbose)
+    no_speed = check_velocity_anomaly(solution, is_using_constant_speed=(velocity != 0), verbose=verbose)
+    if data.get("agents"):
+        collisions, how = check_collision_bodies(solution, data["agents"], verbose=verbose), "exact bodies"
+    elif radius > 0:
+        collisions, how = check_collision(solution, radius, verbose), f"discs r={radius}"
+    else:
+        collisions, how = {}, "point particles (not checked)"
+    ok = no_time and no_speed and not collisions
+    print(f"{'ok  ' if ok else 'FAIL'} {file} [{how}]"
+          + ("" if no_time else " time anomaly") + ("" if no_speed else " velocity anomaly")
+          + (f" {len(collisions)} colliding pair(s)" if collisions else ""))
+    return ok
+
 
 if __name__ == "__main__":
-    for ii in [0.0,1.0,2.0]:
-        file = f'path_planning/maps/2d/cbs/solution_radius{float(ii)}.yaml'
-        check_mapf_solution(file,radius=float(ii),velocity=0.0)
-
-    for ii in [0.0,1.0,2.0]:
-        file = f'path_planning/maps/2d/icbs/solution_radius{float(ii)}.yaml'
-        check_mapf_solution(file,radius=float(ii),velocity=0.0)
-    
-    file = f'path_planning/maps/2d/lacam/solution.yaml'
-    check_mapf_solution(file,radius=0.5,velocity=0.0)
-
-    file = f'path_planning/maps/2d/lacam_random/solution.yaml'
-    check_mapf_solution(file,radius=0.5,velocity=0.0)
-
-    for ii in [0.0,1.0,2.0]:
-        file = f'path_planning/maps/2d/sipp/solution_radius{float(ii)}.yaml'
-        check_mapf_solution(file,radius=float(ii),velocity=0.0)
-
-    for ii in [0.0,1.0,2.0]:
-        file = f'path_planning/maps/2d/sipp/solution_velocity{float(ii)}.yaml'
-        check_mapf_solution(file,radius=1.0,velocity=float(ii))
-
-    for ii in [1.0,2.0]:
-        file = f'path_planning/maps/2d/ccbs/solution_radius{float(ii)}.yaml'
-        check_mapf_solution(file,radius=float(ii),velocity=0.0)
-
-    for ii in [0.0,1.0,2.0]:
-        file = f'path_planning/maps/2d/ccbs/solution_velocity{float(ii)}.yaml'
-        check_mapf_solution(file,radius=1.0,velocity=float(ii))
+    solvers = sys.argv[1:] or SOLVERS
+    results = {}
+    for solver in solvers:
+        for file in sorted(glob.glob(os.path.join(ROOT, solver, "solution*.yaml"))):
+            results[file] = check_mapf_solution(file)
+    print(f"{sum(results.values())}/{len(results)} solutions passed")

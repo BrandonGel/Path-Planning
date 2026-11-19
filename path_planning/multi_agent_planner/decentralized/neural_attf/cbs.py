@@ -9,7 +9,7 @@ Wraps the GraphSampler-based centralized CBS Environment with:
     across token-passing iterations.
 
 Bounds and static collision are inherited from the base via
-``graph_map.in_collision_point``; we do not re-check rectangular bounds.
+``graph_map.in_collision``; we do not re-check rectangular bounds.
 """
 
 from typing import Callable, Iterable, Optional, Union
@@ -37,9 +37,6 @@ class Environment(EnvironmentBase):
         moving_obstacles: Optional[dict] = None,
         t: int = 0,
         astar_max_iterations: int = 10000,
-        radius: float = 0.0,
-        velocity: float = 0.0,
-        use_constraint_sweep: bool = True,
         heuristic_type: str = "euclidean",
         cost_map: CostMap = None,
         alpha: float = 0.001,
@@ -59,9 +56,6 @@ class Environment(EnvironmentBase):
             graph_map,
             agents,
             astar_max_iterations=astar_max_iterations,
-            radius=radius,
-            velocity=velocity,
-            use_constraint_sweep=use_constraint_sweep,
             heuristic_type=heuristic_type,
         )
         # Re-bind A* so its cached env references include our cost_map.
@@ -83,7 +77,7 @@ class Environment(EnvironmentBase):
             return False
         if (pt[0], pt[1], state.time) in self.moving_obstacles:
             return False
-        if self.graph_map.in_collision_point(pt):
+        if self.graph_map.in_collision(pt):
             return False
         return VertexConstraint(state.time, state.location) not in self.constraints.vertex_constraints
 

@@ -6,7 +6,21 @@ from path_planning.utils.util import read_graph_sampler_from_yaml, read_agents_f
 from tqdm import tqdm
 from multiprocessing import Pool, cpu_count
 from typing import Tuple
-from path_planning.data_generation.dataset_util import *
+from path_planning.data_generation.dataset_util import (
+    generate_ground_truth_path,
+    generate_mapf_path,
+    generate_perm_base_path,
+    generate_roadmap_path,
+    get_density_map_file,
+    get_density_map_visualization_file,
+    get_input_file_path,
+    get_obstacle_map_file,
+    get_solution_file_path,
+    get_solution_name_suffix,
+    get_start_goal_file,
+    get_trajectory_map_file,
+)
+from path_planning.utils.checker import _xyz
 
 def get_start_goal_locations(agents):
     """Stack starts/goals from YAML (world coordinates per coordinate contract)."""
@@ -16,38 +30,14 @@ def get_start_goal_locations(agents):
         start_goal_locations.append( agent['goal'])
     return np.array(start_goal_locations)
 
-def get_longest_path(schedule):
-    """Get the longest path length from all agents."""
-    longest = 0
-    for agent in schedule.keys():
-        if len(schedule[agent]) > longest:
-            longest = len(schedule[agent])
-    return longest
-
-def get_trajectory_map(schedule,map_,discrete: bool = True):    
-    longest = get_longest_path(schedule)
+def get_trajectory_map(schedule, map_):
+    """``(agents, longest plan) + map_.shape`` counts: 1 in the cell of each waypoint of each agent's plan.
+    Schedule waypoints are world coordinates (roadmap node positions), whatever the roadmap type."""
+    longest = max((len(path) for path in schedule.values()), default=0)
     trajectory_map = np.zeros((len(schedule), longest,)+map_.shape,dtype=np.int32)
-    use_disc = getattr(map_, "use_discrete_space", True)
-    for j, agent in enumerate(schedule.keys()):
-        agent_path = schedule[agent]
-        x = [point['x'] for point in agent_path[:]]
-        y = [point['y'] for point in agent_path[:]]
-        if 'z' in schedule[next(iter(schedule))][0]:
-            z = [point['z'] for point in agent_path[:]]
-            point = [(x[i],y[i],z[i]) for i in range(len(x))]
-        else:
-            z = None
-            point = [(x[i],y[i]) for i in range(len(x))]
-        
-        for i, p in enumerate(point):
-            if use_disc:
-                # Schedule waypoints are already grid/map indices (same as roadmap nodes).
-                grid_ix = tuple(int(c) for c in p)
-                index = (j, i) + grid_ix
-            else:
-                index = (j, i) + tuple(map_.world_to_map(p, True))
-            trajectory_map[index] += 1
-    
+    for j, agent_path in enumerate(schedule.values()):
+        for i, point in enumerate(agent_path):
+            trajectory_map[(j, i) + tuple(map_.world_to_map(tuple(_xyz(point)), True))] += 1
     return trajectory_map
 
 def process_single_case_trajectories(args: Tuple) -> Tuple[bool, Path]:
@@ -68,7 +58,7 @@ def process_single_case_trajectories(args: Tuple) -> Tuple[bool, Path]:
         permutations = sorted([d for d in perm_path.iterdir() if d.is_dir() and d.name.startswith("perm_")])
         
         if not permutations:
-            return False, perm_path
+            return False, case_dir
 
         input_file = get_input_file_path(permutations[0])
         agents = read_agents_from_yaml(input_file)
@@ -88,9 +78,11 @@ def process_single_case_trajectories(args: Tuple) -> Tuple[bool, Path]:
                 continue
 
             with open(solution_file) as f:
-                schedule = yaml.load(f, Loader=yaml.FullLoader)
+                summary = yaml.load(f, Loader=yaml.FullLoader)
+            if not summary["success"]:                     # unsolved, or the plan failed the collision check
+                continue
 
-            perm_trajectory_map = get_trajectory_map(schedule["schedule"], map_)
+            perm_trajectory_map = get_trajectory_map(summary["schedule"], map_)
             trajectory_map_file = get_trajectory_map_file(roadmap_path, solution_name_suffix, agent_velocity)
             np.save(trajectory_map_file, perm_trajectory_map)
             density_map += perm_trajectory_map.sum(axis=(0,1))

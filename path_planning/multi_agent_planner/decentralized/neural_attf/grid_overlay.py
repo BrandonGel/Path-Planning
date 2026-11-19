@@ -4,7 +4,7 @@ GridOverlay for Neural-ATTF on arbitrary graphs.
 The neural encoder (U-Net) consumes a 2D image. To use it on non-grid graphs,
 we project the graph onto an axis-aligned grid defined by ``graph_map.bounds``
 at a chosen resolution. Each cell is marked free / obstacle via
-``graph_map.in_collision_point``. World <-> cell conversion lets us:
+``graph_map.in_collision``. World <-> cell conversion lets us:
 
   * build the encoder input from agent / task point tuples,
   * wrap the encoder's per-cell output as a callable A* guidance cost
@@ -55,7 +55,7 @@ class GridOverlay:
                 ):
                     maze[i, j] = 0.0
                     continue
-                if graph_map.in_collision_point(world):
+                if graph_map.in_collision(world):
                     maze[i, j] = 0.0
         self.maze: np.ndarray = maze
 

@@ -38,7 +38,7 @@ def sample_task_endpoints(
         pt = _node_point(node)
         if pt in excluded:
             continue
-        if graph_map.in_collision_point(pt):
+        if graph_map.in_collision(pt):
             continue
         candidates.append(pt)
     total = n_pickups + n_deliveries + n_parking

@@ -2,12 +2,17 @@
 Run Halton-based roadmap generation for 2D and 3D maps.
 
 Halton quasi-random samples are drawn in the map bounds and filtered by
-distance-to-obstacle (see path_planning/common/environment/map/halton.py).
+distance-to-obstacle (NodeSampler; parameters under sampling_dist_dict.halton).
 2D: CDT over obstacles; 3D: Delaunay triangulation on Halton samples (CDT is 2D-only).
 
 Usage:
     python scripts/roadmaps/run_halton.py
 """
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))   # this repo, ahead of any installed copy
 
 import os
 import time
@@ -28,13 +33,11 @@ def run_halton(
     max_edge_len=5.0,
     halton_cfg=None,
 ):
-    """Build a Halton-sampled roadmap and optionally persist it."""
+    """Build a Halton-sampled roadmap."""
     set_global_seed(42)
 
-    if not hasattr(graph_sampler, "sampling_dist_dict"):
-        graph_sampler.sampling_dist_dict = {}
     if halton_cfg:
-        graph_sampler.sampling_dist_dict["halton"] = halton_cfg
+        graph_sampler.node_sampler.set_sampling_dist_dict({"halton": halton_cfg})
 
     for s in start:
         graph_sampler.type_map[graph_sampler.world_to_map(s, discrete=True)] = TYPES.START
@@ -42,11 +45,11 @@ def run_halton(
         graph_sampler.type_map[graph_sampler.world_to_map(g, discrete=True)] = TYPES.GOAL
     graph_sampler.set_start(start)
     graph_sampler.set_goal(goal)
-    graph_sampler.set_parameters(
+    graph_sampler.set_roadmap_config(
         sample_num=sample_num,
         num_neighbors=0,
-        min_edge_len=min_edge_len,
-        max_edge_len=max_edge_len,
+        min_edge_length=min_edge_len,
+        max_edge_length=max_edge_len,
     )
 
     st = time.time()
@@ -58,14 +61,14 @@ def run_halton(
 
     st = time.time()
     if graph_sampler.dim == 2:
-        graph_sampler.generate_map(roadmap_type, nodes)
+        graph_sampler.generate_roadmap(roadmap_type)
         connect_label = "CDT"
     else:
         # CDT boundary extraction is 2D-only; connect Halton nodes with 3D Delaunay.
-        graph_sampler.generate_planar_map(nodes, use_option="dt")
+        graph_sampler.generate_roadmap("dt")
         connect_label = "Delaunay"
     road_map = graph_sampler.road_map
-    num_edges = sum(len(edges) for edges in road_map)
+    num_edges = len(graph_sampler.edges)
     print(f"Generated {num_edges} {connect_label} edges in {time.time() - st:.2f} s")
     print(f"Roadmap has {len(graph_sampler.nodes)} nodes after {connect_label}")
     return graph_sampler, graph_sampler.nodes, road_map

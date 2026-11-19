@@ -1,0 +1,53 @@
+# Roadmap parameters (path_planning.common.environment.roadmap.RoadmapConfig).
+#
+# Load with RoadmapConfig.from_yaml("config/roadmap.yaml"), or hand the path to
+# GraphSampler(roadmap_config=...), sampler.set_roadmap_config(...), or
+# read_graph_sampler_from_yaml(map_yaml, roadmap_config=...). A map YAML may
+# also carry this same block under a top-level `roadmap_config:` key, which
+# read_graph_sampler_from_yaml picks up by itself. Unknown keys raise. A key
+# left out takes RoadmapConfig's own default, given in [brackets] where it
+# differs from the value in this template.
+
+roadmap_config:
+  # Edge band, applied by every builder that filters edges (prm, dt, cdt,
+  # halton, midpoints, centroids, voronoi, custom, rrg). `grid` ignores it.
+  min_edge_length: 1.0e-10     # drop edges shorter than this [0.0]
+  max_edge_length: 30.0        # drop edges longer than this; also RRG steer / connect radius [.inf = unbounded]
+
+  # Sampling
+  sample_num: 1000             # random nodes drawn by generateRandomNodes; nodes added by rrg [0]
+  num_neighbors: 13            # prm: accepted edges per node [0 = unlimited]
+
+  # Line of sight
+  filter_collision: true       # drop candidate edges that cross obstacles
+
+  # rrg
+  goal_sample_rate: 0.1        # probability of drawing a goal instead of a random point
+  max_iters_ratio: 50.0        # iteration cap = ratio * sample_num
+
+  # grid
+  snap_off_grid: true          # snap off-centre nodes (start/goal) to their cell centre instead of raising
+
+  # prm adaptive KD query
+  k_query: null                # first query size (null = 4 * num_neighbors + 1)
+  grow: 4                      # query growth factor per round
+
+  # Edge constraints by region (2D), applied after every builder; see
+  # path_planning/common/environment/roadmap/edge_zones.py. Each zone: `points`
+  # (polygon, in order, world coords), `directions` (list of [lo, hi] ranges,
+  # radians unless `degrees: true`; lo > hi wraps through 0), optional `rule`
+  # (intersects | within | midpoint: what counts as an edge "in" the zone).
+  # An edge in several zones must pass each one.
+  #
+  # direction_zones: one-way. A directed edge s -> t in the zone is kept only if
+  #   its heading atan2(t - s) in [0, 360) deg is in a range; t -> s is judged by
+  #   its own heading.
+  # edge_zones: allowed line angles in [0, 180] deg, both directions alike.
+  direction_zones: []
+  #  - points: [[3, 9], [3, 12], [29, 12], [29, 9]]
+  #    directions: [[0, 10]]                 # eastbound lane
+  #    degrees: true
+  edge_zones: []
+  #  - points: [[2, 2], [2, 16], [16, 16], [16, 2]]
+  #    directions: [[0, 5], [85, 95], [175, 180]]   # horizontal / vertical edges only
+  #    degrees: true

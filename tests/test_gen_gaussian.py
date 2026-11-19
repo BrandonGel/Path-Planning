@@ -11,18 +11,13 @@ from pathlib import Path
 
 import numpy as np
 
-try:
-    from path_planning.data_generation.dataset_ground_truth_map import InputFile
-    from path_planning.data_generation.dataset_util import (
-        normalize_gen_config,
-        read_gen_config_from_yaml,
-    )
-    from path_planning.utils.util import set_global_seed, obstacles_world_to_grid
-    from path_planning.common.environment.map.graph_sampler import GraphSampler
-
-    _HAS_SAMPLER = True
-except ModuleNotFoundError:
-    _HAS_SAMPLER = False
+from path_planning.data_generation.dataset_ground_truth_map import InputFile
+from path_planning.data_generation.dataset_util import (
+    standardize_spawning_mechanism_config,
+    read_gen_config_from_yaml,
+)
+from path_planning.utils.util import set_global_seed, obstacles_world_to_grid
+from path_planning.common.environment.map.graph_sampler import GraphSampler
 
 
 BASE = dict(
@@ -30,10 +25,12 @@ BASE = dict(
     obs_size=0.5, time_limit=1, max_iterations=10, road_map_type="grid", use_discrete_space=True,
     sample_num=0, num_neighbors=4.0, min_edge_len=1e-10, max_edge_len=1.1,
 )
-# sha256 of {agents, obstacles} produced by the generator BEFORE the gaussian mode was added.
+# sha256 of {agents, obstacles} from the uniform generator. Recorded again after b6d46f3 ("Update occupied
+# position"), which keeps obstacles clear with the map's Euclidean inflation instead of a square kernel of
+# ceil(2r / resolution) cells; before it: 42 -> cfe4663b..., 7 -> 8c3bbc01....
 GOLDEN = {
-    42: "cfe4663b05a648aea7add90eaf86b749a26cc2916eedb49c3ba4691194815ece",
-    7: "8c3bbc016cdb2647e8a2f5e7386627319bd501efb0542ebf075aed382e70d301",
+    42: "5ae601bd30192b15475139938c4b58607ab47cf524f4e43bea9aeab5cca8890f",
+    7: "f8bb12ee3454e0681312d84170b9f11c41ce2bcd61058db05d247e980e69ceac",
 }
 
 
@@ -62,7 +59,6 @@ def _cells(inpt):
 GAUSS = {"type": "gaussian", "gaussian": {"std_scale": 0.05, "max_attempts": 100, "separate_means": True}}
 
 
-@unittest.skipUnless(_HAS_SAMPLER, "GraphSampler not available in this environment")
 class TestUniformRegression(unittest.TestCase):
     def test_bitwise_identical_to_historical_generator(self):
         for seed, golden in GOLDEN.items():
@@ -72,7 +68,6 @@ class TestUniformRegression(unittest.TestCase):
                 self.assertNotIn("gen", inpt)
 
 
-@unittest.skipUnless(_HAS_SAMPLER, "GraphSampler not available in this environment")
 class TestGaussian(unittest.TestCase):
     def test_obstacles_identical_to_uniform_for_same_seed(self):
         for seed in range(1, 6):
@@ -129,13 +124,13 @@ class TestGaussian(unittest.TestCase):
 
 class TestGenConfig(unittest.TestCase):
     def test_normalize_defaults(self):
-        self.assertEqual(normalize_gen_config(None)["type"], "uniform")
-        cfg = normalize_gen_config({"type": "gaussian"})
+        self.assertEqual(standardize_spawning_mechanism_config(None)["type"], "uniform")
+        cfg = standardize_spawning_mechanism_config({"type": "gaussian"})
         self.assertEqual((cfg["std_scale"], cfg["max_attempts"], cfg["separate_means"]), (0.1, 100, True))
-        flat = normalize_gen_config({"type": "gaussian", "std_scale": 0.3, "separate_means": False})
+        flat = standardize_spawning_mechanism_config({"type": "gaussian", "std_scale": 0.3, "separate_means": False})
         self.assertEqual((flat["std_scale"], flat["separate_means"]), (0.3, False))
         with self.assertRaises(AssertionError):
-            normalize_gen_config({"type": "banana"})
+            standardize_spawning_mechanism_config({"type": "banana"})
 
     def test_read_yaml(self):
         with tempfile.TemporaryDirectory() as d:
@@ -145,7 +140,3 @@ class TestGenConfig(unittest.TestCase):
             self.assertEqual((cfg["type"], cfg["std_scale"], cfg["max_attempts"]), ("gaussian", 0.2, 100))
             p.write_text("")
             self.assertEqual(read_gen_config_from_yaml(p)["type"], "uniform")
-
-
-if __name__ == "__main__":
-    unittest.main()

@@ -16,7 +16,11 @@ Per timestep:
    ``delayed_agents`` on the next step.
 4. Appends ``{'t', 'x', 'y'}`` (or ``..., 'z'``) entries to ``actual_paths``
    so the schedule is compatible with :class:`Visualizer2D.animate` and
-   :func:`mapf_solver.summarize_solution`.
+   :func:`mapf_solver.summarize_solution`. Agents with a body also get ``yaw``
+   (+ ``pitch`` in 3D, degrees): the direction of their last move.
+
+Each agent's body and speed come from its dict's ``"agent"`` (an ``Agent``), as
+for the planner.
 """
 
 from __future__ import annotations
@@ -27,11 +31,23 @@ import time
 from collections import defaultdict
 from typing import Dict, Iterable, List
 
+import numpy as np
 
-def _point_to_dict(t: int, pt) -> dict:
+from path_planning.multi_agent_planner.centralized.cbs.data_types import (
+    _heading_of, _ori_between, put_heading, start_heading,
+)
+
+
+def _point_to_dict(t: int, pt, heading=None) -> dict:
+    d = {"t": t, "x": float(pt[0]), "y": float(pt[1])}
     if len(pt) == 3:
-        return {"t": t, "x": float(pt[0]), "y": float(pt[1]), "z": float(pt[2])}
-    return {"t": t, "x": float(pt[0]), "y": float(pt[1])}
+        d["z"] = float(pt[2])
+    return put_heading(d, heading)
+
+
+def _position(entry: dict) -> tuple:
+    """The position of an ``actual_paths`` entry."""
+    return (entry["x"], entry["y"], entry["z"]) if "z" in entry else (entry["x"], entry["y"])
 
 
 class Simulation:
@@ -41,24 +57,27 @@ class Simulation:
         agents: List[dict],
         delay_probability: float = 0.0,
         rng: random.Random | None = None,
-        velocity: float = 0.0,
         timestep_duration: float = 1.0,
-        agent_radius: float = 0.0,
     ):
         self.tasks = list(tasks)
         self.agents = agents
         self.delay_probability = float(delay_probability)
         self.rng = rng or random.Random()
 
-        # Constant-velocity motion: each tick an agent travels at most this much arc
-        # length (world units) along its committed fine-waypoint polyline, passing
-        # through multiple waypoints. 0 -> fall back to one waypoint per tick.
-        self.velocity = float(velocity)
+        self.bodies = {a["name"]: a.get("agent") for a in agents}
+        # Constant-speed motion: each tick an agent travels at most this much arc
+        # length (world units, its ``max_speed`` x the tick) along its committed
+        # fine-waypoint polyline, passing through multiple waypoints. 0 (no body or
+        # no speed) -> one waypoint per tick.
         self.timestep_duration = float(timestep_duration)
-        self.arc_budget = self.velocity * self.timestep_duration
-        # Body radius for the radius-aware hold backstop (see time_forward). 0 ->
-        # taken from the planner (``algorithm.agent_radius``) when it has one.
-        self.agent_radius = float(agent_radius)
+        self.arc_budget = {
+            name: (b.max_speed or 0.0) * self.timestep_duration if b is not None else 0.0
+            for name, b in self.bodies.items()
+        }
+        # Bounding reach (radius + clearance) per agent, for the hold backstop (see time_forward).
+        self.reach = {name: 0.0 if b is None else b.reach for name, b in self.bodies.items()}
+        # Heading of each agent with a body: its start yaw, then the direction of its last move.
+        self.heading = {a["name"]: start_heading(a) for a in agents if self.bodies[a["name"]] is not None}
 
         self.time = 0
         self.delayed_agents: set = set()
@@ -67,7 +86,7 @@ class Simulation:
         self.algo_time = 0.0
 
         for agent in self.agents:
-            self.actual_paths[agent["name"]] = [_point_to_dict(0, agent["start"])]
+            self.actual_paths[agent["name"]] = [_point_to_dict(0, agent["start"], self.heading.get(agent["name"]))]
 
     # ---------------------------------------------------------- public API
 
@@ -91,12 +110,7 @@ class Simulation:
     def time_forward(self, algorithm) -> None:
         self.time += 1
 
-        position = {
-            agent["name"]: tuple(
-                v for k, v in self.actual_paths[agent["name"]][-1].items() if k != "t"
-            )
-            for agent in self.agents
-        }
+        position = {agent["name"]: _position(self.actual_paths[agent["name"]][-1]) for agent in self.agents}
         delayed_in = list(self.delayed_agents)
 
         t0 = time.time()
@@ -132,7 +146,7 @@ class Simulation:
                 self.times_agent_delayed[name] += 1
             else:
                 # Advance up to one tick's worth of arc length (multiple fine waypoints).
-                n, traversed, fracs = self._advance_plan(planned, self.arc_budget)
+                n, traversed, fracs = self._advance_plan(planned, self.arc_budget[name])
                 agent_plan[name] = (n, traversed, fracs)
                 agent_pos_next[name] = traversed[-1] if traversed else cur
 
@@ -165,22 +179,19 @@ class Simulation:
                 agent_pos_next[name] = agents_pos_now[name]
                 agent_plan[name] = (0, [], None)
 
-        # Radius-aware backstop. Committed paths are mutually consistent, but a hold
+        # Body-aware backstop. Committed paths are mutually consistent, but a hold
         # (random delay, or one of the holds above) is applied AFTER everyone's motion
         # for this tick was planned on the assumption that the held agent moves on.
-        # Anyone whose motion this tick sweeps within 2r of an agent that is standing
+        # Anyone whose body, moving this tick, would touch an agent that is standing
         # still is therefore held too - and reported as delayed, so the planner
-        # re-syncs its path next tick - instead of driving through a stopped body.
-        # Consistent plans never bring a mover within 2r of a resting agent, so this
-        # only fires when a hold has already broken the plan. A mover that already
-        # stands within 2r (it was held inside the footprint, or the two were parked
+        # re-syncs its path next tick - instead of driving through a stopped body
+        # (see :meth:`_hits_resting`). Consistent plans never do that, so this only
+        # fires when a hold has already broken the plan. A mover that already touches
+        # the resting body (it was held inside the footprint, or the two were parked
         # next to each other) is only held if its motion brings it CLOSER than it
         # starts - moving away is the escape the planner just computed for it.
-        radius = self.agent_radius
-        if radius <= 0.0:
-            radius = float(getattr(algorithm, "agent_radius", 0.0) or 0.0)
-        if radius > 0.0:
-            clearance = 2.0 * radius - 1e-9
+        graph_map = getattr(algorithm, "graph_map", None)
+        if any(r > 0.0 for r in self.reach.values()):
             names = [a["name"] for a in agents_to_move]
             changed = True
             while changed:
@@ -197,9 +208,7 @@ class Simulation:
                     for other in stationary:
                         if other == name:
                             continue
-                        d_min = self._polyline_point_dist(legs, agents_pos_now[other])
-                        d_start = math.dist(agents_pos_now[name], agents_pos_now[other])
-                        if d_min < clearance and d_min < d_start - 1e-9:
+                        if self._hits_resting(graph_map, name, legs, other, agents_pos_now[other]):
                             delayed.add(name)
                             agent_pos_next[name] = agents_pos_now[name]
                             agent_plan[name] = (0, [], None)
@@ -227,10 +236,42 @@ class Simulation:
                     for m in range(1, len(legs)):
                         acc += seg[m - 1]
                         fracs.append(acc / total if total > 0 else m / len(traversed))
+                prev = agents_pos_now[name]
                 for wp, frac in zip(traversed, fracs):
-                    self.actual_paths[name].append(_point_to_dict((self.time - 1) + frac, wp))
+                    if name in self.heading and tuple(wp) != tuple(prev):
+                        self.heading[name] = _ori_between(prev, wp)
+                    prev = wp
+                    self.actual_paths[name].append(
+                        _point_to_dict((self.time - 1) + frac, wp, self.heading.get(name)))
             else:
-                self.actual_paths[name].append(_point_to_dict(self.time, agent_pos_next[name]))
+                self.actual_paths[name].append(
+                    _point_to_dict(self.time, agent_pos_next[name], self.heading.get(name)))
+
+    def _hits_resting(self, graph_map, name, legs, other, rest) -> bool:
+        """Whether ``name`` moving along ``legs`` this tick runs into ``other`` resting at ``rest``.
+        Two balls (or no map to test on): their centres come closer than the two reaches. Otherwise the
+        exact bodies (``graph_map.agent_conflicts``; the mover faces along each leg, the resting one its
+        last heading). Either way, touching from the start counts only if the motion brings the centres
+        closer than they start (moving away is an escape)."""
+        clearance = self.reach[name] + self.reach[other] - 1e-9
+        if clearance <= 0.0:
+            return False
+        d_min = self._polyline_point_dist(legs, rest)
+        d_start = math.dist(legs[0], rest)
+        if d_min >= clearance:
+            return False                                  # not even the bounding balls meet
+        mover, body = self.bodies[name], self.bodies[other]
+        if not (mover.is_ball and body.is_ball) and graph_map is not None:
+            pts = [legs[0]] + [q for p, q in zip(legs, legs[1:]) if tuple(q) != tuple(p)]
+            hits = graph_map.agent_conflicts(
+                [mover, body], [np.array(pts, dtype=float), np.array([rest], dtype=float)],
+                goal_hold=[0.0, float("inf")],
+                heading=[None, None if body.is_ball else _heading_of(self.heading[other])], first_only=True)
+            if not hits:
+                return False
+            if next(iter(hits.values())) > 1e-9:
+                return True                               # it would drive into the resting body
+        return d_min < d_start - 1e-9                     # touching (from the start): only if closing in
 
     @staticmethod
     def _polyline_point_dist(legs, point) -> float:

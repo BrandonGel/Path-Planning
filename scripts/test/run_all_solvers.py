@@ -20,18 +20,14 @@ _repo_root = _Path(__file__).resolve().parents[2]
 if str(_repo_root) not in sys.path:
     sys.path.insert(0, str(_repo_root))
 
-from path_planning.data_generation.dataset_ground_truth_solve import (
-    create_solutions,
-    create_path_parameter_directory,
-)
+from path_planning.multi_agent_planner.mapf_solver import MAPF_SOLVERS, solver_supports
+from path_planning.data_generation.dataset_ground_truth_solve import create_solutions
+from path_planning.data_generation.dataset_util import create_path_parameter_directory
 from path_planning.data_generation.dataset_ground_truth_map import create_maps
 import argparse
-from pathlib import Path
 import yaml
-from multiprocessing import cpu_count
 import random
 import numpy as np
-from math import sqrt   
 from path_planning.utils.util import set_map_config
 from path_planning.data_generation.dataset_util import read_gen_config_from_yaml
 # Set seeding so that randomness is deterministic
@@ -54,15 +50,12 @@ if __name__ == "__main__":
     parser.add_argument("-rmt","--road_map_types",type=str, nargs='+', default=['grid', 'prm', 'cdt','rrg','halton'], help="road map type")
     parser.add_argument("-ar","--agent_radii",nargs='+',type=float, default=[1.0], help="agent radius")
     parser.add_argument("-av","--agent_velocities",nargs='+',type=float, default=[0.0, 1.0], help="agent velocity")
-    parser.add_argument("-mapf","--mapf_solver_names",type=str, nargs='+', default=["cbs", "icbs", "sipp"], choices=["cbs", "icbs", "lacam", "lacam_random", "sipp"], help="MAPF solver to use")
+    parser.add_argument("-mapf","--mapf_solver_names",type=str, nargs='+', default=["cbs", "icbs", "sipp"], choices=list(MAPF_SOLVERS), help="MAPF solver to use")
     parser.add_argument("-c","--num_cases",type=int, default=25, help="number of cases to generate")
     parser.add_argument("-t","--time_limit",type=int, default=60, help="time_limit for the solver in seconds")
     parser.add_argument("-m","--max_iterations",type=int, default=10000, help="max iterations for the solver")
-    parser.add_argument("-ds","--use_discrete_space",action="store_true",help="use discrete space",)
-    parser.add_argument("-dp","--delete_failed_path",action="store_true", help="delete failed path")
     parser.add_argument("-gng","--generate_new_graph",action="store_true", help="generate new graph")
     parser.add_argument("-gbn","--generate_boundary_nodes",action="store_true", help="generate boundary nodes")
-    parser.add_argument("-bns","--boundary_node_spacing",type=float, default=None, help="resample obstacle/map boundary nodes every this many world units (e.g. the resolution for one node per boundary cell); default: corners/junctions only")
     parser.add_argument("-rs","--resolve_solution",dest="resolve_solution",action="store_true", help="resolve solution")
     parser.add_argument("-cfg","--config",type=str, default='config/map.yaml', help="config file")
     parser.add_argument("-gen_config","--gen_config",type=str, default='config/gen.yaml', help="start/goal placement config (uniform | gaussian), see config/gen.yaml")
@@ -79,7 +72,6 @@ if __name__ == "__main__":
     map_config = set_map_config(map_config=map_config,args=args)
     map_config['gen'] = read_gen_config_from_yaml(args.gen_config)
     map_config['generate_boundary_nodes'] = args.generate_boundary_nodes
-    map_config['boundary_node_spacing'] = args.boundary_node_spacing
     num_workers=map_config['num_workers']
     base_path = map_config['path']
 
@@ -123,15 +115,10 @@ if __name__ == "__main__":
             # Phase 2: run each solver on the saved maps
             for solver in mapf_solver_names:
                 for agent_velocity in agent_velocities:
-                    if 'lacam' in solver and (agent_radius != 0.0 or agent_velocity != 0.0 or road_map_type != "grid"):
-                        continue
-                    if (solver == 'cbs' or solver == 'icbs') and agent_velocity != 0.0:
-                        continue
-                    if solver == 'ccbs' and (agent_radius == 0.0 or agent_velocity == 0.0):
+                    if not solver_supports(solver, agent_radius, agent_velocity, road_map_type):
                         continue
                     map_config['mapf_solver_name'] = solver
                     map_config['agent_velocity'] = agent_velocity
-                    map_config['delete_failed_path'] = args.delete_failed_path
                     map_config['solve_till_success'] = True
                     map_config['resolve_solution'] = True
 

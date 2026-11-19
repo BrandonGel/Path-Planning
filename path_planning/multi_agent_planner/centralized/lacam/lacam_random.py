@@ -8,9 +8,8 @@ import numpy as np
 from loguru import logger
 
 from path_planning.common.environment.map.graph_sampler import GraphSampler
-from path_planning.multi_agent_planner.centralized.lacam.utility import Coord,is_valid_coord,get_neighbors,Config,Deadline,Configs
+from path_planning.multi_agent_planner.centralized.lacam.utility import Coord,is_valid_coord,get_neighbors,Config,Deadline,Configs,centre_of,reset_cells
 from path_planning.multi_agent_planner.centralized.lacam.dist_table import DistTable
-from path_planning.multi_agent_planner.centralized.lacam.pibt import PIBT
 
 NO_AGENT: int = np.iinfo(np.int32).max
 """Sentinel value indicating no agent occupies a location."""
@@ -182,6 +181,7 @@ class LaCAM:
         self.max_iterations = max_iterations if max_iterations is not None and max_iterations > 0 else float('inf')
         self.total_time = 0
         self.total_iterations = 0
+        reset_cells(graph_map)                   # the map may have changed since the last solve
         return self._solve()
 
     def _solve(self) -> Configs:
@@ -455,7 +455,9 @@ class LaCAM:
             return
         logger.debug(f"{int(self.deadline.elapsed):4d}ms  {msg}")
 
-    def get_solution_dict(self, solution: Configs) -> dict:
+    def get_solution_dict(self, solution: Configs, names=None) -> dict:
+        """``({agent: [{t, x, y[, z]}, ...]}, solution_info)``: each step at its cell's roadmap node. Agents
+        are keyed by ``names`` (one per agent, in order) when given, else ``agent_<i>``."""
         solution_dict = {}
         solution_info = {}
         solution_info["runtime"] = self.total_time
@@ -463,23 +465,9 @@ class LaCAM:
         solution_info["success"] = True if self.cost < float('inf') else False
         if self.cost < float('inf'):
             for i in range(self.num_agents):
-                solution_dict.update({f'agent_{i}': []})
-                for j in range(len(solution)):
-                    if self.graph_map.dim == 2:
-                        solution_dict[f'agent_{i}'].append({
-                            't': j,
-                            'x': solution[j][i][0],
-                            'y': solution[j][i][1]
-                        })
-                    elif self.graph_map.dim == 3:
-                        solution_dict[f'agent_{i}'].append({
-                            't': j,
-                            'x': solution[j][i][0],
-                            'y': solution[j][i][1],
-                            'z': solution[j][i][2]
-                        })
-                    else:
-                        raise ValueError(f"Invalid dimension: {self.graph_map.dim}")
+                name = names[i] if names is not None else f'agent_{i}'
+                solution_dict[name] = [{'t': j, **dict(zip('xyz', centre_of(self.graph_map, config[i])))}
+                                       for j, config in enumerate(solution)]
         return solution_dict, solution_info
     
     def compute_solution_cost(self, solution: dict) -> int:

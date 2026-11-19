@@ -9,7 +9,7 @@ if str(repo_root) not in sys.path:
 from path_planning.gnn.dataset_prune import read_prune_mechanism_from_yaml
 from path_planning.gnn.dataset_prune import create_gnn_map_tasks
 import argparse
-from path_planning.data_generation.dataset_ground_truth_solve import  create_path_parameter_directory
+from path_planning.data_generation.dataset_util import create_path_parameter_directory
 from path_planning.utils.util import set_map_config
 import yaml
 import warnings
@@ -54,11 +54,8 @@ if __name__ == "__main__":
     with open(args.config, 'r') as f:
         map_config = yaml.load(f,Loader=yaml.FullLoader)
     map_config = set_map_config(map_config=map_config,args=args)
-    num_workers=map_config['num_workers']
     base_path = map_config['path']
-    seed = map_config['seed']
     bounds = map_config['bounds']
-    resolution = map_config['resolution']
     nb_agents = map_config['nb_agents']
 
     # Array with all algorithms to run

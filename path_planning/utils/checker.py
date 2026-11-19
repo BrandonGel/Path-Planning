@@ -1,13 +1,19 @@
 import numpy as np
 
+
+def _xyz(p) -> list:
+    """Position of one schedule entry: ``[x, y]``, or ``[x, y, z]`` in 3D."""
+    return [p["x"], p["y"], p["z"]] if "z" in p else [p["x"], p["y"]]
+
+
 def check_time_anomaly(solution,verbose: bool = True):
-    agents = {agent:np.array([[p['t'],p['x'], p['y']] for p in path] ) for agent,path in solution.items()}
+    agents = {agent:np.array([[p['t']] + _xyz(p) for p in path] ) for agent,path in solution.items()}
     no_anomaly = True
     for agent, path in agents.items():
         t_diff = np.diff(path[:,0], axis=0)
         if np.any(t_diff < 0):
             t_ind = np.where(t_diff < 0)[0][0]
-            print(f"Agent {agent} has negative time difference at t={path[t_ind]['t']:.3f}")
+            print(f"Agent {agent} has negative time difference at t={path[t_ind, 0]:.3f}")
             no_anomaly = False
     if no_anomaly and verbose:
         print("No time anomaly detected")
@@ -15,7 +21,7 @@ def check_time_anomaly(solution,verbose: bool = True):
 
 
 def check_velocity_anomaly(solution,is_using_constant_speed: bool = False,verbose: bool = True  ):
-    agents = {agent:np.array([[p['t'],p['x'], p['y']] for p in path] ) for agent,path in solution.items()}
+    agents = {agent:np.array([[p['t']] + _xyz(p) for p in path] ) for agent,path in solution.items()}
     no_anomaly = True
     for agent, path in agents.items():
         diff = np.diff(path[:,1:], axis=0)
@@ -43,8 +49,8 @@ def check_collision(solution, r, verbose: bool = True):
     Check for collisions between all pairs of agents in a solution, and
     compute the time intervals during which they collide.
 
-    `solution` is a dict: agent_name -> list of {"t", "x", "y"}.
-    Agents are modeled as discs of radius `r`; a collision occurs if
+    `solution` is a dict: agent_name -> list of {"t", "x", "y"} (plus "z" in 3D).
+    Agents are modeled as discs (spheres in 3D) of radius `r`; a collision occurs if
     the distance between two agents is <= 2r at any time.
 
     Returns
@@ -57,7 +63,6 @@ def check_collision(solution, r, verbose: bool = True):
     agents = {name: path for name, path in solution.items()}
     agent_names = list(agents.keys())
     collision_radius_sq = (2 * r) ** 2
-    no_collision = True
     collisions = {}
 
     def get_pos(traj, t):
@@ -66,20 +71,19 @@ def check_collision(solution, r, verbose: bool = True):
         if n == 0:
             return np.array([0.0, 0.0])
         if n == 1:
-            return np.array([traj[0]["x"], traj[0]["y"]])
+            return np.array(_xyz(traj[0]))
         for i in range(n - 1):
             t0 = traj[i]["t"]
             t1 = traj[i + 1]["t"]
             if t0 <= t <= t1:
                 dt = t1 - t0
                 if dt == 0:
-                    return np.array([traj[i]["x"], traj[i]["y"]])
+                    return np.array(_xyz(traj[i]))
                 ratio = (t - t0) / dt
-                x = traj[i]["x"] + ratio * (traj[i + 1]["x"] - traj[i]["x"])
-                y = traj[i]["y"] + ratio * (traj[i + 1]["y"] - traj[i]["y"])
-                return np.array([x, y])
+                a, b = np.array(_xyz(traj[i])), np.array(_xyz(traj[i + 1]))
+                return a + ratio * (b - a)
         # If t is beyond the last timestamp, hold last position
-        return np.array([traj[-1]["x"], traj[-1]["y"]])
+        return np.array(_xyz(traj[-1]))
 
     # Check all unordered pairs of agents
     for i in range(len(agent_names)):
@@ -181,6 +185,88 @@ def check_collision(solution, r, verbose: bool = True):
     return collisions
 
 
+def check_collision_bodies(solution, bodies, graph_map=None, verbose: bool = True):
+    """Exact collision check for agents with bodies (any 2D / 3D shape, with clearance), as every planner
+    with ``Agent`` bodies outputs them (CBS / ICBS, CCBS, SIPP, Neural-ATTF).
+
+    ``solution``: agent -> ``[{"t", "x", "y"[, "z"][, "yaw"[, "pitch"]]}, ...]``, piecewise linear in time.
+    ``bodies``: agent -> ``Agent`` (or its ``to_dict()``, as solution summaries store it). ``graph_map``: a map
+    whose collision sweep to use (optional: the test needs no roadmap; default backend otherwise).
+    A moving body faces along its move; a waiting one faces its entry's ``yaw`` (+ ``pitch`` in 3D,
+    degrees), or counts as its bounding ball when the entry has none or when it turns in place (the next
+    entry, at the same position, has another heading). After its last entry an agent stays where it is
+    until the latest entry of any agent.
+
+    Returns ``{(agent_i, agent_j): first contact time}`` (names sorted), empty when collision-free.
+    """
+    from path_planning.agent import Agent
+    from path_planning.multi_agent_planner.centralized.cbs.data_types import _bounding_ball, _heading_of, _make_ori
+
+    bodies = {name: b if isinstance(b, Agent) else Agent.from_dict(b) for name, b in bodies.items()}
+    names = sorted(solution)
+    t_end = max((float(path[-1]["t"]) for path in solution.values() if path), default=0.0)
+    owner, agents, paths, t0s, holds, heads = [], [], [], [], [], []
+    movers = {}                                     # (body key, speed) -> the body moving at that speed
+    for name in names:
+        body, path = bodies[name], solution[name]
+        for k, p in enumerate(path):
+            a, t = np.asarray(_xyz(p), dtype=float), float(p["t"])
+            q = path[k + 1] if k + 1 < len(path) else None
+            b = None if q is None else np.asarray(_xyz(q), dtype=float)
+            if b is not None and np.any(np.abs(b - a) > 1e-12):           # a move
+                dur = float(q["t"]) - t
+                if dur <= 1e-12:
+                    continue
+                speed = float(np.linalg.norm(b - a)) / dur
+                key = (body.key, speed)
+                if key not in movers:
+                    movers[key] = body.replace(max_speed=speed, max_rotation=None)
+                agents.append(movers[key])
+                paths.append(np.array([a, b]))
+                holds.append(0.0)
+                heads.append(None)
+            else:                                                       # a wait (or the final stay)
+                hold = (t_end if q is None else float(q["t"])) - t
+                if hold <= 1e-12:
+                    continue
+                yaw = p.get("yaw")
+                turning = q is not None and (q.get("yaw"), q.get("pitch")) != (yaw, p.get("pitch"))
+                if body.is_ball or yaw is None or turning:
+                    agents.append(_bounding_ball(body))
+                    heads.append(None)
+                else:
+                    agents.append(body)
+                    heads.append(_heading_of(_make_ori(yaw, (p.get("pitch") or 0.0) if a.size == 3 else None)))
+                paths.append(a[None])
+                holds.append(hold)
+            owner.append(name)
+            t0s.append(t)
+    found = {}
+    if not paths:
+        return found
+    heading = None if all(h is None for h in heads) else heads
+    if graph_map is not None:
+        i, j, t1, _ = graph_map.agent_conflicts(agents, paths, t0=t0s, goal_hold=holds, as_arrays=True,
+                                                heading=heading)
+    else:
+        from path_planning.common.world.collision_checking.collision_sweep import CollisionSweep
+
+        backend = CollisionSweep(dim=paths[0].shape[1])
+        i, j, t1, _ = backend.agent_conflicts(
+            paths, [a.shape for a in agents], [a.max_speed for a in agents], t0s,
+            [a.max_rotation for a in agents], holds, heading, None, False, True, [a.clearance for a in agents])
+    for a, b, w in zip(i.tolist(), j.tolist(), t1.tolist()):
+        if owner[a] != owner[b]:
+            key = tuple(sorted((owner[a], owner[b])))
+            found[key] = min(w, found.get(key, float("inf")))
+    if verbose:
+        for (a, b), w in sorted(found.items(), key=lambda kv: kv[1]):
+            print(f"Collision between {a} and {b} from t={w:.3f}")
+        if not found:
+            print("No collision detected")
+    return found
+
+
 def check_solution(solution):
     check_time_anomaly(solution)
     check_velocity_anomaly(solution)
@@ -212,9 +298,11 @@ def is_conflict_free(solution, r, verbose: bool = False):
 
 def check_solution_full(
     solution,
-    r: float,
+    r: float = 0.0,
     is_using_constant_speed: bool = False,
     verbose: bool = True,
+    bodies: dict | None = None,
+    graph_map=None,
 ):
     """
     Run all anomaly checks (time, velocity, collision) in one call.
@@ -224,7 +312,10 @@ def check_solution_full(
     solution : dict
         Mapping agent_name -> list of waypoints {"t", "x", "y"}.
     r : float
-        Agent radius.
+        Agent radius (discs), used when ``bodies`` is not given.
+    bodies : dict, optional
+        agent -> ``Agent`` (or its ``to_dict()``): the exact check (:func:`check_collision_bodies`), with
+        ``graph_map``'s sweep when given.
     is_using_constant_speed : bool, optional
         Whether to enforce constant speed in `check_velocity_anomaly`.
     verbose : bool, optional
@@ -236,7 +327,7 @@ def check_solution_full(
         {
             "no_time_anomaly": bool,
             "no_velocity_anomaly": bool,
-            "collisions": dict,  # as returned by check_collision
+            "collisions": dict,  # as returned by check_collision / check_collision_bodies
         }
     """
     no_time_anomaly = check_time_anomaly(solution, verbose=verbose)
@@ -245,7 +336,10 @@ def check_solution_full(
         is_using_constant_speed=is_using_constant_speed,
         verbose=verbose,
     )
-    collisions = check_collision(solution, r, verbose=verbose)
+    if bodies is not None:
+        collisions = check_collision_bodies(solution, bodies, graph_map, verbose=verbose)
+    else:
+        collisions = check_collision(solution, r, verbose=verbose)
 
     return {
         "no_time_anomaly": no_time_anomaly,

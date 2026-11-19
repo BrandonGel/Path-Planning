@@ -146,7 +146,7 @@ class Visualizer2D(BaseVisualizer2D):
             )
 
         if show_esdf:   # draw esdf hotmap
-            self.ax.imshow(
+            mappable=self.ax.imshow(
                 np.transpose(grid_map.esdf),
                 cmap="jet",
                 origin="lower",
@@ -155,7 +155,7 @@ class Visualizer2D(BaseVisualizer2D):
                 alpha=alpha_esdf,
                 zorder=self.zorder['esdf'],
             )
-            self.ax.colorbar(label="ESDF distance")
+            self.fig.colorbar(mappable,label="ESDF distance")
             
         if equal: 
             self.ax.axis("equal")

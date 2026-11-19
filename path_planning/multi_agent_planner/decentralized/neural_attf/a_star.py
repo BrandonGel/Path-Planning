@@ -5,6 +5,7 @@ author: Giacomo Lodigiani (@Lodz97)
 """
 import heapq
 from itertools import count
+#TODO: Add support for guidance cost
 
 class AStar:
     def __init__(self, env, max_iterations= -1):

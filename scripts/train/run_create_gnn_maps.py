@@ -16,7 +16,6 @@ import logging
 import torch
 import os
 from path_planning.data_generation.dataset_util import create_path_parameter_directory
-from path_planning.gnn.dataset_prune import get_gnn_paths
 # Suppress Python warnings
 warnings.filterwarnings('ignore', category=UserWarning, module='torch.fx.experimental.symbolic_shapes')
 warnings.filterwarnings('ignore', message='.*_maybe_guard_rel.*')
@@ -56,28 +55,17 @@ if __name__ == "__main__":
         map_config = yaml.load(f,Loader=yaml.FullLoader)
     map_config = set_map_config(map_config=map_config,args=args)
     base_path = map_config['path']
-    seed = map_config['seed']
     bounds = map_config['bounds']
     resolution = map_config['resolution']
     nb_agents = map_config['nb_agents']
     nb_obstacles = map_config['nb_obstacles']
-    generate_new_graph = map_config['generate_new_graph']
     agent_radius = map_config['agent_radius']
-    num_workers = map_config['num_workers']
-    verbose = map_config['verbose']
 
     prune_mechanism = read_prune_mechanism_from_yaml(args.prune_config)
 
     # Create/resolve the map folder that contains case_*/sample/... for the config.
     path = create_path_parameter_directory(base_path, map_config, dump_config=False)
     assert os.path.exists(path), f"Path does not exist: {path}"
-
-    _, _, _, gnn_folder_name = get_gnn_paths(
-        run_folder=args.run_folder,
-        checkpoint_path=args.checkpoint_path,
-        config_path=args.train_config,
-        run_id=args.run_id,
-    )
 
     map_config = {
         "bounds": bounds,
@@ -97,5 +85,6 @@ if __name__ == "__main__":
         agent_velocity=0.0,
         show=False,
         verbose=True,
+        folder_key="sample",          # the training dataset's sampled graphs (the test copy prunes "map")
     )
     create_gnn_map_tasks(tasks, map_config, run_folder=args.run_folder, checkpoint_path=args.checkpoint_path, config_path=args.train_config, run_id=args.run_id, verbose=args.verbose, prune_mechanism=prune_mechanism,batch_size=args.batch_size)

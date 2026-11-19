@@ -24,6 +24,7 @@ import matplotlib
 matplotlib.use("Agg")
 from tqdm import tqdm
 
+from path_planning.cluster.cluster_map import CLUSTER_METHODS, get_cluster_graph_name
 from path_planning.data_generation.dataset_util import (
     create_path_parameter_directory,
     generate_base_case_path,
@@ -39,15 +40,9 @@ from path_planning.data_generation.dataset_visualize_ground_truth import (
     load_and_visualize_case,
 )
 
-METHOD_GRAPHS = {
-    "ctopprm": "graph_map_ctopprm.pkl",
-    "kmeans": "graph_map_kmeans.pkl",
-    "em": "graph_map_em.pkl",
-    "gnn": "graph_map_gnn.pkl",
-    # Full source roadmap, no clustering: solutions are the un-suffixed
-    # solution_graph_map_velocity*.yaml from run_all_solvers.py.
-    "none": "graph_map.pkl",
-}
+# "none": the full source roadmap, no clustering; its solutions are the un-suffixed solution_graph_map_velocity*.yaml.
+METHOD_GRAPHS = {**{m: get_cluster_graph_name(m) for m in CLUSTER_METHODS},
+                 "gnn": "graph_map_gnn.pkl", "none": "graph_map.pkl"}
 
 
 def worker(task):
@@ -72,7 +67,7 @@ if __name__ == "__main__":
     parser.add_argument("-r","--resolution",type=float, default=1.0)
     parser.add_argument("-ar","--agent_radius",type=float, default=0.5)
     parser.add_argument("-rmt","--road_map_types",type=str, nargs='+', default=['grid', 'prm', 'cdt'])
-    parser.add_argument("-cmm","--cluster_methods",type=str, nargs='+', default=['none'], choices=['none'] + list(METHOD_GRAPHS))
+    parser.add_argument("-cmm","--cluster_methods",type=str, nargs='+', default=['none'], choices=list(METHOD_GRAPHS))
     parser.add_argument("-solver","--mapf_solver_name",type=str, default="sipp")
     parser.add_argument("-av","--agent_velocity",type=float, default=1.0)
     parser.add_argument("-cm","--case_mode",type=str, default="first_n", choices=["all", "first_n", "specific"])

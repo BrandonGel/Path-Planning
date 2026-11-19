@@ -3,17 +3,12 @@
 import unittest
 import numpy as np
 
-try:
-    from path_planning.common.environment.map.graph_sampler import GraphSampler
-    from path_planning.utils.util import (
-        agents_yaml_to_roadmap_frame,
-        obstacles_world_to_grid,
-        validate_obstacle_map_config,
-    )
-
-    _HAS_SAMPLER = True
-except ModuleNotFoundError:
-    _HAS_SAMPLER = False
+from path_planning.common.environment.map.graph_sampler import GraphSampler
+from path_planning.utils.util import (
+    agents_yaml_to_roadmap_frame,
+    obstacles_world_to_grid,
+    validate_obstacle_map_config,
+)
 
 
 def _discrete_cell_from_world_list(m, world_list):
@@ -22,7 +17,6 @@ def _discrete_cell_from_world_list(m, world_list):
     return tuple(int(x) for x in np.asarray(t).reshape(-1))
 
 
-@unittest.skipUnless(_HAS_SAMPLER, "GraphSampler/CGAL not available in this environment")
 class TestCoordinateContract(unittest.TestCase):
     def test_agents_yaml_to_grid_roundtrip_2d(self):
         bounds = [[0.0, 8.0], [0.0, 8.0]]
@@ -48,10 +42,15 @@ class TestCoordinateContract(unittest.TestCase):
             }
         ]
         rt = agents_yaml_to_roadmap_frame(m, agents)
-        # map_to_world(cell) and world_to_map are not always exact inverses (e.g. cell
-        # centers); assert the helper matches the grid’s own discrete projection.
-        self.assertEqual(rt[0]["start"], _discrete_cell_from_world_list(m, start_list))
-        self.assertEqual(rt[0]["goal"], _discrete_cell_from_world_list(m, goal_list))
+        # The helper snaps world coordinates to the grid's discrete cell and then
+        # returns that cell's CENTRE in world units (map_to_world), which is the
+        # frame discrete roadmap nodes are stored in.
+        def center_world(world_list):
+            cell = _discrete_cell_from_world_list(m, world_list)
+            return tuple(float(v) for v in m.map_to_world(cell))
+
+        self.assertEqual(rt[0]["start"], center_world(start_list))
+        self.assertEqual(rt[0]["goal"], center_world(goal_list))
 
     def test_resolution_scaling_dimensions(self):
         bounds = [[0.0, 32.0], [0.0, 32.0]]
@@ -123,7 +122,3 @@ class TestCoordinateContract(unittest.TestCase):
         validate_obstacle_map_config(m, [[0.0, 0.5], [1.0, 1.5]], obs_size=0.5)
         with self.assertRaises(ValueError):
             validate_obstacle_map_config(m, [[0.3, 0.0]], obs_size=0.5)
-
-
-if __name__ == "__main__":
-    unittest.main()

@@ -8,7 +8,7 @@ Dijkstra) instead of Euclidean space, with two kinds of centers:
   endpoint seeds.
 - FREE centers: additional clusters whose center tracks the mean of the
   member node coordinates. The continuous centroid is kept when it lies in
-  free space (boundary-inclusive ``GraphSampler.point_expandable``);
+  free space (``GraphSampler.in_collision``);
   otherwise the center falls back to the member node nearest the mean, so a
   center never sits inside an obstacle.
 
@@ -29,7 +29,6 @@ from typing import List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
-from path_planning.common.environment.node import Node
 
 logger = logging.getLogger(__name__)
 
@@ -39,16 +38,52 @@ _INIT_MODES = ("kpp", "farthest")
 
 
 # ---------------------------------------------------------------------------
-# Graph helpers (local ports of CTopPRM's, kept here to avoid an import
-# cycle: CTopPRMpy.ctopprm imports GraphKMeans for clustering="kmeans")
+# Graph helpers (shared with GraphEM, CTopPRM and the embeddings)
 # ---------------------------------------------------------------------------
+
+def symmetric_roadmap_edges(graph_map) -> Tuple[int, np.ndarray, np.ndarray, np.ndarray]:
+    """``(n, u, v, w)``: the roadmap of ``graph_map`` as undirected edges, each
+    listed in both directions, sorted by ``(u, v)``. k-NN roadmaps can be
+    asymmetric (j a neighbour of i but not i of j) and can repeat an edge; the
+    smallest weight is kept. Self-loops are dropped. Read straight from the
+    roadmap's CSR adjacency (``graph_map.road_map`` rebuilds every neighbour
+    list on each access)."""
+    adj = graph_map.roadmap.adj
+    n = adj.shape[0]
+    rows = np.repeat(np.arange(n, dtype=np.int64), np.diff(adj.indptr))
+    cols = np.asarray(adj.indices, dtype=np.int64)
+    data = np.asarray(adj.data, dtype=np.float64)
+    keep = rows != cols
+    u = np.concatenate([rows[keep], cols[keep]])
+    v = np.concatenate([cols[keep], rows[keep]])
+    w = np.concatenate([data[keep], data[keep]])
+    order = np.lexsort((w, v, u))
+    u, v, w = u[order], v[order], w[order]
+    first = np.ones(len(u), dtype=bool)
+    first[1:] = (u[1:] != u[:-1]) | (v[1:] != v[:-1])
+    return n, u[first], v[first], w[first]
+
+
+def roadmap_adjacency(graph_map) -> List[List[Tuple[int, float]]]:
+    """Undirected adjacency lists ``adj[u] = [(v, w), ...]`` (sorted by ``v``)
+    of ``graph_map``'s roadmap; see ``symmetric_roadmap_edges``."""
+    n, u, v, w = symmetric_roadmap_edges(graph_map)
+    bounds = np.searchsorted(u, np.arange(n + 1))
+    v, w = v.tolist(), w.tolist()
+    return [list(zip(v[a:b], w[a:b])) for a, b in zip(bounds[:-1].tolist(), bounds[1:].tolist())]
+
+
+def has_roadmap(graph_map) -> bool:
+    """Whether ``graph_map`` has nodes and a roadmap built over them."""
+    return bool(graph_map.nodes) and graph_map.roadmap.num_nodes > 0
+
 
 def build_symmetric_adjacency(
     points: np.ndarray, road_map, weights=None
 ) -> List[List[Tuple[int, float]]]:
-    """Undirected adjacency from a (possibly directional) ``road_map``.
-
-    Port of ``CTopPRM._build_symmetric_adjacency``: k-NN roadmaps can be
+    """Undirected adjacency from a (possibly directional) ``road_map`` given
+    as nested neighbour lists (``roadmap_adjacency`` does the same for a map's
+    own roadmap, without building the lists). k-NN roadmaps can be
     asymmetric (j in adj[i] without i in adj[j]); every edge is inserted in
     both directions. Weights come from ``weights`` when aligned with
     ``road_map``, else Euclidean distance between the endpoints.
@@ -159,7 +194,7 @@ class GraphKMeans:
     ) -> None:
         if init not in _INIT_MODES:
             raise ValueError(f"init must be one of {_INIT_MODES}, got {init!r}")
-        if not getattr(graph_map, "nodes", None) or not getattr(graph_map, "road_map", None):
+        if not has_roadmap(graph_map):
             raise ValueError(
                 "graph_map has no roadmap; generate one first "
                 "(e.g. generateRandomNodes + generate_roadmap)"
@@ -173,11 +208,7 @@ class GraphKMeans:
         self.init = init
 
         self._points = np.asarray([n.current for n in graph_map.nodes], dtype=float)
-        self._adj = build_symmetric_adjacency(
-            self._points,
-            graph_map.road_map,
-            getattr(graph_map, "road_map_edge_weights", None),
-        )
+        self._adj = roadmap_adjacency(graph_map)
         self._kd_tree = None
 
         n = len(self._points)
@@ -263,17 +294,13 @@ class GraphKMeans:
                 raise IndexError(f"endpoint node index {idx} out of range")
             return idx
         coord = tuple(endpoint)
-        node = Node(coord, None, 0, 0)
-        idx = self.map.node_index_dict.get(node)
+        idx = self.map.pos_index_dict.get(coord)
         if idx is not None:
             return int(idx)
         if self._kd_tree is None:
-            tree = getattr(self.map, "sample_kd_tree", None)
-            if tree is None:
-                from scipy.spatial import cKDTree
+            from scipy.spatial import cKDTree
 
-                tree = cKDTree(self._points)
-            self._kd_tree = tree
+            self._kd_tree = cKDTree(self._points)
         _, nn = self._kd_tree.query(np.asarray(coord, dtype=float))
         return int(nn)
 
@@ -348,7 +375,7 @@ class GraphKMeans:
             )
             new_sources[k] = nearest
             taken.add(nearest)
-            if self.map.point_expandable(tuple(mean)):
+            if not self.map.in_collision(tuple(mean)):
                 new_center = mean
                 snapped[k] = False
             else:

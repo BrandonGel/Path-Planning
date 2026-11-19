@@ -11,10 +11,6 @@ def get_logits(s: torch.Tensor, alpha=1.0, tau=0) -> torch.Tensor:
     return alpha * (s - tau)
 
 
-def get_probability(s: torch.Tensor, alpha=1.0, tau=0) -> torch.Tensor:
-    return torch.sigmoid(get_logits(s, alpha, tau))
-
-
 class LossFunction:
     def __init__(self, loss_config: Dict[str, Any]):
         weights: Dict[str, Any] = {}
@@ -47,12 +43,8 @@ class LossFunction:
                         f"Threshold not found in additional_args for loss type: {loss_type}"
                     )
 
-                thr = extra["threshold"]
-                args = self.loss_args.get(loss_type)
-                if args is None or len(args) == 0:
-                    loss = loss_fcn(thr)
-                else:
-                    loss = loss_fcn(thr, **(args | extra))
+                # The threshold is the loss's own input: passed once, with the loss's configured args.
+                loss = loss_fcn(extra["threshold"], **(self.loss_args.get(loss_type) or {}))
             elif (
                 loss_type not in self.loss_args
                 or self.loss_args[loss_type] is None
@@ -272,28 +264,12 @@ loss_fcn_types = {
 }
 
 
-def get_lost_fcn(loss_type: Optional[Union[str, List[str], dict]] = None) -> Dict[str, Callable]:
-    if loss_type is None:
-        loss_type = ["bce"]
-    if isinstance(loss_type, str):
-        key = loss_type.lower()
+def get_lost_fcn(loss_type: dict) -> Dict[str, Callable]:
+    """The loss functions named by a loss config (``{name: {weight, args}}``), keyed by lower-case name."""
+    out: Dict[str, Callable] = {}
+    for lt in loss_type:
+        key = lt.lower()
         if key not in loss_fcn_types:
-            raise ValueError(f"Invalid loss type: {loss_type}")
-        return {key: loss_fcn_types[key]}
-    if isinstance(loss_type, list):
-        out: Dict[str, Callable] = {}
-        for lt in loss_type:
-            key = lt.lower()
-            if key not in loss_fcn_types:
-                raise ValueError(f"Invalid loss type: {lt}")
-            out[key] = loss_fcn_types[key]
-        return out
-    if isinstance(loss_type, dict):
-        out: Dict[str, Callable] = {}
-        for lt in loss_type.keys():
-            key = lt.lower()
-            if key not in loss_fcn_types:
-                raise ValueError(f"Invalid loss type: {lt}")
-            out[key] = loss_fcn_types[key]
-        return out
-    raise ValueError(f"Invalid loss type: {loss_type}")
+            raise ValueError(f"Invalid loss type: {lt}")
+        out[key] = loss_fcn_types[key]
+    return out

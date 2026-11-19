@@ -26,8 +26,7 @@ from torch_geometric.nn import to_hetero
 
 from path_planning.cluster.cluster_map import (
     _build_setup_sampler,
-    _snap_points,
-    save_cluster_map,
+    install_roadmap,
 )
 from path_planning.cluster.CTopPRMpy.ctopprm import CTopPRM
 from path_planning.cluster.embeddings import (
@@ -37,6 +36,7 @@ from path_planning.cluster.embeddings import (
     embedding_summary,
 )
 from path_planning.common.environment.map.graph_sampler import GraphSampler
+from path_planning.common.environment.roadmap.roadmap_planar import RoadmapPlanar
 from path_planning.data_generation.cluster_dataset_generate import (
     transform_graph_map_to_gnn,
 )
@@ -117,7 +117,7 @@ def sampler_to_cluster_heterodata(map_: GraphSampler, use_boundary_edges: bool =
     / the node one-hot flattened after assembly exactly as GraphDataset does,
     so the sample matches what the checkpoint was trained on.
 
-    Composes transform_graph_map_to_gnn (5-wide one-hot + boundary self-loop
+    Composes transform_graph_map_to_gnn (3-wide one-hot + boundary self-loop
     arrays) with the _load_single_graph normalization convention the encoder
     was trained on: positions divided by max(bounds) with NO origin shift,
     per-relation min-max normalized edge_attr, AddSelfLoops on to/approx
@@ -177,11 +177,6 @@ def ablation_flags_from_config(cfg: dict) -> Tuple[bool, bool, bool, bool]:
     return (bool(dcfg.get("use_boundary_edges", True)), bool(dcfg.get("use_task_edges", True)),
             bool(dcfg.get("use_node_type_features", True)),
             bool(dcfg.get("use_boundary_node_features", True)))
-
-
-def edge_flags_from_config(cfg: dict) -> Tuple[bool, bool]:
-    """(use_boundary_edges, use_task_edges) — see ablation_flags_from_config."""
-    return ablation_flags_from_config(cfg)[:2]
 
 
 def load_cluster_encoder(run_folder, sample_data: HeteroData, epoch: Optional[int] = None,
@@ -272,12 +267,13 @@ def _kmeans_medoids(z: np.ndarray, members: np.ndarray, k: int
 
 def _boundary_distances(map_: GraphSampler) -> np.ndarray:
     """Per-node Euclidean distance to the obstacle boundary (d_i^B), from the
-    CDT boundary extraction — works on maps without registered boundary nodes
-    (the evaluation roots). Includes the outer map walls, matching §6."""
+    planar roadmaps' outline extraction (2D maps) — works on maps without
+    registered boundary nodes (the evaluation roots). Includes the outer map
+    walls, matching §6."""
     from scipy.spatial import cKDTree
 
     pos = np.array([n.current for n in map_.nodes], dtype=float)
-    bnd_pts, _, _ = map_.get_obstacle_boundary()
+    bnd_pts, _, _ = RoadmapPlanar(map_).obstacle_boundary()
     if len(bnd_pts) == 0:
         return np.full(len(pos), np.inf)
     return cKDTree(np.asarray(bnd_pts, dtype=float)).query(pos)[0]
@@ -302,8 +298,8 @@ def gnn_seed_indices(model, data: Optional[HeteroData], map_: GraphSampler, k: i
     obstacle_aware=True enables §15 explicit cluster resolution: nodes are
     partitioned by d_i^B <= boundary_distance_threshold into V_B (obstacle
     region) and V_F (open space), and the K budget is split so V_B gets
-    obstacle_cluster_budget of it (default: twice its population share,
-    capped at 0.9) — more retained resolution near obstacles, coarser open
+    obstacle_cluster_budget of it (default: 1.5x its population share,
+    capped at 0.75) — more retained resolution near obstacles, coarser open
     space. Returns (medoid node indices, timing dict, latent arrays:
     'embeddings' (num_source_nodes, dim) row-aligned with map_.nodes, and
     'centroids' (len(seeds), dim) with row j the K-means centre of seed j).
@@ -434,16 +430,7 @@ def build_gnn_cluster_map(source_map: GraphSampler, agents: List[dict], model,
     fresh = _build_setup_sampler(source_map)
     fresh.set_start(starts)
     fresh.set_goal(goals)
-    nodes = fresh.generate_custom_nodes(points, filter_points=False)
-    expected = _snap_points(fresh, points)
-    got = np.asarray([n.current for n in nodes[: len(points)]], dtype=float)
-    if len(nodes) < len(points) or not np.allclose(got, expected, atol=1e-9):
-        raise RuntimeError(
-            f"{embedding_method}: distilled points rejected by point_expandable "
-            f"({len(nodes)} nodes for {len(points)} points); refusing to save "
-            f"a roadmap with misaligned edge indices"
-        )
-    fresh.generate_custom_roadmap(edges)
+    install_roadmap(fresh, points, edges)
     t_build = time.perf_counter()
 
     stats = {
@@ -538,7 +525,7 @@ def create_gnn_cluster_maps(path: Path, num_cases: int, config: Dict,
                 continue
             t0 = time.perf_counter()
             source_map = create_map(inpt, graph_file=source_graph_file, verbose=False,
-                                    args={"use_constraint_sweep": False})
+                                    args={"use_collision_sweep": False})
             t_load = time.perf_counter() - t0
             if is_gnn and model is None:
                 sample = sampler_to_cluster_heterodata(source_map, use_boundary_edges, use_task_edges,
@@ -563,7 +550,7 @@ def create_gnn_cluster_maps(path: Path, num_cases: int, config: Dict,
                 embedding_cache=embedding_cache, drop_disconnected=drop_disconnected,
                 full_spectrum=full_spectrum)
             t_save0 = time.perf_counter()
-            save_cluster_map(cluster_map, graph_file)
+            cluster_map.save_graph_sampler(graph_file)
             if save_embeddings:
                 embedding_file = cluster_dir / gnn_embedding_name(method_name)
                 centroid_file = cluster_dir / gnn_centroid_name(method_name)
@@ -626,12 +613,10 @@ def summarize_gnn_cluster_runtimes(path: Path, num_cases: int, config: Dict,
             continue
         with open(runtime_file, "r") as f:
             data = yaml.safe_load(f) or {}
-        if "runtime" not in data:
-            continue
         runtime = float(data["runtime"])
         cases[f"case_{case_id}"] = round(runtime, 6)
         runtimes.append(runtime)
-        breakdowns.append(data.get("runtime_breakdown", {}) or {})
+        breakdowns.append(data["runtime_breakdown"])
     if output_file is None:
         output_file = path / "gnn_cluster_runtime.yaml"
     output_file = Path(output_file)
