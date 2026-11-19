@@ -1,6 +1,6 @@
 [project]
 name = "path-planning"
-version = "0.1.0"
+version = "2.0.0"
 description = ""
 authors = [
     {name = "Brandon Ho",email = "bho36@gatech.edu"}

@@ -135,3 +135,89 @@ class TestSippShapes(unittest.TestCase):
             SippPlanner(self.m, [{**agents_of(MOVES[:1])[0], "agent": DISC}, agents_of(MOVES[1:2])[0] | {"name": "a1"}])
         with self.assertRaises(TypeError):                            # the body comes from the agent dicts
             SippPlanner(self.m, agents_of(MOVES[:1]), radius=0.5, velocity=1.0)
+
+
+class TestSippTableBuild(unittest.TestCase):
+    """A new ``SippGraph`` blocks its dynamic obstacles in one pass; ``init_intervals`` blocks them piece
+    by piece. Both must give the same table."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.m = grid_map()
+
+    def obstacles(self, body, count=6, steps=25):
+        """Random walks with waits, time-sampled at uneven steps (so some moves are slower than the body)."""
+        rng = random.Random(3)
+        nodes = self.m.nodes
+        out = {}
+        for k in range(count):
+            u, t = rng.randrange(len(nodes)), rng.choice([0.0, 0.5])
+            rows = [{"t": t, "x": nodes[u].current[0], "y": nodes[u].current[1]}]
+            for _ in range(steps):
+                if rng.random() < 0.7:
+                    u = rng.choice([n for n in self.m.road_map[u]])
+                t += rng.choice([1.0, 1.0, 1.5])
+                rows.append({"t": t, "x": nodes[u].current[0], "y": nodes[u].current[1]})
+            out[f"o{k}"] = {"agent": body, "schedule": rows} if k % 2 else rows
+        return out
+
+    def array_rows(self, graph, speed):
+        """The interval lists the compiled search reads: ``(per vertex, per edge)``."""
+        data = graph.arrays(speed, lambda length: length / speed)
+        nd_lo, nd_hi, nd_n, ed_lo, ed_hi, ed_n = data[5:]
+        cut = lambda lo, hi, n, count: [(lo[k, :n[k]].tolist(), hi[k, :n[k]].tolist()) for k in range(count)]
+        return cut(nd_lo, nd_hi, nd_n, len(self.m.nodes)), cut(ed_lo, ed_hi, ed_n, len(ed_n))
+
+    @staticmethod
+    def records(graph):
+        return {key: (list(r) if isinstance(key[0], tuple) else r.interval_list) for key, r in graph.sipp_graph.items()}
+
+    def same_tables(self, agent, **options):
+        from path_planning.multi_agent_planner.centralized.sipp.graph_generation import SippGraph
+        obstacles = self.obstacles(agent)
+        horizon = {"o0": 3.0, "o1": None}
+        one_pass = SippGraph(self.m, obstacles, agent, obstacle_horizon=horizon, **options)
+        by_piece = SippGraph(self.m, None, agent, obstacle_horizon=horizon, **options)
+        by_piece.init_intervals(obstacles)
+        self.assertEqual(list(one_pass.sipp_graph), list(by_piece.sipp_graph))
+        expected = self.records(by_piece)
+        self.assertEqual(self.records(one_pass), expected)
+        self.assertGreater(sum(bool(r) for key, r in expected.items() if isinstance(key[0], tuple)), 50)
+        starts = lambda graph: [type(r.interval_list[0][0]) for r in graph._nobj[:len(self.m.nodes)] if r.interval_list]
+        self.assertEqual(starts(one_pass), starts(by_piece))        # the start of time stays the int 0
+        self.assertEqual(one_pass._pieces, by_piece._pieces)
+        self.assertEqual(one_pass._blockers, by_piece._blockers)
+        # The arrays the compiled search reads come straight from the one pass: no record is made for them.
+        fresh = SippGraph(self.m, obstacles, agent, obstacle_horizon=horizon, **options)
+        self.assertEqual(self.array_rows(fresh, agent.max_speed), self.array_rows(by_piece, agent.max_speed))
+        self.assertEqual(len(dict.keys(fresh.sipp_graph)), 0)
+
+    def test_discs(self):
+        self.same_tables(Agent.disc(0.35, 1.0))
+
+    def test_rectangles_per_heading(self):
+        self.same_tables(Agent(Rectangle(2.0, 0.8), 1.0), exact_vertices=True)
+
+    def test_a_later_plan_is_blocked_on_top(self):
+        """Blocking after the one pass (a committed plan) changes the records and the arrays alike."""
+        from path_planning.multi_agent_planner.centralized.sipp.graph_generation import SippGraph, State
+        agent = Agent.disc(0.35, 1.0)
+        obstacles = self.obstacles(agent)
+        plan = [State((1.5, 3.5), 0.0), State((2.5, 3.5), 1.0), State((3.5, 3.5), 2.0)]
+        costs = [(0.0, 1.0), (0.0, 1.0), (0, 0)]
+        one_pass, by_piece = SippGraph(self.m, obstacles, agent), SippGraph(self.m, None, agent)
+        by_piece.init_intervals(obstacles)
+        for graph in (one_pass, by_piece):
+            self.array_rows(graph, 1.0)                     # (the arrays exist before the plan is blocked)
+            graph.update_intervals([plan], [costs], ["a"])
+        self.assertEqual(self.array_rows(one_pass, 1.0), self.array_rows(by_piece, 1.0))
+        self.assertEqual(self.records(one_pass), self.records(by_piece))
+
+    def test_swaps_are_indexed_for_agents_without_a_body(self):
+        """An agent without a body checks swaps against the obstacles' steps, also when an obstacle has a body."""
+        from path_planning.multi_agent_planner.centralized.sipp.graph_generation import SippGraph
+        step = [{"t": 0.0, "x": 1.5, "y": 3.5}, {"t": 1.0, "x": 2.5, "y": 3.5}]
+        expected = {((1.5, 3.5), (2.5, 3.5), 0.0, 1.0)}
+        self.assertEqual(SippGraph(self.m, {"o": step}).swaps, expected)
+        self.assertEqual(SippGraph(self.m, {"o": {"agent": Agent.disc(0.35, 1.0), "schedule": step}}).swaps, expected)
+        self.assertEqual(SippGraph(self.m, {"o": step}, Agent.disc(0.35, 1.0)).swaps, set())
